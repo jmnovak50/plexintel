@@ -19,3 +19,4 @@ frontend/build/
 # install-specific or generated data
 *.csv
 feature_importance.*
+plexenv/
