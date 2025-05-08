@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Python junk
+__pycache__/
+*.py[cod]
+*.log
+plexenv/           # this is your venv, so yes
+
+# Node junk
+frontend/node_modules/
+frontend/dist/     # you had a typo: "frontemd"
+frontend/build/
+
+# Editor junk
+.vscode/
+.DS_Store
+
+# install-specific or generated data
+*.csv
+feature_importance.*
