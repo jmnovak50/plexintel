@@ -1,6 +1,8 @@
 // src/components/Recommendations.tsx
 import { useEffect, useState } from 'react';
 
+console.log("🔥 Recommendations.tsx loaded");
+
 interface Recommendation {
   friendly_name: string;
   media_type: string;
@@ -22,11 +24,47 @@ export default function Recommendations() {
   const [darkMode, setDarkMode] = useState(false);
   const [mediaTypeFilter, setMediaTypeFilter] = useState('');
   const [minScore, setMinScore] = useState(0);
+  const [sortOrder, setSortOrder] = useState<Array<{ column: keyof Recommendation; direction: 'asc' | 'desc' }>>([]);
+  const [plexUser, setPlexUser] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
-  const filteredRecs = recs.filter((rec) => {
+  useEffect(() => {
+    const baseUrl = window.location.origin;
+    fetch(`${baseUrl}/api/recommendations`, {
+      credentials: 'include'
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        setRecs(data.recommendations);
+        setPlexUser(data.username);
+        setLastUpdated(data.last_updated);
+      });
+  }, []);
+
+  const handleSort = (column: keyof Recommendation, shiftKey = false) => {
+    setSortOrder((prev) => {
+      if (!Array.isArray(prev)) return [];
+      const existing = prev.find((s) => s?.column === column);
+
+      if (existing) {
+        const toggled = prev.map((s) =>
+          s.column === column ? { ...s, direction: (s.direction === 'asc' ? 'desc' : 'asc') as 'asc' | 'desc' } : s
+        );
+        return toggled;
+      } else {
+        const newSort = { column: column as keyof Recommendation, direction: 'asc' as 'asc' | 'desc' };
+        return shiftKey ? [...prev, newSort] : [newSort];
+      }
+    });
+  };
+
+  console.log("recs:", recs.slice(0, 5));
+  console.log("sortOrder:", sortOrder);
+
+  const filteredRecs = [...recs].filter((rec: Recommendation) => {
     const score = rec.predicted_probability * 100;
     const searchLower = search.toLowerCase();
-  
+
     return (
       (!mediaTypeFilter || rec.media_type === mediaTypeFilter) &&
       (!themeFilter || rec.semantic_themes?.toLowerCase().includes(themeFilter.toLowerCase())) &&
@@ -39,21 +77,44 @@ export default function Recommendations() {
       )
     );
   });
+
+  if (sortOrder.length > 0) {
+    filteredRecs.sort((a: Recommendation, b: Recommendation) => {
+      for (const { column, direction } of sortOrder) {
+        const aVal = a[column];
+        const bVal = b[column];
+
+        if (aVal == null || bVal == null) continue;
+
+        if (aVal == null) return 1;
+        if (bVal == null) return -1;
+
+        if (column === 'season_number' && aVal === bVal) {
+          const aEp = a.episode_number ?? 0;
+          const bEp = b.episode_number ?? 0;
+          const result = direction === 'asc' ? aEp - bEp : bEp - aEp;
+          if (result !== 0) return result;
+        }
+
+        if (typeof aVal === 'string' && typeof bVal === 'string') {
+          const result = direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+          if (result !== 0) return result;
+        } else if (typeof aVal === 'number' && typeof bVal === 'number') {
+          const result = direction === 'asc' ? aVal - bVal : bVal - aVal;
+          if (result !== 0) return result;
+        }
+      }
+      return 0;
+    });
+  }
+
+  const getSortArrow = (column: keyof Recommendation) => {
+    console.log("🧪 inside getSortArrow with column:", column);
+    const current = sortOrder.find((s) => s && s.column === column);
+    return current ? (current.direction === 'asc' ? '↑' : '↓') : '';
+  };
   
-  const [plexUser, setPlexUser] = useState<string | null>(null);
-
-  useEffect(() => {
-    const baseUrl = window.location.origin;
-    fetch(`${baseUrl}/api/recommendations`, {
-      credentials: 'include'  // 🔑 This ensures cookies (session) are sent!
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setRecs(data.recommendations);
-        setPlexUser(data.username);
-      });
-  }, []);
-
+  
   return (
     <div className={`p-4 max-w-7xl mx-auto ${darkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
       <h1 className="text-3xl font-bold mb-2">🎬 Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}</h1>
@@ -107,12 +168,24 @@ export default function Recommendations() {
           <thead>
             <tr className="text-left text-gray-600 text-sm border-b bg-gray-100">
               <th className="px-4 py-3 border-r border-gray-200">Type</th>
-              <th className="px-4 py-3 border-r border-gray-200">Title</th>
+              <th className="px-4 py-3 border-r border-gray-200 cursor-pointer select-none" onClick={(e) => handleSort('title', e.shiftKey)}>
+                Title {getSortArrow('title')}
+              </th>
               <th className="px-4 py-3 border-r border-gray-200">Show</th>
-              <th className="px-4 py-3 border-r border-gray-200">Year</th>
+              <th className="px-4 py-3 border-r border-gray-200 cursor-pointer select-none" onClick={(e) => handleSort('season_number', e.shiftKey)}>
+                Season {getSortArrow('season_number')}
+              </th>
+              <th className="px-4 py-3 border-r border-gray-200 cursor-pointer select-none" onClick={(e) => handleSort('episode_number', e.shiftKey)}>
+                Episode {getSortArrow('episode_number')}
+              </th>
+              <th className="px-4 py-3 border-r border-gray-200 cursor-pointer select-none" onClick={(e) => handleSort('year', e.shiftKey)}>
+                Year {getSortArrow('year')}
+              </th>
               <th className="px-4 py-3 border-r border-gray-200">Genres</th>
               <th className="px-4 py-3 border-r border-gray-200">Why this?</th>
-              <th className="px-4 py-3">Score</th>
+              <th className="px-4 py-3 cursor-pointer select-none" onClick={(e) => handleSort('predicted_probability', e.shiftKey)}>
+                Score {getSortArrow('predicted_probability')}
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -123,9 +196,9 @@ export default function Recommendations() {
               >
                 <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{rec.media_type}</td>
                 <td className="px-4 py-3 font-medium text-gray-900 border-r border-gray-200">{rec.title}</td>
-                <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">
-                  {rec.show_title ? `${rec.show_title} (S${rec.season_number}E${rec.episode_number})` : '—'}
-                </td>
+                <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-200">{rec.show_title || '—'}</td>
+                <td className="px-4 py-3 text-sm text-gray-600 border-r border-gray-200">{rec.season_number ?? '—'}</td>
+                <td className="px-4 py-3 text-sm text-gray-600 border-r border-gray-200">{rec.episode_number ?? '—'}</td>
                 <td className="px-4 py-3 text-sm text-gray-600 border-r border-gray-200">{rec.year}</td>
                 <td className="px-4 py-3 text-sm text-gray-600 border-r border-gray-200">{rec.genres || '—'}</td>
                 <td className="px-4 py-3 border-r border-gray-200">
@@ -157,6 +230,12 @@ export default function Recommendations() {
           </tbody>
         </table>
       </div>
+
+      {lastUpdated && (
+        <div className="mt-4 text-sm text-gray-500 text-right">
+          Last updated: {new Date(lastUpdated).toLocaleString()}
+        </div>
+      )}
     </div>
   );
 }

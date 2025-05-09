@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, HTTPException
 import requests
 import os
 import psycopg2
+from psycopg2.extras import RealDictCursor
 import pandas as pd
 from pgvector.psycopg2 import register_vector
 from dotenv import load_dotenv
@@ -48,10 +49,10 @@ def get_recommendations(request: Request):
     try:
         conn = psycopg2.connect(DB_URL)
         register_vector(conn)
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
         cur.execute("""
-            SELECT friendly_name, rating_key, title, predicted_probability, semantic_themes, year, genres, show_title, season_number, episode_number, media_type
+            SELECT friendly_name, rating_key, title, predicted_probability, semantic_themes, year, genres, show_title, season_number, episode_number, media_type, scored_at
             FROM expanded_recs_w_label_v
             WHERE username = %s
             ORDER BY predicted_probability DESC
@@ -62,7 +63,11 @@ def get_recommendations(request: Request):
         colnames = [desc[0] for desc in cur.description]
         result = [dict(zip(colnames, row)) for row in rows]
 
-        return {"username": plex_username, "recommendations": result}
+        return {
+            "username": plex_username,
+            "recommendations": rows,  # your recs list
+            "last_updated": rows[0]["scored_at"] if rows else None
+}
 
     except Exception as e:
         print("💥 Database error:", str(e))
