@@ -1,24 +1,21 @@
-# Logs
-logs
+# Secrets
+.env
+
+# Python junk
+__pycache__/
+*.py[cod]
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+plexenv/           # this is your venv, so yes
 
-node_modules
-dist
-dist-ssr
-*.local
+# Node junk
+frontend/node_modules/
+frontend/dist/     # you had a typo: "frontemd"
+frontend/build/
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# Editor junk
+.vscode/
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+
+# install-specific or generated data
+*.csv
+feature_importance.*
