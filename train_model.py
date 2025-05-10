@@ -11,7 +11,7 @@ import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # Configs (adapt this to your actual setup)
-DB_URL = os.getenv("DATABASE_URL", "postgresql://jmnovak:brigid@localhost:5432/plexintel")
+DB_URL = os.getenv("DATABASE_URL")
 
 def load_training_data():
     engine = create_engine(DB_URL)
