@@ -6,9 +6,11 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 
-from api.routes import auth_routes  # 👈 ADD THIS
+from api.routes import auth_routes
 from api.routes import plex_oauth_routes
-from api.routes import recommendation_routes
+from api.routes import feedback_routes  # <- wherever your route is
+from api.routes.recommendation_routes import router as rec_router
+from api.routes.public_recommendation_routes import router as public_router
 
 load_dotenv()
 
@@ -21,10 +23,10 @@ app.add_middleware(
 
 # 👇 ADD THIS TO WIRE UP THE ROUTES
 app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
-
 app.include_router(plex_oauth_routes.router, prefix="/api/auth", tags=["auth"])
-
-app.include_router(recommendation_routes.router, prefix="/api")
+app.include_router(rec_router, prefix="/api")               # ✅ only once
+app.include_router(public_router)                           # ✅ public routes, no prefix
+app.include_router(feedback_routes.router, prefix="/api")
 
 
 # ✅ Define route BEFORE mounting static

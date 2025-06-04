@@ -71,9 +71,18 @@ def get_unwatched_media(username):
         ) d ON d.media_id = m.rating_key
 
         WHERE w.rating_key IS NULL
+        AND NOT EXISTS (
+            SELECT 1
+            FROM user_feedback f
+            WHERE f.username = %s
+            AND f.rating_key = m.rating_key
+            AND f.suppress = true
+  )
     """
-    df = pd.read_sql(query, engine, params=(username, username))
+    df = pd.read_sql(query, engine, params=(username, username, username))
+    print(f"🔍 {len(df)} media items remaining after suppression filter.")
     return df
+
 
 def preprocess_for_scoring(df, feature_names_template):
     def safe_embedding_parse(x):
