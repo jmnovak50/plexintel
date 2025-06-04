@@ -51,27 +51,59 @@ def get_recommendations(request: Request):
         register_vector(conn)
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
+        # Main recommendations query
         cur.execute("""
             SELECT friendly_name, rating_key, title, predicted_probability, semantic_themes, year, genres, show_title, season_number, episode_number, media_type, scored_at
             FROM expanded_recs_w_label_v
             WHERE username = %s
             ORDER BY predicted_probability DESC
         """, (plex_username,))
+        rec_rows = cur.fetchall()
 
+        print(f"📦 Found {len(rec_rows)} recs for {plex_username}")
+
+        # ✅ Fetch feedback before closing the connection
+        cur.execute("""
+            SELECT rating_key
+            FROM user_feedback
+            WHERE username = %s
+        """, (plex_username,))
+        feedback_keys = [row["rating_key"] for row in cur.fetchall()]
+
+        cur.execute("""
+            SELECT code, label, applies_to, suppress_default
+            FROM feedback_reason
+        """)
         rows = cur.fetchall()
-        print(f"📦 Found {len(rows)} recs for {plex_username}")
-        colnames = [desc[0] for desc in cur.description]
-        result = [dict(zip(colnames, row)) for row in rows]
+
+        feedback_options = {"up": [], "down": []}
+        for row in rows:
+            applies_to = row["applies_to"]
+            feedback_options[applies_to].append({
+                "code": row["code"],
+                "label": row["label"]
+            })
+
 
         return {
             "username": plex_username,
-            "recommendations": rows,  # your recs list
-            "last_updated": rows[0]["scored_at"] if rows else None
-}
+            "recommendations": rec_rows,
+            "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
+            "feedback_keys": feedback_keys,
+            "feedback_options": feedback_options
+        }
 
     except Exception as e:
-        print("💥 Database error:", str(e))
+        import traceback
+        print("💥 Database error:", repr(e))
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
     finally:
-        conn.close()
+        if 'cur' in locals() and not cur.closed:
+            cur.close()
+        if 'conn' in locals() and not conn.closed:
+            conn.close()
+
+
 
