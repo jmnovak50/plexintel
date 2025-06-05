@@ -105,7 +105,7 @@ def train_and_evaluate(X, y, sample_weight):
     model = xgb.XGBClassifier(
         objective='binary:logistic',
         eval_metric='aucpr',
-        scale_pos_weight=1.5,  # ✅ Fix: let XGBoost balance by class frequency
+        scale_pos_weight=1.0,  # ✅ Fix: let XGBoost balance by class frequency
         n_estimators=100,
         max_depth=6,
         learning_rate=0.1,
@@ -119,7 +119,7 @@ def train_and_evaluate(X, y, sample_weight):
     model.fit(X_train, y_train, sample_weight=sample_weight_train)
 
     y_prob = model.predict_proba(X_test)[:, 1]
-    y_pred = (y_prob >= 0.6).astype(int)
+    y_pred = (y_prob >= 0.45).astype(int)
     print(classification_report(y_test, y_pred))
 
     cm = confusion_matrix(y_test, y_pred)
