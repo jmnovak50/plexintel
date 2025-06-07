@@ -965,7 +965,7 @@ def generate_watch_embeddings(model):
         friendly_name
     FROM watch_history wh
     JOIN library l ON wh.rating_key = l.rating_key
-    LEFT JOIN watch_embeddings we ON wh.watch_id = we.watch_id
+    LEFT JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id
     WHERE we.watch_id IS NULL
     """)
     rows = cur.fetchall()
