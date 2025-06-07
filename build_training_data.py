@@ -177,6 +177,21 @@ def build_training_data():
     """)
     watched_rows = cur.fetchall()
 
+        # Detect embedding dimension from first row
+    if watched_rows:
+        sample_embedding = parse_embedding(watched_rows[0]["media_embedding"])
+    elif feedback_only_rows:
+        sample_embedding = parse_embedding(feedback_only_rows[0]["media_embedding"])
+    else:
+        sample_embedding = None
+
+    if sample_embedding is not None:
+        embedding_dim = len(sample_embedding)
+        print("🔍 Detected embedding dimension:", embedding_dim)
+    else:
+        print("❌ No embeddings found to detect dimension.")
+        return
+
     print("📥 Fetching feedback-only rows (no watch history)...")
     cur.execute("""
         SELECT
