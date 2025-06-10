@@ -82,7 +82,7 @@ Schedule it with cron to run daily.
 
 Python 3.11+
 
-PostgreSQL 15+ with pgvector
+PostgreSQL 15+ with vector chord
 
 Node.js 18+
 
