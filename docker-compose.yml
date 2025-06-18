@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+#  db:
+#    image: postgres:15
+#    container_name: plexintel-db
+#    environment:
+#      POSTGRES_DB: plexintel
+#      POSTGRES_USER: jmnovak
+#      POSTGRES_PASSWORD: brigid
+#    volumes:
+#      - postgres_data:/var/lib/postgresql/data
+#    ports:
+#      - "5432:5432"
+#
+  backend:
+    build: .
+    container_name: plexintel-backend
+#    depends_on:
+#      - db
+    ports:
+      - "8489:8489"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://jmnovak:brigid@192.168.1.9:5432/plexintel  # override host
+    volumes:
+      - .:/app
+
+volumes:
+  postgres_data:
