@@ -88,7 +88,7 @@ Node.js 18+
 
 Plex Media Server
 
-Tautulli API access
+Tautulli installed anf API access
 
 📂 Project Structure
 

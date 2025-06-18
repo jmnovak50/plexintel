@@ -5,8 +5,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 dotenv_path = os.path.join(script_dir, '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
-SHAP_PRUNE_DAYS = int(os.getenv("SHAP_PRUNE_DAYS", "3"))  # default to 3 if not set
-
+SHAP_PRUNE_DAYS = int(os.getenv("SHAP_PRUNE_DAYS", "3"))
 DB_URL = os.getenv("DATABASE_URL")
 print("DB_URL is:", DB_URL)
 
@@ -14,15 +13,12 @@ import pandas as pd
 import numpy as np
 import joblib
 import psycopg2
-from sqlalchemy import create_engine
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 import ast
 from datetime import datetime
-
 import xgboost as xgb
 from sklearn.preprocessing import MultiLabelBinarizer
-
-import warnings  # 👈 add this
+import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='sklearn')
 
 def get_engine():
@@ -45,31 +41,24 @@ def get_unwatched_media(username):
         JOIN media_embeddings e ON m.rating_key = e.rating_key
         JOIN user_embeddings ue ON ue.username = %s
         LEFT JOIN watch_history w ON m.rating_key = w.rating_key AND w.username = %s
-
-        -- JOIN genre tags
         LEFT JOIN (
             SELECT mg.media_id, STRING_AGG(g.name, ',') AS genre_tags
             FROM media_genres mg
             JOIN genres g ON mg.genre_id = g.id
             GROUP BY mg.media_id
         ) g ON g.media_id = m.rating_key
-
-        -- JOIN actor tags
         LEFT JOIN (
             SELECT ma.media_id, STRING_AGG(a.name, ',') AS actor_tags
             FROM media_actors ma
             JOIN actors a ON ma.actor_id = a.id
             GROUP BY ma.media_id
         ) a ON a.media_id = m.rating_key
-
-        -- JOIN director tags
         LEFT JOIN (
             SELECT md.media_id, STRING_AGG(d.name, ',') AS director_tags
             FROM media_directors md
             JOIN directors d ON md.director_id = d.id
             GROUP BY md.media_id
         ) d ON d.media_id = m.rating_key
-
         WHERE w.rating_key IS NULL
         AND NOT EXISTS (
             SELECT 1
@@ -77,12 +66,11 @@ def get_unwatched_media(username):
             WHERE f.username = %s
             AND f.rating_key = m.rating_key
             AND f.suppress = true
-  )
+    )
     """
     df = pd.read_sql(query, engine, params=(username, username, username))
     print(f"🔍 {len(df)} media items remaining after suppression filter.")
     return df
-
 
 def preprocess_for_scoring(df, feature_names_template):
     def safe_embedding_parse(x):
@@ -102,8 +90,12 @@ def preprocess_for_scoring(df, feature_names_template):
     df['genres'] = df['genre_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
     df['actors'] = df['actor_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
     df['directors'] = df['director_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
+
+    # Parse embeddings before combination
     df['media_embedding'] = df['embedding'].apply(safe_embedding_parse)
     df['user_embedding'] = df['user_embedding'].apply(safe_embedding_parse)
+
+    # Combine user and media embeddings
     df['embedding'] = df.apply(lambda row: np.concatenate([row['media_embedding'], row['user_embedding']]), axis=1)
 
     decade_df = df['year'].apply(get_decade_flags).apply(pd.Series).fillna(0).astype(int)
@@ -131,7 +123,7 @@ def preprocess_for_scoring(df, feature_names_template):
     X = np.hstack((X, genre_features, actor_features, director_features, decade_df.values))
     print("📆 Decade columns added:", list(decade_df.columns))
 
-    return X
+    return X, df
 
 def cosine_similarity_batch(user_embeddings, media_embeddings):
     dot_products = np.einsum('ij,ij->i', user_embeddings, media_embeddings)
@@ -148,16 +140,44 @@ def score_and_store(username, skip_shap=False):
 
     print(f"📊 Fetching unwatched media for {username}...")
     df = get_unwatched_media(username)
+    
     if df.empty:
         print("✅ No unwatched items to score.")
         return
 
     print("🧹 Preprocessing...")
     feature_names = booster.feature_names
-    X = preprocess_for_scoring(df, feature_names)
+    X, df = preprocess_for_scoring(df, feature_names)
+
+    # 🔍 Embedding Debug (NOW SAFE TO CALL)
+    media_embs = np.stack(df['media_embedding'])
+    print("✅ Unique media embeddings:", len(np.unique(media_embs, axis=0)))
+
+    combo_embs = np.stack(df['embedding'])
+    print("✅ Unique combined embeddings:", len(np.unique(combo_embs, axis=0)))
+    
+
+    combo_embs = np.stack(df['embedding'])
+    unique_combo_count = len(np.unique(combo_embs, axis=0))
+    print("🧠 Unique combined user-media embedding vectors:", unique_combo_count)
 
     print("🔮 Scoring predictions...")
-    probabilities = model.predict_proba(X)[:, 1]
+    expected_features = model.feature_names_in_
+
+    # ✅ Ensure X is a DataFrame, even if it was returned as a NumPy array
+    if X.shape[1] != len(expected_features):
+        print(f"⚠️ Feature mismatch: X has {X.shape[1]} columns, expected {len(expected_features)}")
+        if X.shape[1] < len(expected_features):
+            pad_width = len(expected_features) - X.shape[1]
+            print(f"🔧 Padding X with {pad_width} zeros")
+            X = np.hstack([X, np.zeros((X.shape[0], pad_width))])
+        else:
+            print(f"🔧 Trimming X from {X.shape[1]} to {len(expected_features)} columns")
+            X = X[:, :len(expected_features)]
+
+    X_df = pd.DataFrame(X, columns=expected_features)  # <-- always create this
+    probabilities = model.predict_proba(X_df)[:, 1]
+
     df['predicted_probability'] = probabilities
 
     # ✅ SHAP target selection (inside the function!)
@@ -168,10 +188,12 @@ def score_and_store(username, skip_shap=False):
         k = max(min_items, int(len(df) * pct))
         return df.head(k)
 
-    top_tv_df = top_percent(tv_df, pct=0.05, min_items=10)
-    top_movie_df = top_percent(movie_df, pct=0.05, min_items=10)
+    top_tv_df = top_percent(tv_df, pct=0.05, min_items=10).copy()
+    top_movie_df = top_percent(movie_df, pct=0.05, min_items=10).copy()
+
     top_tv_df['rank'] = top_tv_df['predicted_probability'].rank(method='first', ascending=False).astype(int)
     top_movie_df['rank'] = top_movie_df['predicted_probability'].rank(method='first', ascending=False).astype(int)
+
 
     top_df = pd.concat([top_tv_df, top_movie_df])
 
@@ -199,7 +221,16 @@ def score_and_store(username, skip_shap=False):
         print("⏩ Skipping SHAP impact generation.")
         return
     explainer = shap.TreeExplainer(model)
-    X_top = X[top_df.index]
+    top_df = top_df.reset_index(drop=True)
+    X_top = X_df.loc[top_df.index]
+    print("🔍 SHAP input shape:", X_top.shape)
+    print("🔍 Unique rows in input:", np.unique(X_top.to_numpy(), axis=0).shape[0])
+    print("🔍 Sample input rows:")
+    print(X_top.head(3))  # or print(X_top[:3]) if it's a NumPy array
+
+    # Optional deeper print
+    for i in range(min(5, len(X_top))):
+        print(f"Row {i} summary hash: {hash(tuple(np.round(X_top.iloc[i].values, 4)))}")
     shap_values = explainer.shap_values(X_top)
 
     print("\n🔍 SHAP Feature Impact (Top Rows):")
