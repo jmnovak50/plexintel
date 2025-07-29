@@ -39,6 +39,7 @@ def parse_embedding(x):
 
 def process_row(row, from_feedback_only=False):
     username = row["username"]
+    rewatch_count = int(row.get("rewatch_count", 0))
     rating_key = row["rating_key"]
     feedback = row.get("feedback")
     reason_code = row.get("reason_code")
@@ -62,23 +63,11 @@ def process_row(row, from_feedback_only=False):
             return None
 
         return (
-            username,
-            rating_key,
-            label,
-            combined_emb,
-            genres,
-            actors,
-            directors,
-            row.get("release_year"),
-            None,
-            None,
-            0,
-            0,
-            engagement_ratio,
-            sample_weight
+            username, rating_key, label, combined_emb,
+            genres, actors, directors, row.get("release_year"),
+            None, None, 0, 0, engagement_ratio, sample_weight
         )
 
-    # Normal path with watch history
     media_duration = row["media_duration"]
     played_duration = row["played_duration"]
     if not media_duration:
@@ -103,28 +92,18 @@ def process_row(row, from_feedback_only=False):
     else:
         if engagement_ratio > ENGAGEMENT_THRESHOLD:
             label = 1
-            sample_weight = 1.0
+            sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
         elif engagement_ratio < 0.5:
             label = 0
-            sample_weight = 1.0
+            sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
         else:
-            return None  # skip ambiguous
+            return None
 
     return (
-        username,
-        rating_key,
-        label,
-        combined_emb,
-        genres,
-        actors,
-        directors,
-        row.get("release_year"),
-        row.get("season_number"),
-        row.get("episode_number"),
-        played_duration,
-        media_duration,
-        engagement_ratio,
-        sample_weight
+        username, rating_key, label, combined_emb,
+        genres, actors, directors, row.get("release_year"),
+        row.get("season_number"), row.get("episode_number"),
+        played_duration, media_duration, engagement_ratio, sample_weight
     )
 
 
@@ -139,60 +118,59 @@ def build_training_data():
     print("📦 Fetching watch-based rows...")
     cur.execute("""
         SELECT
-            t.username,
-            t.rating_key,
-            t.played_duration,
-            l.duration AS media_duration,
-            l.year AS release_year,
-            t.season_number,
-            t.episode_number,
-            (
-                SELECT string_agg(g.name, ', ')
-                FROM media_genres mg
-                JOIN genres g ON mg.genre_id = g.id
-                WHERE mg.media_id = l.rating_key
-            ) AS genre_tags,
-            (
-                SELECT string_agg(a.name, ', ')
-                FROM media_actors ma
-                JOIN actors a ON ma.actor_id = a.id
-                WHERE ma.media_id = l.rating_key
-            ) AS actor_tags,
-            (
-                SELECT string_agg(d.name, ', ')
-                FROM media_directors md
-                JOIN directors d ON md.director_id = d.id
-                WHERE md.media_id = l.rating_key
-            ) AS director_tags,
-            me.embedding AS media_embedding,
-            ue.embedding AS user_embedding,
-            f.feedback,
-            f.reason_code
-        FROM watch_history t
-        JOIN library l ON t.rating_key = l.rating_key
-        JOIN media_embeddings me ON t.rating_key = me.rating_key
-        JOIN user_embeddings ue ON t.username = ue.username
-        LEFT JOIN user_feedback f ON f.username = t.username AND f.rating_key = l.rating_key
-        WHERE t.played_duration IS NOT NULL AND l.duration IS NOT NULL
+    t.username,
+    t.rating_key,
+    COUNT(*) AS rewatch_count,
+    t.played_duration,
+    l.duration AS media_duration,
+    l.year AS release_year,
+    t.season_number,
+    t.episode_number,
+    genre_tags.genre_tags,
+    actor_tags.actor_tags,
+    director_tags.director_tags,
+    me.embedding AS media_embedding,
+    ue.embedding AS user_embedding,
+    f.feedback,
+    f.reason_code
+FROM watch_history t
+JOIN library l ON t.rating_key = l.rating_key
+JOIN media_embeddings me ON t.rating_key = me.rating_key
+JOIN user_embeddings ue ON t.username = ue.username
+LEFT JOIN user_feedback f ON f.username = t.username AND f.rating_key = l.rating_key
+
+-- ✅ Subquery joins to fetch tags per media item
+LEFT JOIN LATERAL (
+    SELECT string_agg(g.name, ', ') AS genre_tags
+    FROM media_genres mg
+    JOIN genres g ON mg.genre_id = g.id
+    WHERE mg.media_id = l.rating_key
+) genre_tags ON true
+
+LEFT JOIN LATERAL (
+    SELECT string_agg(a.name, ', ') AS actor_tags
+    FROM media_actors ma
+    JOIN actors a ON ma.actor_id = a.id
+    WHERE ma.media_id = l.rating_key
+) actor_tags ON true
+
+LEFT JOIN LATERAL (
+    SELECT string_agg(d.name, ', ') AS director_tags
+    FROM media_directors md
+    JOIN directors d ON md.director_id = d.id
+    WHERE md.media_id = l.rating_key
+) director_tags ON true
+
+WHERE t.played_duration IS NOT NULL AND l.duration IS NOT NULL
+GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
+         t.season_number, t.episode_number,
+         me.embedding, ue.embedding, f.feedback, f.reason_code,
+         genre_tags.genre_tags, actor_tags.actor_tags, director_tags.director_tags
+
     """)
     watched_rows = cur.fetchall()
 
-        # Detect embedding dimension from first row
-    if watched_rows:
-        sample_embedding = parse_embedding(watched_rows[0]["media_embedding"])
-    elif feedback_only_rows:
-        sample_embedding = parse_embedding(feedback_only_rows[0]["media_embedding"])
-    else:
-        sample_embedding = None
-
-    if sample_embedding is not None:
-        embedding_dim = len(sample_embedding)
-        print("🔍 Detected embedding dimension:", embedding_dim)
-    else:
-        print("❌ No embeddings found to detect dimension.")
-        return
-
-    print("📥 Fetching feedback-only rows (no watch history)...")
+    print("📅 Fetching feedback-only rows (no watch history)...")
     cur.execute("""
         SELECT
             f.username,
@@ -229,6 +207,20 @@ def build_training_data():
     """)
     feedback_only_rows = cur.fetchall()
 
+    if watched_rows:
+        sample_embedding = parse_embedding(watched_rows[0]["media_embedding"])
+    elif feedback_only_rows:
+        sample_embedding = parse_embedding(feedback_only_rows[0]["media_embedding"])
+    else:
+        sample_embedding = None
+
+    if sample_embedding is not None:
+        embedding_dim = len(sample_embedding)
+        print("🔍 Detected embedding dimension:", embedding_dim)
+    else:
+        print("❌ No embeddings found to detect dimension.")
+        return
+
     print(f"✅ Retrieved {len(watched_rows)} watched + {len(feedback_only_rows)} feedback-only rows")
 
     inserts = []
@@ -246,6 +238,9 @@ def build_training_data():
     thumbs_up_count = sum(1 for r in inserts if r[2] == 1 and r[-1] == 2.0)
     print(f"👎 Feedback rows (label=0, weight=5.0): {thumbs_down_count}")
     print(f"👍 Feedback rows (label=1, weight=2.0): {thumbs_up_count}")
+
+    rewatch_boosted = sum(1 for r in inserts if r[-1] > 1.0 and r[2] == 1)
+    print(f"🔁 Rewatch-boosted positive labels: {rewatch_boosted}")
 
     print(f"🧠 Inserting {len(inserts)} training records...")
     insert_sql = """

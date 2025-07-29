@@ -98,9 +98,11 @@ def connect_to_db():
 
 
 # ✅ Convert Unix timestamp to datetime
+from datetime import datetime, UTC
+
 def convert_timestamp(timestamp):
     try:
-        return datetime.utcfromtimestamp(int(timestamp)).strftime('%Y-%m-%d %H:%M:%S') if timestamp else None
+        return datetime.fromtimestamp(int(timestamp), UTC).strftime('%Y-%m-%d %H:%M:%S') if timestamp else None
     except (ValueError, TypeError):
         return None
 
