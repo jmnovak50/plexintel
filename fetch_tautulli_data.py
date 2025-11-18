@@ -8,10 +8,12 @@ import argparse
 import pandas as pd
 from datetime import datetime
 import psycopg2
-from sentence_transformers import SentenceTransformer
-
-# 🔧 Load model once globally for reuse
-model = SentenceTransformer("all-mpnet-base-v2")
+from pgvector.psycopg2 import register_vector
+from pgvector import Vector
+# Ollama embedding client (NAS-hosted EmbeddingGemma)
+from ollama_embeddings import embed_texts
+# Optional: batch sizing from env
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "128"))
 
 # ✅ Load environment variables
 load_dotenv()
@@ -44,18 +46,20 @@ import psycopg2
 import os
 
 def clear_tautulli_cache():
-    load_dotenv()
-
-    response = requests.get(TAUTULLI_API_URL, params={
+    """
+    Clear Tautulli's metadata cache so new/changed items show up.
+    Uses the same TAUTULLI_URL and TAUTULLI_API_KEY as the rest of the script.
+    """
+    params = {
         "apikey": TAUTULLI_API_KEY,
-        "cmd": "delete_cache"
-    })
-
+        "cmd": "delete_cache",
+    }
     try:
-        data = response.json()
-        print(f"🧹 Tautulli cache cleared: {data}")
+        resp = requests.get(f"{TAUTULLI_URL}/api/v2", params=params, timeout=30)
+        resp.raise_for_status()
+        print("✅ Cleared Tautulli cache via delete_cache")
     except Exception as e:
-        print(f"⚠️ Failed to clear cache: {e}")
+        print(f"❌ ERROR clearing Tautulli cache: {e}")
 
 # ✅ Fetch data from Tautulli API
 def fetch_tautulli_data(endpoint, params=None):
@@ -87,14 +91,86 @@ def connect_to_db():
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
             host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT")
+            port=os.getenv("DB_PORT"),
         )
+        # ✅ Tell psycopg2 how to handle pgvector's `vector` type
+        register_vector(conn)
+
         cursor = conn.cursor()
         print("✅ Connected to PostgreSQL database")
         return conn, cursor
     except Exception as e:
         print(f"❌ ERROR: Could not connect to PostgreSQL: {e}")
         return None, None
+
+    
+def _media_text_for_embedding(row):
+    """
+    row = (rating_key, title, summary)
+    Build a plain-text description for the embedding model.
+    """
+    rk, title, summary = row
+    title = title or ""
+    summary = summary or ""
+    return f"{title} — {summary}".strip()
+
+def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
+    """
+    Generate embeddings for media items in `library` that are missing in `media_embeddings`.
+
+    Assumes:
+      - media_embeddings.embedding is vectors.vector(768) (VectorChord)
+      - Ollama (embeddinggemma) is reachable via embed_texts()
+    """
+    print("🧠 Generating media embeddings...")
+
+    conn, cur = connect_to_db()
+    if not conn:
+        print("❌ ERROR: Could not connect to database.")
+        return
+
+    print("✅ Connected to PostgreSQL database")
+
+    # Find library entries without embeddings
+    cur.execute(
+        """
+        SELECT l.rating_key, l.title, COALESCE(l.summary, '')
+        FROM library l
+        LEFT JOIN media_embeddings me ON me.rating_key = l.rating_key
+        WHERE me.rating_key IS NULL
+        ORDER BY l.rating_key
+        """
+    )
+    rows = cur.fetchall()
+    if not rows:
+        print("✅ No media rows missing embeddings.")
+        conn.close()
+        return
+
+    print(f"📦 Media items to embed: {len(rows)}")
+
+    texts = [_media_text_for_embedding(r) for r in rows]
+    vectors = embed_texts(texts, batch_size=batch_size)
+    assert len(vectors) == len(rows)
+
+    # Insert in batches to keep transactions reasonable
+    for i in range(0, len(rows), batch_size):
+        part_rows = rows[i:i + batch_size]
+        part_vecs = vectors[i:i + batch_size]
+        with conn:
+            with conn.cursor() as cur2:
+                for (rk, _t, _s), vec in zip(part_rows, part_vecs):
+                    cur2.execute(
+                        """
+                        INSERT INTO media_embeddings (rating_key, embedding)
+                        VALUES (%s, %s::real[]::vectors.vector)
+                        ON CONFLICT (rating_key) DO NOTHING
+                        """,
+                        (rk, vec),
+                    )
+
+    conn.close()
+    print("✅ Media embeddings complete.")
 
 
 # ✅ Convert Unix timestamp to datetime
@@ -128,19 +204,6 @@ def fetch_paginated_data(endpoint):
     return all_results
 
 import requests
-
-def clear_tautulli_cache():
-    url = f"http://<tautulli_host>:8181/api/v2"
-    params = {
-        "apikey": "<your_api_key>",
-        "cmd": "delete_cache"
-    }
-    response = requests.get(url, params=params)
-    if response.ok and response.json()["response"]["result"] == "success":
-        print("[INFO] Tautulli cache cleared successfully.")
-    else:
-        print("[ERROR] Failed to clear Tautulli cache.")
-
 
 def get_library_media_info(section_id, limit=None):
     """
@@ -671,6 +734,13 @@ def run_incremental_load():
     # 5. Sync new watch history
     sync_new_watch_history(conn, cursor)
 
+    # 6. Optionally embed new stuff immediately after sync
+    if os.getenv("ENABLE_EMBED_MEDIA", "1") == "1":
+        generate_media_embeddings()
+
+    if os.getenv("ENABLE_EMBED_WATCHES", "1") == "1":
+        generate_watch_embeddings()
+
     conn.commit()
     conn.close()
     print("✅ Incremental update complete.")
@@ -870,138 +940,176 @@ def sync_new_watch_history(conn, cursor):
 
     store_watch_history(conn, cursor, valid_rows)
 
-def generate_media_embeddings():
+def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
+    """
+    Generate embeddings for media items in `library` that are missing in `media_embeddings`.
+
+    Assumes:
+      - media_embeddings.embedding is pgvector `vector(768)`
+      - Ollama (embeddinggemma) is reachable via embed_texts()
+    """
     print("🧠 Generating media embeddings...")
 
-    conn, cursor = connect_to_db()
+    conn, cur = connect_to_db()
     if not conn:
         print("❌ ERROR: Could not connect to database.")
         return
 
-    # Step 1: Get rating_keys already embedded
-    cursor.execute("SELECT rating_key FROM media_embeddings")
-    existing_keys = {row[0] for row in cursor.fetchall()}
+    print("✅ Connected to PostgreSQL database")
 
-    # Step 2: Query media metadata for embedding
-    cursor.execute("""
-        SELECT 
-            l.rating_key, l.title, l.summary, l.year, l.duration,
-            ARRAY_AGG(DISTINCT g.name) AS genres,
-            ARRAY_AGG(DISTINCT a.name) AS actors,
-            ARRAY_AGG(DISTINCT d.name) AS directors
+    # Find library entries without embeddings
+    cur.execute(
+        """
+        SELECT l.rating_key, l.title, COALESCE(l.summary, '')
         FROM library l
-        LEFT JOIN media_genres mg ON l.rating_key = mg.media_id
-        LEFT JOIN genres g ON mg.genre_id = g.id
-        LEFT JOIN media_actors ma ON l.rating_key = ma.media_id
-        LEFT JOIN actors a ON ma.actor_id = a.id
-        LEFT JOIN media_directors md ON l.rating_key = md.media_id
-        LEFT JOIN directors d ON md.director_id = d.id
-        WHERE l.rating_key NOT IN %s
-        GROUP BY l.rating_key, l.title, l.summary, l.year, l.duration
+        LEFT JOIN media_embeddings me ON me.rating_key = l.rating_key
+        WHERE me.rating_key IS NULL
+        ORDER BY l.rating_key
+        """
+    )
+    rows = cur.fetchall()
+    if not rows:
+        print("✅ No media rows missing embeddings.")
+        conn.close()
+        return
 
-    """, (tuple(existing_keys) if existing_keys else (0,),))
-
-    rows = cursor.fetchall()
     print(f"📦 Media items to embed: {len(rows)}")
 
-    for row in rows:
-        rating_key, title, summary, year, duration, genres, actors, directors = row
-        duration_min = int(duration) // 60000 if duration else None
+    texts = [_media_text_for_embedding(r) for r in rows]
+    vectors = embed_texts(texts, batch_size=batch_size)
+    assert len(vectors) == len(rows)
 
-        parts = [
-            f"{title} ({year})" if year else title,
-            ", ".join(filter(None, genres)) if genres else None,
-            f"Actors: {', '.join(filter(None, actors))}" if actors else None,
-            f"Directors: {', '.join(filter(None, directors))}" if directors else None,
-            f"Duration: {duration_min} min" if duration_min else None,
-            summary or None
-        ]
+    # Insert in batches to keep transactions reasonable
+    for i in range(0, len(rows), batch_size):
+        part_rows = rows[i:i + batch_size]
+        part_vecs = vectors[i:i + batch_size]
+        with conn:
+            with conn.cursor() as cur2:
+                for (rk, _t, _s), vec in zip(part_rows, part_vecs):
+                    cur2.execute(
+                        """
+                        INSERT INTO media_embeddings (rating_key, embedding)
+                        VALUES (%s, %s)
+                        ON CONFLICT (rating_key) DO NOTHING
+                        """,
+                        (rk, Vector(vec)),
+                    )
 
-        text = " | ".join([p for p in parts if p])
-        embedding = model.encode(text).tolist()
-
-        vector_str = f"[{', '.join(f'{x:.6f}' for x in embedding)}]"
-        cursor.execute(
-            "INSERT INTO media_embeddings (rating_key, embedding) VALUES (%s, %s)",
-            (rating_key, vector_str)
-        )
-        
-        print(f"✅ Embedded: {title} (rating_key={rating_key})")
-
-    conn.commit()
     conn.close()
-    print("🔒 Database connection closed. All embeddings generated.")
+    print("✅ Media embeddings complete.")
 
-def generate_watch_embeddings(model):
+def _watch_text_for_embedding(
+    title, username, percent, played_duration,
+    season_number, episode_number,
+    genres, actors, directors
+):
+    season_str = f"S{season_number}" if season_number is not None else ""
+    episode_str = f"E{episode_number}" if episode_number is not None else ""
+
+    watch_str = f"watched {percent}%" if percent is not None else "watched"
+    if played_duration is not None:
+        minutes_played = played_duration // 60
+        watch_str += f" for {minutes_played} minutes"
+
+    parts = [
+        f"{title} {season_str}{episode_str} by {username}, {watch_str}",
+        f"Genres: {genres}" if genres else "",
+        f"Actors: {actors}" if actors else "",
+        f"Directors: {directors}" if directors else "",
+    ]
+    return ". ".join(p for p in parts if p).strip()
+
+def generate_watch_embeddings(batch_size: int = 16):
+    """
+    Generate embeddings for watch_history rows that are missing watch_embeddings.
+    Uses library + genre/actor/director context to build the text.
+    Assumes watch_embeddings.embedding is vectors.vector(768).
+    """
+    print("🧠 Generating watch embeddings via Ollama (EmbeddingGemma)...")
+
     conn, cur = connect_to_db()
+    if not conn:
+        print("❌ ERROR: Could not connect to database.")
+        return
 
-    # Find watch history entries not yet embedded
-    cur.execute("""
+    # Pull only watch rows that don't yet have an embedding
+    cur.execute(
+        """
         SELECT
-        wh.watch_id,
-        l.title,
-        wh.username,
-        wh.percent_complete,
-        wh.played_duration,
-        wh.season_number,
-        wh.episode_number,
-        -- Subqueries to aggregate related data
-        (
-            SELECT string_agg(g.name, ', ')
-            FROM media_genres mg
-            JOIN genres g ON mg.genre_id = g.id
-            WHERE mg.media_id = l.rating_key
-        ) AS genres,
-        (
-            SELECT string_agg(a.name, ', ')
-            FROM media_actors ma
-            JOIN actors a ON ma.actor_id = a.id
-            WHERE ma.media_id = l.rating_key
-        ) AS actors,
-        (
-            SELECT string_agg(d.name, ', ')
-            FROM media_directors md
-            JOIN directors d ON md.director_id = d.id
-            WHERE md.media_id = l.rating_key
-        ) AS directors,
-        friendly_name
-    FROM watch_history wh
-    JOIN library l ON wh.rating_key = l.rating_key
-    LEFT JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id
-    WHERE we.watch_id IS NULL
-    """)
+            wh.watch_id,
+            l.title,
+            wh.username,
+            wh.percent_complete,
+            wh.played_duration,
+            wh.season_number,
+            wh.episode_number,
+            (
+                SELECT string_agg(g.name, ', ')
+                FROM media_genres mg
+                JOIN genres g ON mg.genre_id = g.id
+                WHERE mg.media_id = l.rating_key
+            ) AS genres,
+            (
+                SELECT string_agg(a.name, ', ')
+                FROM media_actors ma
+                JOIN actors a ON ma.actor_id = a.id
+                WHERE ma.media_id = l.rating_key
+            ) AS actors,
+            (
+                SELECT string_agg(d.name, ', ')
+                FROM media_directors md
+                JOIN directors d ON md.director_id = d.id
+                WHERE md.media_id = l.rating_key
+            ) AS directors
+        FROM watch_history wh
+        JOIN library l ON wh.rating_key = l.rating_key
+        LEFT JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id
+        WHERE we.watch_id IS NULL
+        """
+    )
     rows = cur.fetchall()
+
+    if not rows:
+        print("✅ No watch rows missing embeddings.")
+        conn.close()
+        return
 
     print(f"🧠 Generating embeddings for {len(rows)} watch events...")
 
-    for watch_id, title, username, percent, played_duration, season_number, episode_number, genres, actors, directors, friendly_name in rows:
-        season_str = f"S{season_number}" if season_number is not None else ""
-        episode_str = f"E{episode_number}" if episode_number is not None else ""
+    texts = [
+        _watch_text_for_embedding(
+            title, username, percent, played_duration,
+            season_number, episode_number,
+            genres, actors, directors,
+        )
+        for (
+            watch_id, title, username, percent, played_duration,
+            season_number, episode_number, genres, actors, directors
+        ) in rows
+    ]
 
-        watch_str = f"watched {percent}%" if percent is not None else "watched"
-        if played_duration is not None:
-            minutes_played = played_duration // 60
-            watch_str += f" for {minutes_played} minutes"
+    vectors = embed_texts(texts, batch_size=batch_size)
+    assert len(vectors) == len(rows)
 
-        parts = [
-            f"{title} {season_str}{episode_str} by {username}, {watch_str}",
-            f"Genres: {genres}" if genres else "",
-            f"Actors: {actors}" if actors else "",
-            f"Directors: {directors}" if directors else ""
-        ]
+    for i in range(0, len(rows), batch_size):
+        part_rows = rows[i:i + batch_size]
+        part_vecs = vectors[i:i + batch_size]
+        with conn:
+            with conn.cursor() as cur2:
+                for (
+                    (watch_id, _title, _username, _percent, _pd,
+                     _sn, _en, _g, _a, _d),
+                    vec,
+                ) in zip(part_rows, part_vecs):
+                    cur2.execute(
+                        """
+                        INSERT INTO watch_embeddings (watch_id, embedding)
+                        VALUES (%s, %s)
+                        ON CONFLICT (watch_id) DO NOTHING
+                        """,
+                        (watch_id, Vector(vec)),
+                    )
 
-        input_text = ". ".join(p for p in parts if p).strip()
-
-        embedding = model.encode(input_text)
-        embedding_str = str(embedding.tolist())
-
-        cur.execute("""
-            INSERT INTO watch_embeddings (watch_id, embedding)
-            VALUES (%s, %s)
-        """, (watch_id, embedding_str))
-
-    conn.commit()
-    cur.close()
     conn.close()
     print("✅ Watch embeddings complete.")
 
@@ -1072,8 +1180,8 @@ elif args.mode == "incremental":
 elif args.mode == "recover":
     recover_missing_media(dry_run=args.dry_run)
 elif args.mode == "embeddings":
+    # Media embeddings via Ollama + VectorChord
     generate_media_embeddings()
 elif args.mode == "watch_embeddings":
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer("all-mpnet-base-v2")
-    generate_watch_embeddings(model)
+    # Watch embeddings via Ollama + VectorChord
+    generate_watch_embeddings()

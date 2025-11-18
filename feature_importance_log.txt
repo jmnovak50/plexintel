@@ -1,32 +1,32 @@
 Top XGBoost Feature Importances (by gain):
 
-emb_990: 236.1677
-emb_1353: 174.7476
-emb_1019: 148.0878
-emb_1259: 131.5762
-genre_ Adventure: 122.1126
-emb_1130: 107.2734
-genre_ Fantasy: 102.7902
-emb_1438: 100.7779
-emb_927: 90.4275
-emb_1144: 81.4970
-emb_1120: 80.2003
-emb_621: 77.9229
-genre_Comedy: 70.2412
-genre_ Comedy: 69.4643
-emb_1455: 49.9561
-emb_989: 47.0556
-emb_1481: 34.6177
-emb_1200: 32.4822
-emb_347: 32.3776
-emb_143: 30.9886
-emb_418: 30.7593
-emb_1052: 30.4516
-actor_ Michael McKean: 29.8098
-emb_1159: 27.3528
-emb_351: 27.3317
-emb_1465: 26.7559
-emb_657: 26.4058
-emb_47: 25.7561
-emb_490: 25.5010
-emb_1360: 25.2655
+emb_1380: 402.1397
+emb_1456: 294.6900
+emb_1401: 191.3752
+emb_1390: 144.5448
+emb_1113: 125.5913
+genre_ Fantasy: 106.3148
+emb_1009: 89.4982
+emb_243: 63.4521
+genre_ Comedy: 61.4779
+emb_990: 60.7935
+emb_1312: 60.6646
+emb_1249: 60.4890
+genre_Action: 51.9092
+emb_967: 48.4552
+emb_1364: 47.5329
+emb_1352: 46.1327
+genre_Comedy: 45.8907
+emb_1069: 44.1400
+emb_2: 43.7151
+genre_ Sci-Fi & Fantasy: 40.0937
+emb_890: 35.4334
+emb_140: 35.4070
+actor_ Michael McKean: 33.9173
+actor_ Cheryl Francis Harrington: 33.2583
+emb_522: 33.1180
+emb_468: 33.0637
+emb_1046: 32.8099
+emb_1098: 31.4763
+emb_76: 30.2190
+emb_434: 29.5289
