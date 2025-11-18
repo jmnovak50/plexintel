@@ -3,7 +3,6 @@ import os
 import psycopg2
 import numpy as np
 from psycopg2.extras import RealDictCursor
-from sentence_transformers import SentenceTransformer
 from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 import ast

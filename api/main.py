@@ -11,12 +11,23 @@ from api.routes import plex_oauth_routes
 from api.routes import feedback_routes  # <- wherever your route is
 from api.routes import admin_routes
 from api.routes import rag_routes
+from api.routes import library_catalog
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
 
 load_dotenv()
 
 app = FastAPI()
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # or ["https://<your-openwebui-host>"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.add_middleware(
     SessionMiddleware,
@@ -31,6 +42,7 @@ app.include_router(public_router)                           # ✅ public routes,
 app.include_router(feedback_routes.router, prefix="/api")
 app.include_router(admin_routes.router, prefix="/api")
 app.include_router(rag_routes.router, prefix="/api")
+app.include_router(library_catalog.router, prefix="/api/library", tags=["library"])
 
 
 # ✅ Define route BEFORE mounting static

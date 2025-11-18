@@ -1,35 +1,59 @@
 #!/bin/bash
+set -euo pipefail
 
-cd "$HOME/projects/plexintel" || exit 1
+APP="/home/jmnovak/projects/plexintel"
+VENV="/home/jmnovak/projects/plexintel/plexenv"
+PY="$VENV/bin/python"
+
+cd "$APP" || exit 1
 
 echo "🚀 Starting daily pipeline run: $(date)"
 
-# Activate virtual environment
-source /home/jmnovak/projects/plexintel/plexenv/bin/activate
+# Venv hard-lock: PATH + source; also pin PG to 17 on 5432
+export PATH="$VENV/bin:$PATH"
+[ -f "$VENV/bin/activate" ] && source "$VENV/bin/activate"
+export PGHOST="${PGHOST:-localhost}"
+export PGPORT="${PGPORT:-5432}"
 
-# Run each script in sequence
+# 🔎 Debug (temporary): confirm the exact Python & packages in use
+echo "PY used: $PY"
+"$PY" - <<'PY' 2>&1 | sed 's/^/[pipelog] /' >&2
+import sys, importlib.metadata as md, sysconfig
+print("python:", sys.executable)
+print("site-packages:", sysconfig.get_paths().get("purelib"))
+for n in ("pgvector","psycopg2-binary"):
+    try: print(n, md.version(n))
+    except Exception: print(n, "<missing>")
+try:
+    import pgvector, importlib
+    print("Vector has __conform__:", hasattr(pgvector.Vector, "__conform__"))
+except Exception as e:
+    print("Vector check failed:", e)
+PY
+
+# Run each script in sequence using the venv's python explicitly
 echo "📦 Syncing Tautulli incremental data..."
-python /home/jmnovak/projects/plexintel/fetch_tautulli_data.py --mode incremental
+"$PY" "$APP/fetch_tautulli_data.py" --mode incremental
 
 echo "🧠 Building library embeddings..."
-python /home/jmnovak/projects/plexintel/fetch_tautulli_data.py --mode embeddings
+"$PY" "$APP/fetch_tautulli_data.py" --mode embeddings
 
 echo "🧠 Building watch embeddings..."
-python /home/jmnovak/projects/plexintel/fetch_tautulli_data.py --mode watch_embeddings
+"$PY" "$APP/fetch_tautulli_data.py" --mode watch_embeddings
 
 echo "🧠 Building user embeddings..."
-python /home/jmnovak/projects/plexintel/build_user_embeddings.py
+"$PY" "$APP/build_user_embeddings.py"
 
 echo "📦 Building training data..."
-python /home/jmnovak/projects/plexintel/build_training_data.py
+"$PY" "$APP/build_training_data.py"
 
 echo "🎓 Re-training model..."
-python /home/jmnovak/projects/plexintel/train_model.py
+"$PY" "$APP/train_model.py"
 
 echo "🔮 Scoring recommendations..."
-python /home/jmnovak/projects/plexintel/score_model.py --all-users
+"$PY" "$APP/score_model.py" --all-users
 
 echo "🏷  Auto-labeling SHAP dimensions with GPT..."
-python /home/jmnovak/projects/plexintel/batch_label_embeddings.py --gpt_label --save_label --export_csv shap_labels_$(date +%F).csv --limit 100
+"$PY" "$APP/batch_label_embeddings.py" --gpt_label --save_label --export_csv shap_labels_$(date +%F).csv --limit 100
 
 echo "✅ Daily pipeline complete: $(date)"
