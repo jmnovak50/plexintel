@@ -26,11 +26,8 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT")
 }
 
-DB_URL = os.getenv("DATABASE_URL")
-
 TAUTULLI_API_URL = os.getenv("TAUTULLI_API_URL")
 TAUTULLI_API_KEY = os.getenv("TAUTULLI_API_KEY")
-TAUTULLI_URL = os.getenv("TAUTULLI_URL")
 
 def safe_int(value):
     """Convert value to an integer safely, returning None if conversion fails."""
@@ -85,95 +82,17 @@ def fetch_tautulli_data(endpoint, params=None):
     except requests.exceptions.RequestException as e:
         print(f"❌ ERROR: Network error occurred: {e}")
         return {}
-    
-# 👥 ---------- User sync helpers (Tautulli → users table) ----------
-
-def fetch_tautulli_users():
-    """
-    Call Tautulli's get_users command and return the list of users.
-    Uses the existing fetch_tautulli_data() helper.
-    """
-    data = fetch_tautulli_data("get_users")
-
-    # Tautulli typically returns {"users": [ ... ]} inside data,
-    # but some installs return the list directly.
-    if isinstance(data, list):
-        users = data
-    elif isinstance(data, dict):
-        users = data.get("users")
-        if users is None and isinstance(data.get("data"), list):
-            users = data["data"]
-    else:
-        print(f"⚠️ Unexpected payload type from get_users: {type(data)}")
-        return []
-
-    if not isinstance(users, list):
-        print(f"⚠️ Unexpected payload from get_users: {data}")
-        return []
-
-    print(f"👥 Retrieved {len(users)} users from Tautulli.")
-    return users
-
-
-def sync_users_from_tautulli(conn, cursor):
-    """
-    Ensure every Tautulli user exists in our local `users` table.
-
-    This version is conservative and only assumes a `username` column exists
-    in the `users` table. It:
-      - Pulls all users from Tautulli
-      - Inserts missing usernames
-      - Leaves existing rows alone
-
-    If you later add more columns (friendly_name, email, tautulli_user_id, etc.)
-    we can expand this function.
-    """
-    users = fetch_tautulli_users()
-    if not users:
-        print("⚠️ No users returned from Tautulli get_users; skipping user sync.")
-        return
-
-    print("👥 Syncing Tautulli users into the `users` table...")
-
-    inserted = 0
-    for u in users:
-        if not isinstance(u, dict):
-            print(f"⚠️ Skipping unexpected user entry: {u}")
-            continue
-
-        # Prefer username; fall back to friendly_name if needed
-        username = u.get("username") or u.get("friendly_name")
-        if username:
-            username = str(username).strip()
-        if not username:
-            continue
-
-        # Check if this user already exists
-        cursor.execute("SELECT 1 FROM users WHERE username = %s", (username,))
-        exists = cursor.fetchone()
-        if exists:
-            continue
-
-        # Insert new user row
-        cursor.execute(
-            """
-            INSERT INTO users (username)
-            VALUES (%s)
-            """,
-            (username,),
-        )
-        inserted += 1
-
-    print(f"✅ User sync complete. Inserted {inserted} new user(s).")
-
 
 # ✅ Connect to PostgreSQL Database
 def connect_to_db():
     try:
-        if DB_URL:
-            conn = psycopg2.connect(DB_URL)
-        else:
-            conn = psycopg2.connect(**DB_CONFIG)
+        conn = psycopg2.connect(
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT"),
+        )
         # ✅ Tell psycopg2 how to handle pgvector's `vector` type
         register_vector(conn)
 
@@ -194,6 +113,65 @@ def _media_text_for_embedding(row):
     title = title or ""
     summary = summary or ""
     return f"{title} — {summary}".strip()
+
+def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
+    """
+    Generate embeddings for media items in `library` that are missing in `media_embeddings`.
+
+    Assumes:
+      - media_embeddings.embedding is vectors.vector(768) (VectorChord)
+      - Ollama (embeddinggemma) is reachable via embed_texts()
+    """
+    print("🧠 Generating media embeddings...")
+
+    conn, cur = connect_to_db()
+    if not conn:
+        print("❌ ERROR: Could not connect to database.")
+        return
+
+    print("✅ Connected to PostgreSQL database")
+
+    # Find library entries without embeddings
+    cur.execute(
+        """
+        SELECT l.rating_key, l.title, COALESCE(l.summary, '')
+        FROM library l
+        LEFT JOIN media_embeddings me ON me.rating_key = l.rating_key
+        WHERE me.rating_key IS NULL
+        ORDER BY l.rating_key
+        """
+    )
+    rows = cur.fetchall()
+    if not rows:
+        print("✅ No media rows missing embeddings.")
+        conn.close()
+        return
+
+    print(f"📦 Media items to embed: {len(rows)}")
+
+    texts = [_media_text_for_embedding(r) for r in rows]
+    vectors = embed_texts(texts, batch_size=batch_size)
+    assert len(vectors) == len(rows)
+
+    # Insert in batches to keep transactions reasonable
+    for i in range(0, len(rows), batch_size):
+        part_rows = rows[i:i + batch_size]
+        part_vecs = vectors[i:i + batch_size]
+        with conn:
+            with conn.cursor() as cur2:
+                for (rk, _t, _s), vec in zip(part_rows, part_vecs):
+                    cur2.execute(
+                        """
+                        INSERT INTO media_embeddings (rating_key, embedding)
+                        VALUES (%s, %s::real[]::vectors.vector)
+                        ON CONFLICT (rating_key) DO NOTHING
+                        """,
+                        (rk, vec),
+                    )
+
+    conn.close()
+    print("✅ Media embeddings complete.")
+
 
 # ✅ Convert Unix timestamp to datetime
 from datetime import datetime, UTC
@@ -709,14 +687,6 @@ def run_incremental_load():
     if not conn:
         print("❌ ERROR: Could not connect to database.")
         return
-    
-    # 0. Sync Plex/Tautulli users into the `users` table
-    try:
-        sync_users_from_tautulli(conn, cursor)
-    except Exception as e:
-        # Don't kill the whole incremental run if user sync fails,
-        # but do log it so you can troubleshoot.
-        print(f"⚠️ Failed to sync users from Tautulli: {e}")
 
     # 1. Fetch all current rating_keys from DB
     cursor.execute("SELECT rating_key FROM library")
@@ -1002,23 +972,18 @@ def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
         print("✅ No media rows missing embeddings.")
         conn.close()
         return
-    
+
     print(f"📦 Media items to embed: {len(rows)}")
-    # ✅ Optional: list what will be embedded (like the old behavior)
-    if os.getenv("LOG_EMBED_TITLES", "1").lower() in ("1", "true", "yes", "on"):
-        for rk, title, _summary in rows:
-            print(f"   🎬 {title} (rating_key={rk})")
 
     texts = [_media_text_for_embedding(r) for r in rows]
-    
+    vectors = embed_texts(texts, batch_size=batch_size)
+    assert len(vectors) == len(rows)
+
     raw_bs = batch_size
     try:
         norm_bs = int(str(raw_bs).strip().split()[0])
     except Exception:
         norm_bs = 128  # safe fallback
-
-    vectors = embed_texts(texts, batch_size=batch_size)
-    assert len(vectors) == len(rows)
 
     batch_size = norm_bs  # from here on, batch_size is a clean int
 
@@ -1163,31 +1128,31 @@ def main():
     Main function to fetch and store library data and watch history from Tautulli API to PostgreSQL.
     """
     print("🚀 Script started...")
-    conn, cursor = connect_to_db()
-    if not conn:
-        return
-
     try:
-        # First, sync Plex/Tautulli users into our `users` table
-        try:
-            sync_users_from_tautulli(conn, cursor)
-        except Exception as e:
-            print(f"⚠️ Failed to sync users from Tautulli in full mode: {e}")
+        # Establish database connection
+        conn = psycopg2.connect(
+            dbname=DB_CONFIG["dbname"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"]
+        )
+        with conn.cursor() as cursor:
+            # Fetch and store library data
+            library_data = get_library_data(movies_limit=None, tv_limit=None)
+            print(f"🚨 DEBUG: Retrieved library data count: {len(library_data)}")
+            if len(library_data) == 0:
+                print("🚨 DEBUG: Library data is EMPTY after get_library_data()!")
+            store_library_data(conn, cursor, library_data)
+            
 
-        # Fetch and store library data
-        library_data = get_library_data(movies_limit=None, tv_limit=None)
-        print(f"🚨 DEBUG: Retrieved library data count: {len(library_data)}")
-        if len(library_data) == 0:
-            print("🚨 DEBUG: Library data is EMPTY after get_library_data()!")
-        store_library_data(conn, cursor, library_data)
-
-        # Fetch and store watch history
-        watch_history = get_watch_history()
-        store_watch_history(conn, cursor, watch_history)
-
+            # Fetch and store watch history
+            watch_history = get_watch_history()
+            store_watch_history(conn, cursor, watch_history)
         # 🔥 Crucial: commit database changes after cursor block
         conn.commit()
         print("✅ Data committed successfully.")
+
     except Exception as e:
         print(f"❌ ERROR: {e}")
         conn.rollback()

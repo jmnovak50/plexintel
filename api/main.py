@@ -12,6 +12,7 @@ from api.routes import feedback_routes  # <- wherever your route is
 from api.routes import admin_routes
 from api.routes import rag_routes
 from api.routes import library_catalog
+from api.routes import agent_tools
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
 
@@ -43,6 +44,7 @@ app.include_router(feedback_routes.router, prefix="/api")
 app.include_router(admin_routes.router, prefix="/api")
 app.include_router(rag_routes.router, prefix="/api")
 app.include_router(library_catalog.router, prefix="/api/library", tags=["library"])
+app.include_router(agent_tools.router, prefix="/api/agent", tags=["agent-tools"])
 
 
 # ✅ Define route BEFORE mounting static
@@ -72,15 +74,12 @@ async def get_recommendations(username: str = Query(...)):
         print("❌ ERROR during /api/recs:", e)
         return ORJSONResponse(content={"error": str(e)}, status_code=500)
 
-from fastapi.responses import FileResponse
-
-# ✅ Mount the static frontend *after* the route
-app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
-
-@app.get("/{full_path:path}")
-async def serve_react_app(full_path: str):
-    file_path = os.path.join("frontend", "dist", "index.html")
-    return FileResponse(file_path)
+# ✅ Serve everything in the built frontend directory so favicon and other assets resolve
+app.mount(
+    "/",
+    StaticFiles(directory="frontend/dist", html=True),
+    name="frontend",
+)
 
 @app.on_event("startup")
 def startup_log():
