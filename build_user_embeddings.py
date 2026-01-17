@@ -17,8 +17,19 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT")
 }
 
+DB_URL = os.getenv("DATABASE_URL")
+
 EMBEDDING_DIMENSION = 768
 ENGAGEMENT_THRESHOLD = 0.5
+
+
+def connect():
+    if DB_URL:
+        conn = psycopg2.connect(DB_URL)
+    else:
+        conn = psycopg2.connect(**DB_CONFIG)
+    register_vector(conn)
+    return conn
 
 
 def fetch_user_watch_history(conn):
@@ -74,8 +85,7 @@ def build_user_embeddings(watch_history, conn):
 
 
 def main():
-    conn = psycopg2.connect(**DB_CONFIG)
-    register_vector(conn)
+    conn = connect()
 
     print("🔍 Fetching engaged watch history...")
     watch_history = fetch_user_watch_history(conn)

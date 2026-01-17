@@ -6,6 +6,7 @@ dotenv_path = os.path.join(script_dir, '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
 SHAP_PRUNE_DAYS = int(os.getenv("SHAP_PRUNE_DAYS", "3"))
+WATCHED_ENGAGEMENT_THRESHOLD = float(os.getenv("WATCHED_ENGAGEMENT_THRESHOLD", "0.5"))
 DB_URL = os.getenv("DATABASE_URL")
 print("DB_URL is:", DB_URL)
 
@@ -40,7 +41,26 @@ def get_unwatched_media(username):
         FROM library m
         JOIN media_embeddings e ON m.rating_key = e.rating_key
         JOIN user_embeddings ue ON ue.username = %s
-        LEFT JOIN watch_history w ON m.rating_key = w.rating_key AND w.username = %s
+        LEFT JOIN watch_history w
+            ON m.rating_key = w.rating_key
+            AND w.username = %s
+            AND (
+                (
+                    w.percent_complete IS NOT NULL
+                    AND (
+                        CASE
+                            WHEN w.percent_complete > 1 THEN w.percent_complete / 100.0
+                            ELSE w.percent_complete
+                        END
+                    ) >= %s
+                )
+                OR (
+                    w.played_duration IS NOT NULL
+                    AND m.duration IS NOT NULL
+                    AND m.duration > 0
+                    AND (w.played_duration::float / (m.duration / 1000.0)) >= %s
+                )
+            )
         LEFT JOIN (
             SELECT mg.media_id, STRING_AGG(g.name, ',') AS genre_tags
             FROM media_genres mg
@@ -68,7 +88,17 @@ def get_unwatched_media(username):
             AND f.suppress = true
     )
     """
-    df = pd.read_sql(query, engine, params=(username, username, username))
+    df = pd.read_sql(
+        query,
+        engine,
+        params=(
+            username,
+            username,
+            WATCHED_ENGAGEMENT_THRESHOLD,
+            WATCHED_ENGAGEMENT_THRESHOLD,
+            username,
+        ),
+    )
     print(f"🔍 {len(df)} media items remaining after suppression filter.")
     return df
 

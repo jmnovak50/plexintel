@@ -18,7 +18,8 @@ from typing import Iterable, List
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://192.168.1.123:31770")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "embeddinggemma")
-EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "128"))
+raw_default_bs = os.getenv("EMBED_BATCH_SIZE", "128")
+EMBED_BATCH_SIZE = int(str(raw_default_bs).strip().split()[0])
 OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "300"))
 OLLAMA_THREADS = os.getenv("OLLAMA_THREADS")  # string or None
 
@@ -26,9 +27,11 @@ class OllamaError(RuntimeError):
     pass
 
 
-def chunks(seq: List[str], batch: int) -> Iterable[List[str]]:
+def chunks(seq, batch):
+    # Ensure batch is always an int
+    batch = int(batch)
     for i in range(0, len(seq), batch):
-        yield seq[i:i+batch]
+        yield seq[i : i + batch]
 
 
 def _post_embed(inputs: List[str]) -> List[List[float]]:
@@ -46,14 +49,38 @@ def _post_embed(inputs: List[str]) -> List[List[float]]:
     return embs
 
 
-def embed_texts(texts: List[str], batch_size: int | None = None, max_retries: int = 3, backoff_s: float = 1.0) -> List[List[float]]:
+def embed_texts(
+    texts: List[str],
+    batch_size: int | None = None,
+    max_retries: int = 3,
+    backoff_s: float = 1.0
+) -> List[List[float]]:
     """Embed a list of strings with batching + basic retries.
     Returns a list of vectors (same order/length as input).
     """
     if not texts:
         return []
-    bs = batch_size or EMBED_BATCH_SIZE
+
+    # -------------------------
+    # NORMALIZE BATCH SIZE HERE
+    # -------------------------
+    # batch_size may be:
+    #   - None
+    #   - an int
+    #   - a string like "128"
+    #   - or a string like "128 (default: 128)" ← problematic
+    raw_bs = batch_size if batch_size is not None else EMBED_BATCH_SIZE
+
+    # Extract the first numeric chunk safely
+    # e.g. "128 (default: 128)" → "128"
+    try:
+        bs = int(str(raw_bs).strip().split()[0])
+    except Exception:
+        # hard fallback if parsing fails
+        bs = 128
+
     out: List[List[float]] = []
+
     for part in chunks(texts, bs):
         attempt = 0
         while True:
@@ -64,8 +91,10 @@ def embed_texts(texts: List[str], batch_size: int | None = None, max_retries: in
                 attempt += 1
                 if attempt > max_retries:
                     raise
-                time.sleep(backoff_s * (2 ** (attempt-1)))
+                time.sleep(backoff_s * (2 ** (attempt - 1)))
+
     return out
+
 
 
 # ------------------------------------------------------------------------------
@@ -193,6 +222,8 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT"),
 }
 
+DB_URL = os.getenv("DATABASE_URL")
+
 EMBEDDING_DIMENSION = 768
 ENGAGEMENT_THRESHOLD = float(os.getenv("ENGAGEMENT_THRESHOLD", "0.5"))
 
@@ -246,7 +277,10 @@ def build_user_embeddings(user_rows, conn):
 
 
 def main():
-    conn = psycopg2.connect(**DB_CONFIG)
+    if DB_URL:
+        conn = psycopg2.connect(DB_URL)
+    else:
+        conn = psycopg2.connect(**DB_CONFIG)
     register_vector(conn)
 
     print("🔍 Fetching engaged user vectors (joined with media_embeddings)…")

@@ -18,6 +18,8 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT")
 }
 
+DB_URL = os.getenv("DATABASE_URL")
+
 ENGAGEMENT_THRESHOLD = 0.7  # Label threshold
 FEEDBACK_BONUS = 0.1        # 👍 Bonus applied to thumbs-up engagement
 ENABLE_FEEDBACK = True      # Toggle feedback injection on/off
@@ -25,7 +27,10 @@ USE_SAMPLE_WEIGHT = True
 
 
 def connect():
-    conn = psycopg2.connect(**DB_CONFIG)
+    if DB_URL:
+        conn = psycopg2.connect(DB_URL)
+    else:
+        conn = psycopg2.connect(**DB_CONFIG)
     register_vector(conn)
     return conn
 

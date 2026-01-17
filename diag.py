@@ -8,13 +8,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Connect to the database
-conn = psycopg2.connect(
-    dbname=os.getenv("DB_NAME"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD"),
-    host=os.getenv("DB_HOST"),
-    port=os.getenv("DB_PORT", 5432)
-)
+db_url = os.getenv("DATABASE_URL")
+if db_url:
+    conn = psycopg2.connect(db_url)
+else:
+    conn = psycopg2.connect(
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT", 5432)
+    )
 register_vector(conn)
 cursor = conn.cursor(cursor_factory=RealDictCursor)
 
