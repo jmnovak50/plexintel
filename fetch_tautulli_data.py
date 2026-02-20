@@ -344,40 +344,86 @@ def get_children_metadata(parent_rating_key):
 #    return revised_metadata
 
 
+_METADATA_CACHE = {}
+
 def get_metadata(rating_key):
+    cache_key = safe_int(rating_key)
+    if cache_key is not None and cache_key in _METADATA_CACHE:
+        return _METADATA_CACHE[cache_key]
+
     print(f"🔄 Fetching detailed metadata for rating_key={rating_key}...")
     params = {"rating_key": rating_key}
-    metadata = fetch_tautulli_data("get_metadata", params)  # Fetch data directly
+    metadata = fetch_tautulli_data("get_metadata", params)
 
     if not metadata:
         print(f"⚠️ WARNING: No metadata found for rating_key={rating_key}. Trying cache clear...")
         clear_tautulli_cache()
-        time.sleep(1)  # Wait for cache to clear
-        metadata = fetch_tautulli_data("get_metadata", params)  # Retry fetching metadata
+        time.sleep(1)
+        metadata = fetch_tautulli_data("get_metadata", params)
         if not metadata:
             print(f"❌ ERROR: Still no metadata found for rating_key={rating_key} after cache clear.")
             return None
 
-    print(f"✅ SUCCESS: Metadata retrieved for rating_key={rating_key}: {metadata}")
-    print(metadata)  # 🔍 Print the full metadata response to debug
-
+    # -------------------------------------------------------------------------
+    # 🧬 3-Tier Metadata Cascade (Episode -> Season -> Show)
+    # -------------------------------------------------------------------------
     media_type = metadata.get("media_type")
+    
+    # Start with what the item itself has (often empty for episodes)
+    final_genres = metadata.get("genres") or []
+    final_actors = metadata.get("actors") or []
+    final_directors = metadata.get("directors") or []
+    
+    if media_type == 'episode':
+        grandparent_key = metadata.get('grandparent_rating_key')
+        
+        # 1. Level 1: Fetch Show (Grandparent) Metadata
+        # We prioritize Show metadata for Genres and Actors because episodes usually lack them.
+        if grandparent_key and (not final_genres or not final_actors):
+            show_meta = get_metadata(grandparent_key)
+            if show_meta:
+                # Inherit Genres if missing (Crucial for "Comedy", "Sci-Fi" tags)
+                if not final_genres:
+                    final_genres = show_meta.get("genres", [])
 
-    # ✅ Debug Print for season and episode
-    print(f"🔍 DEBUG: media_type={media_type}, parent_media_index={metadata.get('parent_media_index')}, media_index={metadata.get('media_index')}")
+                # Inherit Actors if missing (Crucial for "Steve Carell")
+                if not final_actors:
+                    final_actors = show_meta.get("actors", [])
+
+    elif media_type == 'season':
+        parent_key = metadata.get('parent_rating_key')
+        
+        # Level 1: Fetch Show (Parent of Season) Metadata
+        if parent_key and (not final_genres or not final_actors):
+            show_meta = get_metadata(parent_key)
+            if show_meta:
+                if not final_genres:
+                    final_genres = show_meta.get("genres", [])
+                if not final_actors:
+                    final_actors = show_meta.get("actors", [])
 
 
-    # ✅ Ensure correct extraction of season_number & episode_number for TV episodes
-    season_number = int(metadata["parent_media_index"]) if media_type == "episode" and metadata.get("parent_media_index") else None
-    episode_number = int(metadata["media_index"]) if media_type == "episode" and metadata.get("media_index") else None
+    # -------------------------------------------------------------------------
 
-    # **🔎 Debug print before returning**
-    print(f"🔍 DEBUG: Extracted metadata for rating_key={rating_key}")
-    print(f"   - media_type: {media_type}")
-    print(f"   - season_number: {season_number}")
-    print(f"   - episode_number: {episode_number}")
+    # ✅ Ensure correct extraction of season_number & episode_number
+    if media_type == "episode":
+        season_number = int(metadata["parent_media_index"]) if metadata.get("parent_media_index") else None
+        episode_number = int(metadata["media_index"]) if metadata.get("media_index") else None
+        show_rating_key = safe_int(metadata.get("grandparent_rating_key"))
+    elif media_type == "season":
+        season_number = int(metadata["media_index"]) if metadata.get("media_index") else None
+        episode_number = None
+        show_rating_key = safe_int(metadata.get("parent_rating_key"))
+    elif media_type in ("show", "series"):
+        season_number = None
+        episode_number = None
+        show_rating_key = safe_int(metadata.get("rating_key"))
+    else:
+        season_number = None
+        episode_number = None
+        show_rating_key = None
 
-    return {
+    out = {
         "rating_key": metadata.get("rating_key"),
         "title": metadata.get("title"),
         "summary": metadata.get("summary"),
@@ -387,14 +433,21 @@ def get_metadata(rating_key):
         "duration": int(metadata["duration"]) if metadata.get("duration") else None,
         "media_type": media_type,
         "parent_rating_key": metadata.get("parent_rating_key"),
+        "show_rating_key": show_rating_key,
         "grandparent_title": metadata.get("grandparent_title"),  # TV Show name
         "parent_title": metadata.get("parent_title"),  # Season name
-        "season_number": season_number,  # ✅ FIXED: Season number for TV episodes
-        "episode_number": episode_number,  # ✅ FIXED: Episode number for TV episodes
-        "genres": metadata.get("genres", []),  # ✅ Extract list of genres
-        "actors": metadata.get("actors", []),  # ✅ Extract list of actors
-        "directors": metadata.get("directors", []),  # ✅ Extract list of directors
+        "season_number": season_number,
+        "episode_number": episode_number,
+        "genres": final_genres,    # ✅ Uses cascaded values
+        "actors": final_actors,    # ✅ Uses cascaded values
+        "directors": final_directors
     }
+
+    out_key = safe_int(out.get("rating_key")) or cache_key
+    if out_key is not None:
+        _METADATA_CACHE[out_key] = out
+
+    return out
 
 # ✅ Fetch library metadata
 def get_library_data(movies_limit=None, tv_limit=None):
@@ -416,12 +469,23 @@ def get_library_data(movies_limit=None, tv_limit=None):
     print(f"🚨 DEBUG TV Shows fetched: {len(tv_shows)}")  # Debug after TV Shows fetched
 
     for show in tv_shows:
+        show_metadata = get_metadata(show["rating_key"])
+        if show_metadata:
+            library_data.append(show_metadata)
+        else:
+            print(f"⚠️ Show metadata missing: rating_key={show['rating_key']}")
+
         print(f"🔍 Fetching seasons for show: {show['title']} ({show['rating_key']})")
         seasons = get_children_metadata(show["rating_key"])  # ✅ Get Seasons
         seasons = [s for s in seasons if s.get("media_type") == "season"]  # ✅ Ensure only seasons
         print(f"🚨 DEBUG Seasons fetched for show {show['rating_key']}: {len(seasons)}")
 
         for season in seasons:
+            # ✅ STORE SEASON METADATA (New for 3-Tier Model)
+            season_metadata = get_metadata(season["rating_key"])
+            if season_metadata:
+                library_data.append(season_metadata)
+            
             print(f"🔍 Fetching episodes for season: {season['title']} ({season['rating_key']})")
             episodes = get_children_metadata(season["rating_key"])  # ✅ Get Episodes
             episodes = [e for e in episodes if e.get("media_type") == "episode"]  # ✅ Ensure only episodes
@@ -451,9 +515,9 @@ def store_library_data(conn, cursor, library_data):
     insert_library = """
         INSERT INTO library (
             rating_key, title, year, duration, media_type, summary, rating, added_at, 
-            season_number, episode_number, parent_rating_key, show_title, episode_title, episode_summary
+            season_number, episode_number, parent_rating_key, show_rating_key, show_title, episode_title, episode_summary
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (rating_key) DO UPDATE SET
             title = EXCLUDED.title,
@@ -466,6 +530,7 @@ def store_library_data(conn, cursor, library_data):
             season_number = EXCLUDED.season_number,
             episode_number = EXCLUDED.episode_number,
             parent_rating_key = EXCLUDED.parent_rating_key,
+            show_rating_key = EXCLUDED.show_rating_key,
             show_title = EXCLUDED.show_title,
             episode_title = EXCLUDED.episode_title,
             episode_summary = EXCLUDED.episode_summary;
@@ -491,9 +556,17 @@ def store_library_data(conn, cursor, library_data):
         season_number = safe_int(item.get("season_number"))
         episode_number = safe_int(item.get("episode_number"))
         parent_rating_key = safe_int(item.get("parent_rating_key"))
-        show_title = item.get("grandparent_title") if media_type == 'episode' else item.get("parent_title")
+        if media_type == 'episode':
+            show_title = item.get("grandparent_title")
+        elif media_type == 'season':
+            show_title = item.get("parent_title") or item.get("grandparent_title")
+        elif media_type in ('show', 'series'):
+            show_title = item.get("title")
+        else:
+            show_title = None
         episode_title = item.get("title") if media_type == 'episode' else None
         episode_summary = summary if media_type == 'episode' else None
+        show_rating_key = safe_int(item.get("show_rating_key"))
 
         # ✅ Print debug info AFTER values are assigned
         print(f"🔎 DEBUG: Checking extracted values for rating_key={rating_key}")
@@ -518,6 +591,7 @@ def store_library_data(conn, cursor, library_data):
             "season_number": season_number,
             "episode_number": episode_number,
             "parent_rating_key": parent_rating_key,
+            "show_rating_key": show_rating_key,
             "show_title": show_title,
             "episode_title": episode_title,
             "episode_summary": episode_summary[:30] if episode_summary else None,
@@ -530,7 +604,7 @@ def store_library_data(conn, cursor, library_data):
             cursor.execute(insert_library, (
                 rating_key, title, year, duration, media_type, summary, rating,
                 added_at, season_number, episode_number, parent_rating_key,
-                show_title, episode_title, episode_summary
+                show_rating_key, show_title, episode_title, episode_summary
             ))
 
             # ✅ Store associated genres, actors, and directors (only if they exist)
@@ -638,13 +712,17 @@ def store_directors(conn, cursor, rating_key, directors):
 # ✅ Store watch history in PostgreSQL
 def store_watch_history(conn, cursor, watch_history):           
     insert_watch = """
-        INSERT INTO watch_history (rating_key, watched_at, played_duration, percent_complete, watch_id, media_type, username, title, episode_title, season_number, episode_number, friendly_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO watch_history (
+            rating_key, watched_at, played_duration, percent_complete, watch_id, media_type, username,
+            title, episode_title, season_number, episode_number, friendly_name, show_rating_key
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (watch_id) 
         DO UPDATE SET
                 played_duration = EXCLUDED.played_duration, 
                 percent_complete = EXCLUDED.percent_complete,
-                watched_at = EXCLUDED.watched_at
+                watched_at = EXCLUDED.watched_at,
+                show_rating_key = EXCLUDED.show_rating_key
 """
     for record in watch_history:
         watch_id = record.get("watch_id") or record.get("id")
@@ -652,6 +730,11 @@ def store_watch_history(conn, cursor, watch_history):
         if watch_id is None or rating_key is None:
             print(f"⚠️ Skipping watch history insert due to missing watch_id or rating_key: {record}")
             continue
+        show_rating_key = safe_int(record.get("grandparent_rating_key"))
+        if show_rating_key is None and record.get("media_type") == "season":
+            show_rating_key = safe_int(record.get("parent_rating_key"))
+        if record.get("media_type") in ("show", "series"):
+            show_rating_key = safe_int(record.get("rating_key"))
         try:
             cursor.execute(insert_watch, (
                 rating_key, convert_timestamp(record.get("date")), record.get("play_duration"), 
@@ -659,7 +742,8 @@ def store_watch_history(conn, cursor, watch_history):
                 record.get("user"), record.get("grandparent_title") if record.get("media_type") == "episode" else record.get("title"),
                 record.get("title") if record.get("media_type") == "episode" else None,
                 convert_to_int(record.get("parent_media_index")), convert_to_int(record.get("media_index")),
-                record.get("friendly_name")  # Added friendly_name here
+                record.get("friendly_name"),  # Added friendly_name here
+                show_rating_key
             ))
         except Exception as e:
             print(f"❌ Error inserting watch history for watch_id={watch_id}: {e}")
@@ -1042,23 +1126,66 @@ def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
     print("✅ Media embeddings complete.")
 
 def _watch_text_for_embedding(
-    title, username, percent, played_duration,
-    season_number, episode_number,
-    genres, actors, directors
+    media_type,
+    title,
+    show_title,
+    episode_title,
+    year,
+    rating,
+    summary,
+    username,
+    percent,
+    played_duration,
+    season_number,
+    episode_number,
+    genres,
+    actors,
+    directors,
 ):
+    def _clean(value):
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    media_type = _clean(media_type).upper()
+    title = _clean(title)
+    show_title = _clean(show_title)
+    episode_title = _clean(episode_title)
+    year = _clean(year)
+    rating = _clean(rating)
+    summary = _clean(summary)
+
+    if show_title or media_type == "EPISODE":
+        base_title = show_title or title
+        if episode_title:
+            base_title = f"{base_title}: {episode_title}"
+    else:
+        base_title = title
+
     season_str = f"S{season_number}" if season_number is not None else ""
     episode_str = f"E{episode_number}" if episode_number is not None else ""
+    se_str = f"{season_str}{episode_str}".strip()
 
     watch_str = f"watched {percent}%" if percent is not None else "watched"
     if played_duration is not None:
         minutes_played = played_duration // 60
         watch_str += f" for {minutes_played} minutes"
 
+    label = f"[{media_type}]" if media_type else "[WATCH]"
+    title_parts = [label, base_title]
+    if se_str:
+        title_parts.append(se_str)
+    if year:
+        title_parts.append(f"({year})")
+    title_line = " ".join(p for p in title_parts if p)
+
     parts = [
-        f"{title} {season_str}{episode_str} by {username}, {watch_str}",
+        f"{title_line} by {username}, {watch_str}",
+        f"Rating: {rating}" if rating else "",
         f"Genres: {genres}" if genres else "",
         f"Actors: {actors}" if actors else "",
         f"Directors: {directors}" if directors else "",
+        f"Summary: {summary[:400]}" if summary else "",
     ]
     return ". ".join(p for p in parts if p).strip()
 
@@ -1080,33 +1207,42 @@ def generate_watch_embeddings(batch_size: int = 16):
         """
         SELECT
             wh.watch_id,
-            l.title,
+            COALESCE(l.media_type, wh.media_type) AS media_type,
+            COALESCE(l.title, wh.title) AS title,
+            l.show_title,
+            COALESCE(l.episode_title, wh.episode_title) AS episode_title,
+            l.year,
+            l.rating,
+            COALESCE(l.summary, l.episode_summary) AS summary,
             wh.username,
             wh.percent_complete,
             wh.played_duration,
             wh.season_number,
             wh.episode_number,
-            (
-                SELECT string_agg(g.name, ', ')
-                FROM media_genres mg
-                JOIN genres g ON mg.genre_id = g.id
-                WHERE mg.media_id = l.rating_key
-            ) AS genres,
-            (
-                SELECT string_agg(a.name, ', ')
-                FROM media_actors ma
-                JOIN actors a ON ma.actor_id = a.id
-                WHERE ma.media_id = l.rating_key
-            ) AS actors,
-            (
-                SELECT string_agg(d.name, ', ')
-                FROM media_directors md
-                JOIN directors d ON md.director_id = d.id
-                WHERE md.media_id = l.rating_key
-            ) AS directors
+            g.genre_tags,
+            a.actor_tags,
+            d.director_tags
         FROM watch_history wh
         JOIN library l ON wh.rating_key = l.rating_key
-        LEFT JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id
+        LEFT JOIN (
+            SELECT mg.media_id, STRING_AGG(g.name, ', ') AS genre_tags
+            FROM media_genres mg
+            JOIN genres g ON mg.genre_id = g.id
+            GROUP BY mg.media_id
+        ) g ON g.media_id = l.rating_key
+        LEFT JOIN (
+            SELECT ma.media_id, STRING_AGG(a.name, ', ') AS actor_tags
+            FROM media_actors ma
+            JOIN actors a ON ma.actor_id = a.id
+            GROUP BY ma.media_id
+        ) a ON a.media_id = l.rating_key
+        LEFT JOIN (
+            SELECT md.media_id, STRING_AGG(d.name, ', ') AS director_tags
+            FROM media_directors md
+            JOIN directors d ON md.director_id = d.id
+            GROUP BY md.media_id
+        ) d ON d.media_id = l.rating_key
+        LEFT JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id::text
         WHERE we.watch_id IS NULL
         """
     )
@@ -1121,13 +1257,26 @@ def generate_watch_embeddings(batch_size: int = 16):
 
     texts = [
         _watch_text_for_embedding(
-            title, username, percent, played_duration,
-            season_number, episode_number,
-            genres, actors, directors,
+            media_type,
+            title,
+            show_title,
+            episode_title,
+            year,
+            rating,
+            summary,
+            username,
+            percent,
+            played_duration,
+            season_number,
+            episode_number,
+            genres,
+            actors,
+            directors,
         )
         for (
-            watch_id, title, username, percent, played_duration,
-            season_number, episode_number, genres, actors, directors
+            watch_id, media_type, title, show_title, episode_title, year, rating, summary,
+            username, percent, played_duration, season_number, episode_number,
+            genres, actors, directors
         ) in rows
     ]
 
@@ -1140,8 +1289,8 @@ def generate_watch_embeddings(batch_size: int = 16):
         with conn:
             with conn.cursor() as cur2:
                 for (
-                    (watch_id, _title, _username, _percent, _pd,
-                     _sn, _en, _g, _a, _d),
+                    (watch_id, _mt, _title, _show, _ep, _year, _rating, _summary,
+                     _username, _percent, _pd, _sn, _en, _g, _a, _d),
                     vec,
                 ) in zip(part_rows, part_vecs):
                     cur2.execute(

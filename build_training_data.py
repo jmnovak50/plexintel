@@ -24,6 +24,7 @@ ENGAGEMENT_THRESHOLD = 0.7  # Label threshold
 FEEDBACK_BONUS = 0.1        # 👍 Bonus applied to thumbs-up engagement
 ENABLE_FEEDBACK = True      # Toggle feedback injection on/off
 USE_SAMPLE_WEIGHT = True
+WATCH_EMBED_MIN_ENGAGEMENT = float(os.getenv("WATCH_EMBED_MIN_ENGAGEMENT", "0.5"))
 
 
 def connect():
@@ -40,19 +41,73 @@ def parse_embedding(x):
         return np.array(ast.literal_eval(x), dtype=np.float32)
     return np.array(x, dtype=np.float32)
 
+def cosine_similarity(a, b):
+    if a is None or b is None:
+        return 0.0
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
 
-def process_row(row, from_feedback_only=False):
+
+def build_user_watch_vectors(conn):
+    """
+    Build a per-user average watch-embedding vector (from watch_history + watch_embeddings).
+    Only includes watch events above WATCH_EMBED_MIN_ENGAGEMENT.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT
+                wh.username,
+                wh.played_duration,
+                l.duration AS media_duration,
+                we.embedding AS watch_embedding
+            FROM watch_history wh
+            JOIN library l ON wh.rating_key = l.rating_key
+            JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id::text
+            WHERE wh.played_duration IS NOT NULL
+              AND l.duration IS NOT NULL
+        """)
+        rows = cur.fetchall()
+
+    user_sums = {}
+    user_counts = {}
+    for row in rows:
+        media_duration = row.get("media_duration")
+        if not media_duration:
+            continue
+        played = row.get("played_duration")
+        ratio = played / (media_duration / 1000.0) if media_duration else 0.0
+        if ratio < WATCH_EMBED_MIN_ENGAGEMENT:
+            continue
+
+        vec = parse_embedding(row.get("watch_embedding"))
+        username = row.get("username")
+        if username not in user_sums:
+            user_sums[username] = vec.copy()
+            user_counts[username] = 1
+        else:
+            user_sums[username] += vec
+            user_counts[username] += 1
+
+    user_vectors = {u: user_sums[u] / user_counts[u] for u in user_sums}
+    print(f"🧠 Built watch-embedding profiles for {len(user_vectors)} users (min engagement {WATCH_EMBED_MIN_ENGAGEMENT})")
+    return user_vectors
+
+
+def process_row(row, user_watch_vectors=None, from_feedback_only=False):
     username = row["username"]
     rewatch_count = int(row.get("rewatch_count", 0))
     rating_key = row["rating_key"]
     feedback = row.get("feedback")
-    reason_code = row.get("reason_code")
     genres = row.get("genre_tags") or ''
     actors = row.get("actor_tags") or ''
     directors = row.get("director_tags") or ''
     media_embedding = parse_embedding(row["media_embedding"])
     user_embedding = parse_embedding(row["user_embedding"])
     combined_emb = Vector(np.concatenate([media_embedding, user_embedding]).tolist())
+    user_watch_vec = user_watch_vectors.get(username) if user_watch_vectors else None
+    watch_sim = cosine_similarity(user_watch_vec, media_embedding) if user_watch_vec is not None else 0.0
 
     if from_feedback_only:
         if feedback == "down":
@@ -69,7 +124,7 @@ def process_row(row, from_feedback_only=False):
         return (
             username, rating_key, label, combined_emb,
             genres, actors, directors, row.get("release_year"),
-            None, None, 0, 0, engagement_ratio, sample_weight
+            None, None, 0, 0, engagement_ratio, watch_sim, sample_weight
         )
 
     media_duration = row["media_duration"]
@@ -107,7 +162,7 @@ def process_row(row, from_feedback_only=False):
         username, rating_key, label, combined_emb,
         genres, actors, directors, row.get("release_year"),
         row.get("season_number"), row.get("episode_number"),
-        played_duration, media_duration, engagement_ratio, sample_weight
+        played_duration, media_duration, engagement_ratio, watch_sim, sample_weight
     )
 
 
@@ -135,8 +190,7 @@ def build_training_data():
     director_tags.director_tags,
     me.embedding AS media_embedding,
     ue.embedding AS user_embedding,
-    f.feedback,
-    f.reason_code
+    f.feedback
 FROM watch_history t
 JOIN library l ON t.rating_key = l.rating_key
 JOIN media_embeddings me ON t.rating_key = me.rating_key
@@ -168,7 +222,7 @@ LEFT JOIN LATERAL (
 WHERE t.played_duration IS NOT NULL AND l.duration IS NOT NULL
 GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
          t.season_number, t.episode_number,
-         me.embedding, ue.embedding, f.feedback, f.reason_code,
+         me.embedding, ue.embedding, f.feedback,
          genre_tags.genre_tags, actor_tags.actor_tags, director_tags.director_tags
 
     """)
@@ -180,7 +234,6 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
             f.username,
             f.rating_key,
             f.feedback,
-            f.reason_code,
             l.year AS release_year,
             (
                 SELECT string_agg(g.name, ', ')
@@ -227,14 +280,17 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
 
     print(f"✅ Retrieved {len(watched_rows)} watched + {len(feedback_only_rows)} feedback-only rows")
 
+    print("🧮 Building per-user watch-embedding profiles...")
+    user_watch_vectors = build_user_watch_vectors(conn)
+
     inserts = []
     for row in watched_rows:
-        result = process_row(row)
+        result = process_row(row, user_watch_vectors)
         if result:
             inserts.append(result)
 
     for row in feedback_only_rows:
-        result = process_row(row, from_feedback_only=True)
+        result = process_row(row, user_watch_vectors, from_feedback_only=True)
         if result:
             inserts.append(result)
 
@@ -252,9 +308,10 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
             username, rating_key, label, embedding,
             genre_tags, actor_tags, director_tags, release_year, season_number, episode_number,
             played_duration, media_duration, engagement_ratio,
+            watch_sim,
             sample_weight
         )
-        VALUES (%s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     with conn.cursor() as insert_cur:

@@ -204,16 +204,25 @@ def get_user_watch_history(usernames):
     return df
 
 def generate_summary_text(df, dimension):
+    def _safe_str(value):
+        if value is None or pd.isna(value):
+            return ""
+        return str(value)
+
     lines = [f"Top items for embedding dimension {dimension}:"]
     for _, row in df.head(10).iterrows():
-        media_type = row.get("media_type", "").strip().upper()
+        media_type = _safe_str(row.get("media_type", "")).strip().upper()
         media_type_label = f"[{media_type}]" if media_type else "[UNKNOWN]"
 
-        show_title = row.get("show_title", "").strip()
-        base_title = f"{show_title}: {row['title']}" if show_title else row['title']
-        title = f"{media_type_label} {base_title} ({row['year']})"
+        show_title = _safe_str(row.get("show_title", "")).strip()
+        title_value = _safe_str(row.get("title", "")).strip()
+        year_value = _safe_str(row.get("year", "")).strip()
 
-        title_line = f"- {title} | {row['genre_tags']}"
+        base_title = f"{show_title}: {title_value}" if show_title else title_value
+        title = f"{media_type_label} {base_title} ({year_value})"
+
+        genre_tags = _safe_str(row.get("genre_tags", "")).strip()
+        title_line = f"- {title} | {genre_tags}"
         extras = []
 
         if pd.notna(row.get('director_tags')) and row['director_tags']:

@@ -6,7 +6,10 @@ dotenv_path = os.path.join(script_dir, '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
 SHAP_PRUNE_DAYS = int(os.getenv("SHAP_PRUNE_DAYS", "3"))
+SHAP_MAX_ITEMS = int(os.getenv("SHAP_MAX_ITEMS", "500"))
+SHAP_TOP_DIMS = int(os.getenv("SHAP_TOP_DIMS", "30"))
 WATCHED_ENGAGEMENT_THRESHOLD = float(os.getenv("WATCHED_ENGAGEMENT_THRESHOLD", "0.5"))
+WATCH_EMBED_MIN_ENGAGEMENT = float(os.getenv("WATCH_EMBED_MIN_ENGAGEMENT", "0.5"))
 DB_URL = os.getenv("DATABASE_URL")
 print("DB_URL is:", DB_URL)
 
@@ -25,6 +28,59 @@ warnings.filterwarnings("ignore", category=UserWarning, module='sklearn')
 def get_engine():
     return create_engine(DB_URL)
 
+def parse_vector(x):
+    if isinstance(x, str):
+        return np.array(ast.literal_eval(x), dtype=np.float32)
+    return np.array(x, dtype=np.float32)
+
+def get_user_watch_vector(username):
+    """
+    Build a per-user average watch-embedding vector (from watch_history + watch_embeddings).
+    Only includes watch events above WATCH_EMBED_MIN_ENGAGEMENT.
+    """
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            wh.played_duration,
+            l.duration AS media_duration,
+            we.embedding AS watch_embedding
+        FROM watch_history wh
+        JOIN library l ON wh.rating_key = l.rating_key
+        JOIN watch_embeddings we ON wh.watch_id::text = we.watch_id::text
+        WHERE wh.username = %s
+          AND wh.played_duration IS NOT NULL
+          AND l.duration IS NOT NULL
+        """,
+        (username,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return None
+
+    vec_sum = None
+    count = 0
+    for played_duration, media_duration, watch_embedding in rows:
+        if not media_duration:
+            continue
+        ratio = played_duration / (media_duration / 1000.0) if media_duration else 0.0
+        if ratio < WATCH_EMBED_MIN_ENGAGEMENT:
+            continue
+        vec = parse_vector(watch_embedding)
+        if vec_sum is None:
+            vec_sum = vec.copy()
+        else:
+            vec_sum += vec
+        count += 1
+
+    if count == 0:
+        return None
+    return vec_sum / count
+
 def get_unwatched_media(username):
     engine = get_engine()
     query = """
@@ -32,6 +88,7 @@ def get_unwatched_media(username):
             m.rating_key,
             m.media_type,
             m.title,
+            m.parent_rating_key,
             e.embedding,
             m.year,
             g.genre_tags,
@@ -78,12 +135,13 @@ def get_unwatched_media(username):
             FROM media_directors md
             JOIN directors d ON md.director_id = d.id
             GROUP BY md.media_id
-        ) d ON d.media_id = m.rating_key
-        WHERE w.rating_key IS NULL
-        AND NOT EXISTS (
-            SELECT 1
-            FROM user_feedback f
-            WHERE f.username = %s
+	        ) d ON d.media_id = m.rating_key
+	        WHERE w.rating_key IS NULL
+	        AND m.media_type IN ('movie', 'episode')
+	        AND NOT EXISTS (
+	            SELECT 1
+	            FROM user_feedback f
+	            WHERE f.username = %s
             AND f.rating_key = m.rating_key
             AND f.suppress = true
     )
@@ -102,7 +160,7 @@ def get_unwatched_media(username):
     print(f"🔍 {len(df)} media items remaining after suppression filter.")
     return df
 
-def preprocess_for_scoring(df, feature_names_template):
+def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
     def safe_embedding_parse(x):
         if isinstance(x, str):
             return np.array(ast.literal_eval(x), dtype=np.float32)
@@ -124,6 +182,19 @@ def preprocess_for_scoring(df, feature_names_template):
     # Parse embeddings before combination
     df['media_embedding'] = df['embedding'].apply(safe_embedding_parse)
     df['user_embedding'] = df['user_embedding'].apply(safe_embedding_parse)
+
+    # Watch-embedding similarity (media_emb vs user watch-profile)
+    media_embs = np.stack(df['media_embedding'])
+    watch_sim = np.zeros(len(df), dtype=np.float32)
+    if user_watch_vec is not None:
+        user_watch_vec = np.array(user_watch_vec, dtype=np.float32)
+        norm_user = np.linalg.norm(user_watch_vec)
+        if norm_user > 0:
+            norms_media = np.linalg.norm(media_embs, axis=1)
+            denom = norms_media * norm_user
+            valid = denom > 0
+            watch_sim[valid] = (media_embs[valid] @ user_watch_vec) / denom[valid]
+    df['watch_sim'] = watch_sim
 
     # Combine user and media embeddings
     df['embedding'] = df.apply(lambda row: np.concatenate([row['media_embedding'], row['user_embedding']]), axis=1)
@@ -150,7 +221,7 @@ def preprocess_for_scoring(df, feature_names_template):
     director_features = director_bin.fit_transform(df['directors'])
 
     X = np.vstack(df['embedding'].values)
-    X = np.hstack((X, genre_features, actor_features, director_features, decade_df.values))
+    X = np.hstack((X, genre_features, actor_features, director_features, decade_df.values, watch_sim.reshape(-1, 1)))
     print("📆 Decade columns added:", list(decade_df.columns))
 
     return X, df
@@ -177,7 +248,10 @@ def score_and_store(username, skip_shap=False):
 
     print("🧹 Preprocessing...")
     feature_names = booster.feature_names
-    X, df = preprocess_for_scoring(df, feature_names)
+    user_watch_vec = get_user_watch_vector(username)
+    if user_watch_vec is None:
+        print(f"⚠️ No watch-embedding profile for {username}; watch_sim will be 0.")
+    X, df = preprocess_for_scoring(df, feature_names, user_watch_vec=user_watch_vec)
 
     # 🔍 Embedding Debug (NOW SAFE TO CALL)
     media_embs = np.stack(df['media_embedding'])
@@ -210,26 +284,53 @@ def score_and_store(username, skip_shap=False):
 
     df['predicted_probability'] = probabilities
 
-    # ✅ SHAP target selection (inside the function!)
-    tv_df = df[df['media_type'] == 'episode'].sort_values(by='predicted_probability', ascending=False)
-    movie_df = df[df['media_type'] == 'movie'].sort_values(by='predicted_probability', ascending=False)
+    # -------------------------------------------------------------------------
+    # 🔄 TV recommendations: prefer Season rollups, fallback to Episodes
+    # -------------------------------------------------------------------------
 
-    def top_percent(df, pct=0.05, min_items=10):
-        k = max(min_items, int(len(df) * pct))
-        return df.head(k)
+    movie_df = df[df['media_type'] == 'movie'].copy()
+    movie_df['shap_source_index'] = movie_df.index
 
-    top_tv_df = top_percent(tv_df, pct=0.05, min_items=10).copy()
-    top_movie_df = top_percent(movie_df, pct=0.05, min_items=10).copy()
+    episode_df = df[df['media_type'] == 'episode'].copy()
+    episode_df['shap_source_index'] = episode_df.index
 
-    top_tv_df['rank'] = top_tv_df['predicted_probability'].rank(method='first', ascending=False).astype(int)
-    top_movie_df['rank'] = top_movie_df['predicted_probability'].rank(method='first', ascending=False).astype(int)
+    # Keep TV recommendations at the episode level for rollups/drilldowns later.
+    tv_df = episode_df.copy()
+    model_name = 'xgb_model'
+
+    # Sort
+    if not tv_df.empty:
+        tv_df = tv_df.sort_values(by='predicted_probability', ascending=False)
+
+    movie_df = movie_df.sort_values(by='predicted_probability', ascending=False)
+
+    top_tv_df = tv_df.copy()
+    top_movie_df = movie_df.copy()
+
+    # Re-Rank
+    if not top_tv_df.empty:
+        top_tv_df['rank'] = top_tv_df['predicted_probability'].rank(method='first', ascending=False).astype(int)
+    if not top_movie_df.empty:
+        top_movie_df['rank'] = top_movie_df['predicted_probability'].rank(method='first', ascending=False).astype(int)
 
 
-    top_df = pd.concat([top_tv_df, top_movie_df])
+    top_df_list = [d for d in [top_tv_df, top_movie_df] if not d.empty]
+    if top_df_list:
+        top_df = pd.concat(top_df_list)
+    else:
+        top_df = pd.DataFrame()
+    
+    # Fill missing columns for final output if needed (e.g. episode_number might be null for seasons)
+    if 'episode_number' not in top_df.columns:
+        top_df['episode_number'] = None
+    if 'season_number' not in top_df.columns:
+        top_df['season_number'] = None
 
+    df = top_df # replace original df with stored top_df
+    
     df['username'] = username
     df['scored_at'] = datetime.now()
-    df['model_name'] = 'xgb_model'
+    df['model_name'] = model_name
     df['rank'] = df['predicted_probability'].rank(method='first', ascending=False).astype(int)
 
     df['cosine_similarity'] = cosine_similarity_batch(
@@ -251,8 +352,23 @@ def score_and_store(username, skip_shap=False):
         print("⏩ Skipping SHAP impact generation.")
         return
     explainer = shap.TreeExplainer(model)
-    top_df = top_df.reset_index(drop=True)
-    X_top = X_df.loc[top_df.index]
+    df_shap = df.sort_values(by='predicted_probability', ascending=False)
+    if SHAP_MAX_ITEMS > 0:
+        df_shap = df_shap.head(SHAP_MAX_ITEMS)
+    else:
+        df_shap = df_shap.head(0)
+
+    if df_shap.empty:
+        print("⏩ No rows selected for SHAP (SHAP_MAX_ITEMS=0).")
+        return
+
+    print(f"🔍 Limiting SHAP to top {len(df_shap)} items (SHAP_MAX_ITEMS={SHAP_MAX_ITEMS})")
+    if 'shap_source_index' in df_shap.columns:
+        shap_idx = [int(i) for i in df_shap['shap_source_index'].tolist()]
+    else:
+        shap_idx = [int(i) for i in df_shap.index.tolist()]
+
+    X_top = X_df.loc[shap_idx]
     print("🔍 SHAP input shape:", X_top.shape)
     print("🔍 Unique rows in input:", np.unique(X_top.to_numpy(), axis=0).shape[0])
     print("🔍 Sample input rows:")
@@ -275,13 +391,15 @@ def score_and_store(username, skip_shap=False):
     conn.commit()
     print(f"🧹 Pruned {pruned:,} old SHAP rows for {username} (older than {SHAP_PRUNE_DAYS} days)")
 
-    for i, row in enumerate(top_df.itertuples()):
+    for i, row in enumerate(df_shap.itertuples()):
         shap_row = shap_values[i]
         top_features = sorted(zip(feature_names, shap_row), key=lambda x: abs(x[1]), reverse=True)[:3]
         formatted = ", ".join([f"{name} ({value:+.2f})" for name, value in top_features])
         print(f"Rank {row.rank}: {row.rating_key} — {formatted}")
 
-        top_dims = sorted(enumerate(shap_row[:1536]), key=lambda x: abs(x[1]), reverse=True)[:100]
+        if SHAP_TOP_DIMS <= 0:
+            continue
+        top_dims = sorted(enumerate(shap_row[:1536]), key=lambda x: abs(x[1]), reverse=True)[:SHAP_TOP_DIMS]
         for dim, shap_val in top_dims:
             cur.execute(
                 """
