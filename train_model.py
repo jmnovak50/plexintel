@@ -66,6 +66,13 @@ def preprocess(df, top_k=20):
     X = np.vstack(df['embedding'].values)
     X = np.hstack((X, genre_features.values, actor_features.values, director_features.values, decade_df.values))
 
+    # Optional: watch-embedding similarity feature
+    if 'watch_sim' in df.columns:
+        watch_sim = df['watch_sim'].fillna(0).astype(float).values.reshape(-1, 1)
+    else:
+        watch_sim = np.zeros((len(df), 1), dtype=np.float32)
+    X = np.hstack((X, watch_sim))
+
     y = df['label'].astype(int).values
 
     sample_weight = df['sample_weight'].fillna(1.0).astype(float).values
@@ -76,6 +83,7 @@ def preprocess(df, top_k=20):
     feature_names += list(actor_features.columns)
     feature_names += list(director_features.columns)
     feature_names += list(decade_df.columns)
+    feature_names += ["watch_sim"]
 
     return X, y, sample_weight, feature_names
 
@@ -168,4 +176,3 @@ if __name__ == "__main__":
 
     print(f"📊 Training on {X.shape[0]} samples with {X.shape[1]} features...")
     train_and_evaluate(X, y, sample_weight)  # Switch this depending on model you want
-

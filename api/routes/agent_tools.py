@@ -79,6 +79,7 @@ class FeedbackPayload(BaseModel):
     user: str
     rating_key: int
     thumb: str  # "up" or "down"
+    # Kept for backwards compatibility with existing agent callers; ignored now.
     reasons: List[str] = Field(default_factory=list)
     note: Optional[str] = None
 
@@ -257,12 +258,12 @@ def agent_search_library(
     sort_by: str = Query(
         "title",
         description="Sort field: 'title' or 'year'",
-        regex="^(title|year)$",
+        pattern="^(title|year)$",
     ),
     sort_dir: str = Query(
         "asc",
         description="Sort direction: 'asc' or 'desc'",
-        regex="^(asc|desc)$",
+        pattern="^(asc|desc)$",
     ),
     limit: int = Query(20, ge=1, le=100),
 ):
@@ -407,31 +408,57 @@ def agent_get_item(rating_key: int):
 def agent_submit_feedback(
     payload: FeedbackPayload,
 ):
-    """Agent can log structured feedback after a conversation."""
-    if payload.thumb not in ("up", "down"):
+    """Agent can log one-click thumbs feedback."""
+    thumb = (payload.thumb or "").strip().lower()
+    if thumb not in ("up", "down"):
         raise HTTPException(status_code=400, detail="thumb must be 'up' or 'down'")
-
-    sql = """
-        INSERT INTO feedback (
-            username,
-            rating_key,
-            thumb,
-            reasons,
-            note
-        )
-        VALUES (%s, %s, %s, %s, %s)
-    """
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Keep minimal internal reason rows present (handles truncated feedback_reason tables).
+            seed_reasons = [
+                ("thumb_up", "Thumbs up", "up", True),
+                ("thumb_down", "Thumbs down", "down", True),
+            ]
+            for code, label, applies_to, suppress_default in seed_reasons:
+                cur.execute(
+                    """
+                    INSERT INTO feedback_reason (code, label, applies_to, suppress_default)
+                    SELECT %s, %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM feedback_reason WHERE code = %s
+                    )
+                    """,
+                    (code, label, applies_to, suppress_default, code),
+                )
+
+            reason_code = "thumb_up" if thumb == "up" else "thumb_down"
             cur.execute(
-                sql,
+                """
+                DELETE FROM user_feedback
+                WHERE username = %s AND rating_key = %s
+                """,
+                (payload.user, payload.rating_key),
+            )
+            cur.execute(
+                """
+                INSERT INTO user_feedback (
+                    username,
+                    rating_key,
+                    feedback,
+                    reason_code,
+                    suppress,
+                    created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
                 (
                     payload.user,
                     payload.rating_key,
-                    payload.thumb,
-                    payload.reasons,
-                    payload.note,
+                    thumb,
+                    reason_code,
+                    True,
+                    datetime.utcnow(),
                 ),
             )
         conn.commit()

@@ -32,9 +32,22 @@ def check_auth_status(pin_id: int, request: Request):
     token = poll_plex_pin(pin_id)
     if token:
         request.session["plex_token"] = token
+        plex_user = get_plex_user_info(token)
+        if not plex_user or not plex_user.get("username"):
+            raise HTTPException(status_code=401, detail="Failed to resolve Plex user")
+
+        user_id, new_user = get_or_create_user(
+            username=plex_user["username"],
+            email=plex_user.get("email"),
+            token=token,
+        )
+        request.session["username"] = plex_user["username"]
+        request.session["user_id"] = user_id
         return {
             "authenticated": True,
-            "auth_token": token  # ✅ This must exist for frontend redirect
+            "auth_token": token,  # ✅ This must exist for frontend redirect
+            "username": plex_user["username"],
+            "user_id": user_id,
+            "new_user": new_user,
         }
     return {"authenticated": False}
-
