@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 interface AdminMe {
   username: string;
@@ -46,6 +46,7 @@ function formatDate(value: string | null) {
 }
 
 export default function Admin() {
+  const navigate = useNavigate();
   const [me, setMe] = useState<AdminMe | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [selectedUser, setSelectedUser] = useState("");
@@ -63,6 +64,10 @@ export default function Admin() {
       try {
         const meRes = await fetch("/api/admin/me", { credentials: "include" });
         if (!meRes.ok) {
+          if (meRes.status === 401 || meRes.status === 403) {
+            navigate("/", { replace: true });
+            return;
+          }
           throw new Error(`Unable to load admin identity (${meRes.status})`);
         }
         const meData: AdminMe = await meRes.json();
@@ -70,7 +75,7 @@ export default function Admin() {
         setMe(meData);
 
         if (!meData.is_admin) {
-          setError("This account is authenticated but does not have admin access.");
+          navigate("/recs", { replace: true });
           return;
         }
 
@@ -95,7 +100,7 @@ export default function Admin() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [navigate]);
 
   useEffect(() => {
     let mounted = true;
