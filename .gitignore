@@ -22,3 +22,8 @@ frontend/build/
 *.csv
 feature_importance.*
 plexenv/
+
+# ML artifacts
+feature_importance_log.txt
+feature_importance_plot.png
+xgb_model.pkl
