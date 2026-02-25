@@ -26,31 +26,80 @@ def connect_db():
     register_vector(conn)
     return conn
 
-def get_top_unlabeled_dimensions(limit=25, dim_type='media'):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("SELECT dimension FROM embedding_labels")
-    labeled = {row[0] for row in cur.fetchall()}
-
+def _get_dimension_range(dim_type):
     if dim_type == 'media':
-        dim_range = (768, 1536)
-    elif dim_type == 'user':
-        dim_range = (0, 768)
-    else:
-        dim_range = (0, 1536)
+        return (768, 1536)
+    if dim_type == 'user':
+        return (0, 768)
+    return (0, 1536)
+
+def get_ranked_dimension_stats(cur):
+    """
+    Prefer the current-run aggregate SHAP table. Fall back to raw shap_impact counts if the
+    aggregate table is missing or empty.
+    """
+    try:
+        cur.execute("""
+            SELECT
+                dimension,
+                usage_count,
+                sum_abs_shap,
+                avg_abs_shap,
+                combined_score,
+                user_count
+            FROM shap_dimension_stats_current
+            ORDER BY combined_score DESC, sum_abs_shap DESC, usage_count DESC
+        """)
+        rows = cur.fetchall()
+        if rows:
+            stats = []
+            for dim, usage_count, sum_abs_shap, avg_abs_shap, combined_score, user_count in rows:
+                stats.append({
+                    "dimension": dim,
+                    "usage_count": int(usage_count or 0),
+                    "sum_abs_shap": float(sum_abs_shap or 0.0),
+                    "avg_abs_shap": float(avg_abs_shap or 0.0),
+                    "combined_score": float(combined_score or 0.0),
+                    "user_count": int(user_count or 0),
+                    "stats_source": "aggregate",
+                })
+            return stats
+        print("⚠️ shap_dimension_stats_current is empty; falling back to raw shap_impact counts.")
+    except Exception as e:
+        cur.connection.rollback()
+        print(f"⚠️ Could not read shap_dimension_stats_current ({e}); falling back to raw shap_impact counts.")
 
     cur.execute("""
         SELECT dimension, COUNT(*) as usage_count
         FROM shap_impact
         GROUP BY dimension
         ORDER BY usage_count DESC
-        LIMIT %s
-    """, (limit,))
+    """)
     rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    stats = []
+    for dim, usage_count in rows:
+        stats.append({
+            "dimension": dim,
+            "usage_count": int(usage_count or 0),
+            "sum_abs_shap": 0.0,
+            "avg_abs_shap": 0.0,
+            "combined_score": 0.0,
+            "user_count": 0,
+            "stats_source": "raw_count_fallback",
+        })
+    return stats
 
-    return [(dim, count) for dim, count in rows if dim not in labeled and dim_range[0] <= dim < dim_range[1]]
+def get_top_unlabeled_dimensions(cur, limit=25, dim_type='media'):
+    cur.execute("SELECT dimension FROM embedding_labels")
+    labeled = {row[0] for row in cur.fetchall()}
+    dim_min, dim_max = _get_dimension_range(dim_type)
+
+    ranked_stats = get_ranked_dimension_stats(cur)
+    filtered = [
+        stat for stat in ranked_stats
+        if stat["dimension"] not in labeled and dim_min <= stat["dimension"] < dim_max
+    ]
+    return filtered[:limit]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -67,14 +116,10 @@ def main():
     conn = connect_db()
     cur = conn.cursor()
 
-    shap_usage_counts = {}
-    cur.execute("SELECT dimension, COUNT(*) FROM shap_impact GROUP BY dimension")
-    for dim, count in cur.fetchall():
-        shap_usage_counts[dim] = count
+    top_dims = get_top_unlabeled_dimensions(cur, args.limit, args.dim_type)
 
-    top_dims = get_top_unlabeled_dimensions(args.limit, args.dim_type)
-
-    for dimension, _ in top_dims:
+    for dim_stats in top_dims:
+        dimension = dim_stats["dimension"]
         gpt_label = None
         mode = "user" if dimension < 768 else "media"
 
@@ -92,13 +137,17 @@ def main():
             print(f"🧠 {mode.title()} dim {dimension} labeled as: {gpt_label}")
 
         if args.export_csv:
-            usage_count = shap_usage_counts.get(dimension, 0)
             csv_rows.append({
                 "dimension": dimension,
                 "mode": mode,
                 "summary": summary,
                 "gpt_label": gpt_label or '',
-                "usage_count": usage_count
+                "usage_count": dim_stats["usage_count"],
+                "sum_abs_shap": dim_stats.get("sum_abs_shap", 0.0),
+                "avg_abs_shap": dim_stats.get("avg_abs_shap", 0.0),
+                "combined_score": dim_stats.get("combined_score", 0.0),
+                "user_count": dim_stats.get("user_count", 0),
+                "stats_source": dim_stats.get("stats_source", "unknown"),
             })
 
         if gpt_label and args.save_label:
@@ -109,7 +158,21 @@ def main():
 
     if args.export_csv and csv_rows:
         with open(args.export_csv, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=["dimension", "mode", "summary", "gpt_label", "usage_count"])
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "dimension",
+                    "mode",
+                    "summary",
+                    "gpt_label",
+                    "usage_count",
+                    "sum_abs_shap",
+                    "avg_abs_shap",
+                    "combined_score",
+                    "user_count",
+                    "stats_source",
+                ],
+            )
             writer.writeheader()
             writer.writerows(csv_rows)
         print(f"✅ CSV export completed: {args.export_csv}")

@@ -50,6 +50,7 @@ CREATE VIEW public.expanded_recs_w_label_v AS
            FROM (( SELECT si.dimension
                    FROM public.shap_impact si
                   WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username))
+                  ORDER BY abs(si.shap_value) DESC
                  LIMIT 5) top_dims
              JOIN public.embedding_labels el ON ((top_dims.dimension = el.dimension)))
           WHERE (el.label IS NOT NULL)) AS semantic_themes

@@ -6,8 +6,11 @@ dotenv_path = os.path.join(script_dir, '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
 SHAP_PRUNE_DAYS = int(os.getenv("SHAP_PRUNE_DAYS", "3"))
-SHAP_MAX_ITEMS = int(os.getenv("SHAP_MAX_ITEMS", "500"))
-SHAP_TOP_DIMS = int(os.getenv("SHAP_TOP_DIMS", "30"))
+SHAP_MAX_ITEMS = int(os.getenv("SHAP_MAX_ITEMS", "100"))
+SHAP_RAW_MIN_DIMS = int(os.getenv("SHAP_RAW_MIN_DIMS", "5"))
+SHAP_RAW_MAX_DIMS = int(os.getenv("SHAP_RAW_MAX_DIMS", "20"))
+SHAP_RAW_CUMABS_TARGET = float(os.getenv("SHAP_RAW_CUMABS_TARGET", "0.90"))
+SHAP_AGG_TOP_DIMS = int(os.getenv("SHAP_AGG_TOP_DIMS", "50"))
 WATCHED_ENGAGEMENT_THRESHOLD = float(os.getenv("WATCHED_ENGAGEMENT_THRESHOLD", "0.5"))
 WATCH_EMBED_MIN_ENGAGEMENT = float(os.getenv("WATCH_EMBED_MIN_ENGAGEMENT", "0.5"))
 DB_URL = os.getenv("DATABASE_URL")
@@ -27,6 +30,119 @@ warnings.filterwarnings("ignore", category=UserWarning, module='sklearn')
 
 def get_engine():
     return create_engine(DB_URL)
+
+def ensure_shap_snapshot_schema(conn):
+    """
+    Ensure the current-run SHAP aggregate table exists.
+    Raw shap_impact already exists in schema and is treated as the UI/debug snapshot.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS public.shap_dimension_stats_current (
+            dimension integer PRIMARY KEY,
+            usage_count integer NOT NULL DEFAULT 0,
+            sum_abs_shap double precision NOT NULL DEFAULT 0,
+            avg_abs_shap double precision NOT NULL DEFAULT 0,
+            combined_score double precision NOT NULL DEFAULT 0,
+            user_count integer NOT NULL DEFAULT 0,
+            modified_at timestamp without time zone NOT NULL DEFAULT now()
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shap_dimension_stats_current_score
+        ON public.shap_dimension_stats_current (combined_score DESC)
+        """
+    )
+    conn.commit()
+    cur.close()
+
+def reset_shap_snapshot_tables():
+    conn = psycopg2.connect(DB_URL)
+    try:
+        ensure_shap_snapshot_schema(conn)
+        cur = conn.cursor()
+        cur.execute("TRUNCATE TABLE shap_impact")
+        cur.execute("TRUNCATE TABLE shap_dimension_stats_current")
+        conn.commit()
+        cur.close()
+        print("🧹 Reset SHAP snapshot tables (shap_impact, shap_dimension_stats_current)")
+    finally:
+        conn.close()
+
+def _sorted_embedding_shap_dims(shap_row, embed_dim=1536):
+    dims = []
+    for dim, shap_val in enumerate(shap_row[:embed_dim]):
+        val = float(shap_val)
+        if not np.isfinite(val):
+            val = 0.0
+        dims.append((dim, val, abs(val)))
+    dims.sort(key=lambda x: x[2], reverse=True)
+    return dims
+
+def _select_raw_shap_dims(sorted_dims):
+    max_dims = max(0, SHAP_RAW_MAX_DIMS)
+    if max_dims == 0:
+        return []
+
+    min_dims = max(0, SHAP_RAW_MIN_DIMS)
+    min_dims = min(min_dims, max_dims)
+    cum_target = max(0.0, min(1.0, SHAP_RAW_CUMABS_TARGET))
+
+    total_abs = sum(abs_val for _, _, abs_val in sorted_dims)
+    target_abs = total_abs * cum_target
+
+    selected = []
+    cum_abs = 0.0
+    for dim, val, abs_val in sorted_dims[:max_dims]:
+        selected.append((dim, val))
+        cum_abs += abs_val
+        if len(selected) >= min_dims:
+            if total_abs == 0.0 or cum_abs >= target_abs:
+                break
+
+    if len(selected) < min_dims:
+        selected = [(dim, val) for dim, val, _ in sorted_dims[:min_dims]]
+
+    return selected
+
+def _select_agg_shap_dims(sorted_dims):
+    if SHAP_AGG_TOP_DIMS <= 0:
+        return []
+    top_n = max(0, SHAP_AGG_TOP_DIMS)
+    return sorted_dims[:top_n]
+
+def _upsert_shap_dimension_stats_current(cur, user_dim_agg):
+    for dim, stats in user_dim_agg.items():
+        usage_count = int(stats["usage_count"])
+        sum_abs = float(stats["sum_abs_shap"])
+        if usage_count <= 0:
+            continue
+        avg_abs = sum_abs / usage_count
+        combined_score = sum_abs * np.log1p(usage_count)
+        cur.execute(
+            """
+            INSERT INTO shap_dimension_stats_current (
+                dimension, usage_count, sum_abs_shap, avg_abs_shap, combined_score, user_count, modified_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (dimension)
+            DO UPDATE SET
+                usage_count = shap_dimension_stats_current.usage_count + EXCLUDED.usage_count,
+                sum_abs_shap = shap_dimension_stats_current.sum_abs_shap + EXCLUDED.sum_abs_shap,
+                user_count = shap_dimension_stats_current.user_count + EXCLUDED.user_count,
+                avg_abs_shap = (
+                    shap_dimension_stats_current.sum_abs_shap + EXCLUDED.sum_abs_shap
+                ) / NULLIF(shap_dimension_stats_current.usage_count + EXCLUDED.usage_count, 0),
+                combined_score = (
+                    shap_dimension_stats_current.sum_abs_shap + EXCLUDED.sum_abs_shap
+                ) * LN(1 + (shap_dimension_stats_current.usage_count + EXCLUDED.usage_count)),
+                modified_at = NOW()
+            """,
+            (dim, usage_count, sum_abs, avg_abs, float(combined_score), 1)
+        )
 
 def parse_vector(x):
     if isinstance(x, str):
@@ -382,14 +498,15 @@ def score_and_store(username, skip_shap=False):
     print("\n🔍 SHAP Feature Impact (Top Rows):")
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
+    ensure_shap_snapshot_schema(conn)
 
-    cur.execute(f"""
-        DELETE FROM shap_impact
-        WHERE user_id = %s AND modified_at < now() - INTERVAL '{SHAP_PRUNE_DAYS} days';
-    """, (username,))
-    pruned = cur.rowcount
+    # Per-user reset keeps single-user runs consistent when not using all-users snapshot reset.
+    cur.execute("DELETE FROM shap_impact WHERE user_id = %s", (username,))
+    deleted = cur.rowcount
     conn.commit()
-    print(f"🧹 Pruned {pruned:,} old SHAP rows for {username} (older than {SHAP_PRUNE_DAYS} days)")
+    print(f"🧹 Reset {deleted:,} existing SHAP rows for {username} before rebuild")
+
+    user_dim_agg = {}
 
     for i, row in enumerate(df_shap.itertuples()):
         shap_row = shap_values[i]
@@ -397,10 +514,9 @@ def score_and_store(username, skip_shap=False):
         formatted = ", ".join([f"{name} ({value:+.2f})" for name, value in top_features])
         print(f"Rank {row.rank}: {row.rating_key} — {formatted}")
 
-        if SHAP_TOP_DIMS <= 0:
-            continue
-        top_dims = sorted(enumerate(shap_row[:1536]), key=lambda x: abs(x[1]), reverse=True)[:SHAP_TOP_DIMS]
-        for dim, shap_val in top_dims:
+        sorted_dims = _sorted_embedding_shap_dims(shap_row)
+        raw_dims = _select_raw_shap_dims(sorted_dims)
+        for dim, shap_val in raw_dims:
             cur.execute(
                 """
                 INSERT INTO shap_impact (user_id, rating_key, dimension, shap_value, created_at, modified_at)
@@ -414,7 +530,14 @@ def score_and_store(username, skip_shap=False):
                 (username, row.rating_key, dim, float(shap_val))
             )
 
+        for dim, _shap_val, abs_val in _select_agg_shap_dims(sorted_dims):
+            stats = user_dim_agg.setdefault(dim, {"usage_count": 0, "sum_abs_shap": 0.0})
+            stats["usage_count"] += 1
+            stats["sum_abs_shap"] += float(abs_val)
+
+    _upsert_shap_dimension_stats_current(cur, user_dim_agg)
     conn.commit()
+    print(f"📊 Upserted {len(user_dim_agg)} aggregate SHAP dimension rows for {username}")
     cur.close()
     conn.close()
 
@@ -438,6 +561,8 @@ if __name__ == "__main__":
         engine = get_engine()
         with engine.begin() as conn:
             conn.execute(text("TRUNCATE recommendations"))
+        if not args.skip_shap:
+            reset_shap_snapshot_tables()
         users = get_all_users()
         print(f"🔁 Scoring for all users: {users}")
         for user in users:

@@ -267,6 +267,25 @@ CREATE TABLE IF NOT EXISTS public.shap_impact (
     modified_at timestamp without time zone DEFAULT now()
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shap_impact_user_rating_dimension_ux
+    ON public.shap_impact (user_id, rating_key, dimension);
+
+CREATE INDEX IF NOT EXISTS idx_shap_impact_user_rating_key
+    ON public.shap_impact (user_id, rating_key);
+
+CREATE TABLE IF NOT EXISTS public.shap_dimension_stats_current (
+    dimension integer PRIMARY KEY,
+    usage_count integer NOT NULL DEFAULT 0,
+    sum_abs_shap double precision NOT NULL DEFAULT 0,
+    avg_abs_shap double precision NOT NULL DEFAULT 0,
+    combined_score double precision NOT NULL DEFAULT 0,
+    user_count integer NOT NULL DEFAULT 0,
+    modified_at timestamp without time zone NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_shap_dimension_stats_current_score
+    ON public.shap_dimension_stats_current (combined_score DESC);
+
 
 
 --
@@ -298,6 +317,7 @@ CREATE VIEW public.expanded_recs_w_label_v AS
            FROM (( SELECT si.dimension
                    FROM public.shap_impact si
                   WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username))
+                  ORDER BY abs(si.shap_value) DESC
                  LIMIT 5) top_dims
              JOIN public.embedding_labels el ON ((top_dims.dimension = el.dimension)))
           WHERE (el.label IS NOT NULL)) AS semantic_themes
