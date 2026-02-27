@@ -436,6 +436,9 @@ def get_metadata(rating_key):
         "show_rating_key": show_rating_key,
         "grandparent_title": metadata.get("grandparent_title"),  # TV Show name
         "parent_title": metadata.get("parent_title"),  # Season name
+        "thumb_path": metadata.get("thumb"),
+        "parent_thumb_path": metadata.get("parent_thumb"),
+        "grandparent_thumb_path": metadata.get("grandparent_thumb"),
         "season_number": season_number,
         "episode_number": episode_number,
         "genres": final_genres,    # ✅ Uses cascaded values
@@ -515,9 +518,10 @@ def store_library_data(conn, cursor, library_data):
     insert_library = """
         INSERT INTO library (
             rating_key, title, year, duration, media_type, summary, rating, added_at, 
-            season_number, episode_number, parent_rating_key, show_rating_key, show_title, episode_title, episode_summary
+            season_number, episode_number, parent_rating_key, show_rating_key, show_title, episode_title, episode_summary,
+            thumb_path, parent_thumb_path, grandparent_thumb_path
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (rating_key) DO UPDATE SET
             title = EXCLUDED.title,
@@ -533,7 +537,10 @@ def store_library_data(conn, cursor, library_data):
             show_rating_key = EXCLUDED.show_rating_key,
             show_title = EXCLUDED.show_title,
             episode_title = EXCLUDED.episode_title,
-            episode_summary = EXCLUDED.episode_summary;
+            episode_summary = EXCLUDED.episode_summary,
+            thumb_path = EXCLUDED.thumb_path,
+            parent_thumb_path = EXCLUDED.parent_thumb_path,
+            grandparent_thumb_path = EXCLUDED.grandparent_thumb_path;
     """
 
     successful_inserts = 0
@@ -567,6 +574,9 @@ def store_library_data(conn, cursor, library_data):
         episode_title = item.get("title") if media_type == 'episode' else None
         episode_summary = summary if media_type == 'episode' else None
         show_rating_key = safe_int(item.get("show_rating_key"))
+        thumb_path = item.get("thumb_path")
+        parent_thumb_path = item.get("parent_thumb_path")
+        grandparent_thumb_path = item.get("grandparent_thumb_path")
 
         # ✅ Print debug info AFTER values are assigned
         print(f"🔎 DEBUG: Checking extracted values for rating_key={rating_key}")
@@ -595,6 +605,9 @@ def store_library_data(conn, cursor, library_data):
             "show_title": show_title,
             "episode_title": episode_title,
             "episode_summary": episode_summary[:30] if episode_summary else None,
+            "thumb_path": thumb_path,
+            "parent_thumb_path": parent_thumb_path,
+            "grandparent_thumb_path": grandparent_thumb_path,
             "genres": genres,
             "actors": actors,
             "directors": directors
@@ -604,7 +617,8 @@ def store_library_data(conn, cursor, library_data):
             cursor.execute(insert_library, (
                 rating_key, title, year, duration, media_type, summary, rating,
                 added_at, season_number, episode_number, parent_rating_key,
-                show_rating_key, show_title, episode_title, episode_summary
+                show_rating_key, show_title, episode_title, episode_summary,
+                thumb_path, parent_thumb_path, grandparent_thumb_path
             ))
 
             # ✅ Store associated genres, actors, and directors (only if they exist)

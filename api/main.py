@@ -13,6 +13,7 @@ from api.routes import feedback_routes  # <- wherever your route is
 from api.routes import admin_routes
 from api.routes import rag_routes
 from api.routes import library_catalog
+from api.routes import poster_routes
 from api.routes import agent_tools
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
@@ -93,6 +94,7 @@ app.include_router(public_router)                           # ✅ public routes,
 app.include_router(feedback_routes.router, prefix="/api")
 app.include_router(admin_routes.router, prefix="/api")
 app.include_router(rag_routes.router, prefix="/api")
+app.include_router(poster_routes.router, prefix="/api")
 app.include_router(library_catalog.router, prefix="/api/library", tags=["library"])
 app.include_router(agent_tools.router, prefix="/api/agent", tags=["agent-tools"])
 

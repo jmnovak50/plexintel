@@ -1,5 +1,6 @@
 // Fully restored Recommendations.tsx with feedback logic + working sort
 import { useEffect, useState } from 'react';
+import { Clapperboard, Layers, Play, Tv, type LucideIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 interface Recommendation {
@@ -7,6 +8,7 @@ interface Recommendation {
   media_type: string;
   rating_key: number;
   title: string;
+  poster_url?: string | null;
   show_title: string | null;
   year: number | null;
   predicted_probability: number;
@@ -17,6 +19,70 @@ interface Recommendation {
   show_rating_key?: number | null;
   parent_rating_key?: number | null;
   score_band?: string | null;
+}
+
+const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; className: string }> = {
+  movie: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
+  movies: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
+  show: { icon: Tv, label: 'Show', className: 'text-sky-600' },
+  shows: { icon: Tv, label: 'Show', className: 'text-sky-600' },
+  series: { icon: Tv, label: 'Show', className: 'text-sky-600' },
+  tv_show: { icon: Tv, label: 'Show', className: 'text-sky-600' },
+  season: { icon: Layers, label: 'Season', className: 'text-amber-600' },
+  seasons: { icon: Layers, label: 'Season', className: 'text-amber-600' },
+  episode: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
+  episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600' }
+};
+
+function MediaTypeIcon({ mediaType }: { mediaType: string }) {
+  const normalizedType = mediaType.toLowerCase();
+  const iconConfig = MEDIA_TYPE_ICONS[normalizedType];
+
+  if (!iconConfig) {
+    return <span className="text-xs uppercase tracking-wide text-gray-500">{mediaType}</span>;
+  }
+
+  const Icon = iconConfig.icon;
+
+  return (
+    <span
+      className={`inline-flex items-center justify-center ${iconConfig.className}`}
+      title={iconConfig.label}
+    >
+      <Icon aria-hidden="true" size={16} strokeWidth={2} />
+      <span className="sr-only">{iconConfig.label}</span>
+    </span>
+  );
+}
+
+function RecommendationPoster({ posterUrl }: { posterUrl?: string | null }) {
+  const [hasImageError, setHasImageError] = useState(false);
+
+  useEffect(() => {
+    setHasImageError(false);
+  }, [posterUrl]);
+
+  if (!posterUrl || hasImageError) {
+    return (
+      <span
+        aria-hidden="true"
+        className="inline-flex h-14 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-gray-200 bg-gray-100 text-[9px] font-semibold uppercase tracking-wide text-gray-400"
+      >
+        No Art
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src={posterUrl}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      onError={() => setHasImageError(true)}
+      className="h-14 w-10 shrink-0 rounded-md border border-gray-200 bg-gray-100 object-cover"
+    />
+  );
 }
 
 export default function Recommendations() {
@@ -292,7 +358,7 @@ export default function Recommendations() {
         <table className="min-w-full bg-white text-gray-900 shadow rounded-xl border border-gray-200">
           <thead>
             <tr className="text-left text-gray-600 text-sm border-b bg-gray-100">
-              <th className="px-4 py-3">Type</th>
+              <th className="px-4 py-3 text-center">Type</th>
               <th className="px-4 py-3">Title</th>
               <th className="px-4 py-3">Show</th>
               <th className="px-4 py-3 cursor-pointer" onClick={() => handleSort('season_number')}>Season</th>
@@ -310,8 +376,15 @@ export default function Recommendations() {
                 onClick={() => handleRowClick(rec)}
                 className={`group border-b transition-colors duration-300 ${feedbackSubmittedKeys.includes(rec.rating_key) ? 'bg-green-50' : 'hover:bg-gray-100'} ${viewMode === 'shows' || viewMode === 'seasons' ? 'cursor-pointer' : ''}`}
               >
-                <td className="px-4 py-2">{rec.media_type}</td>
-                <td className="px-4 py-2">{rec.title}</td>
+                <td className="px-4 py-2 text-center">
+                  <MediaTypeIcon mediaType={rec.media_type} />
+                </td>
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-3">
+                    <RecommendationPoster posterUrl={rec.poster_url} />
+                    <span>{rec.title}</span>
+                  </div>
+                </td>
                 <td className="px-4 py-2">{rec.show_title || '—'}</td>
                 <td className="px-4 py-2">{rec.season_number ?? '—'}</td>
                 <td className="px-4 py-2">{rec.episode_number ?? '—'}</td>

@@ -77,7 +77,8 @@ def get_recommendations(
                        scored_at,
                        score_band,
                        show_rating_key,
-                       NULL::int AS parent_rating_key
+                       NULL::int AS parent_rating_key,
+                       poster_path
                 FROM show_rollups_v
                 WHERE username = %s
                 ORDER BY rollup_score DESC
@@ -99,7 +100,8 @@ def get_recommendations(
                        scored_at,
                        score_band,
                        show_rating_key,
-                       show_rating_key AS parent_rating_key
+                       show_rating_key AS parent_rating_key,
+                       poster_path
                 FROM season_rollups_v
                 WHERE username = %s
             """
@@ -124,7 +126,8 @@ def get_recommendations(
                        scored_at,
                        NULL::text AS score_band,
                        show_rating_key,
-                       parent_rating_key
+                       parent_rating_key,
+                       poster_path
                 FROM expanded_recs_w_label_v
                 WHERE username = %s
             """
@@ -148,6 +151,11 @@ def get_recommendations(
         # Main recommendations query
         cur.execute(sql, tuple(params))
         rec_rows = cur.fetchall()
+        for row in rec_rows:
+            rating_key = row.get("rating_key")
+            poster_path = row.get("poster_path")
+            row["poster_url"] = f"/api/posters/{rating_key}" if rating_key is not None and poster_path else None
+            row.pop("poster_path", None)
 
         print(f"📦 Found {len(rec_rows)} recs for {plex_username}")
 

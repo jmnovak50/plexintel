@@ -42,6 +42,12 @@ CREATE VIEW public.expanded_recs_w_label_v AS
     m.summary,
     m.duration,
     m.added_at,
+    CASE
+        WHEN (m.media_type = ANY (ARRAY['movie'::text, 'show'::text, 'series'::text])) THEN m.thumb_path
+        WHEN (m.media_type = 'season'::text) THEN COALESCE(m.thumb_path, m.parent_thumb_path)
+        WHEN (m.media_type = 'episode'::text) THEN COALESCE(m.parent_thumb_path, m.grandparent_thumb_path, m.thumb_path)
+        ELSE COALESCE(m.thumb_path, m.parent_thumb_path, m.grandparent_thumb_path)
+    END AS poster_path,
     g.genres,
     a.actors,
     d.directors,
@@ -72,13 +78,30 @@ CREATE VIEW public.expanded_recs_w_label_v AS
            FROM public.media_directors md
              JOIN public.directors d ON (md.director_id = d.id)
           GROUP BY md.media_id) d ON (d.media_id = m.rating_key)
-  WHERE NOT (EXISTS ( SELECT 1
+  WHERE NOT EXISTS (
+           SELECT 1
            FROM public.watch_history w
-          WHERE ((w.username = r.username) AND (w.rating_key = r.rating_key) AND (((w.percent_complete IS NOT NULL) AND
-            (CASE
-                WHEN (w.percent_complete > (1)::double precision) THEN (w.percent_complete / (100.0)::double precision)
-                ELSE w.percent_complete
-            END >= (0.5)::double precision)) OR ((w.played_duration IS NOT NULL) AND (m.duration IS NOT NULL) AND (m.duration > 0) AND ((w.played_duration)::double precision / ((m.duration)::double precision / (1000.0)::double precision)) >= (0.5)::double precision))))));
+           WHERE w.username = r.username
+             AND w.rating_key = r.rating_key
+             AND (
+               (
+                 w.percent_complete IS NOT NULL
+                 AND (
+                   CASE
+                     WHEN w.percent_complete > (1)::double precision
+                       THEN w.percent_complete / (100.0)::double precision
+                     ELSE w.percent_complete
+                   END
+                 ) >= (0.5)::double precision
+               )
+               OR (
+                 w.played_duration IS NOT NULL
+                 AND m.duration IS NOT NULL
+                 AND m.duration > 0
+                 AND ((w.played_duration)::double precision / ((m.duration)::double precision / (1000.0)::double precision)) >= (0.5)::double precision
+               )
+             )
+        );
 
 CREATE VIEW public.show_rollups_v AS
  WITH episode_recs AS (
@@ -132,7 +155,8 @@ CREATE VIEW public.show_rollups_v AS
             rollup.top_k,
             rollup.scored_at,
             g.genres,
-            ls.year
+            ls.year,
+            ls.thumb_path AS poster_path
            FROM (rollup
              LEFT JOIN ( SELECT mg.media_id,
                     string_agg(DISTINCT g.name, ', '::text) AS genres
@@ -151,6 +175,7 @@ CREATE VIEW public.show_rollups_v AS
     x.episode_count,
     x.top_k,
     x.scored_at,
+    x.poster_path,
     x.score_percentile,
         CASE
             WHEN (x.score_percentile <= (0.2)::double precision) THEN '0-20'::text
@@ -167,6 +192,7 @@ CREATE VIEW public.show_rollups_v AS
             with_genres.scored_at,
             with_genres.genres,
             with_genres.year,
+            with_genres.poster_path,
             percent_rank() OVER (PARTITION BY with_genres.username ORDER BY with_genres.rollup_score) AS score_percentile
            FROM with_genres) x
      JOIN public.users_v uv ON ((uv.username = x.username)));
@@ -230,6 +256,7 @@ CREATE VIEW public.season_rollups_v AS
             s.title AS season_title,
             s.season_number,
             s.year,
+            COALESCE(s.thumb_path, s.parent_thumb_path) AS poster_path,
             g.genres
            FROM (rollup
              LEFT JOIN public.library s ON ((s.rating_key = rollup.season_rating_key)))
@@ -252,6 +279,7 @@ CREATE VIEW public.season_rollups_v AS
     x.episode_count,
     x.top_k,
     x.scored_at,
+    x.poster_path,
     x.score_percentile,
         CASE
             WHEN (x.score_percentile <= (0.2)::double precision) THEN '0-20'::text
@@ -270,6 +298,7 @@ CREATE VIEW public.season_rollups_v AS
             with_meta.season_title,
             with_meta.season_number,
             with_meta.year,
+            with_meta.poster_path,
             with_meta.genres,
             percent_rank() OVER (PARTITION BY with_meta.username ORDER BY with_meta.rollup_score) AS score_percentile
            FROM with_meta) x
