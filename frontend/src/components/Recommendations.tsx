@@ -1,5 +1,4 @@
-// Fully restored Recommendations.tsx with feedback logic + working sort
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type KeyboardEvent } from 'react';
 import { Clapperboard, Layers, Play, Tv, type LucideIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
@@ -21,6 +20,9 @@ interface Recommendation {
   score_band?: string | null;
 }
 
+type ViewMode = 'all' | 'movies' | 'shows' | 'seasons' | 'episodes';
+type SortState = { column: keyof Recommendation; direction: 'asc' | 'desc' };
+
 const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; className: string }> = {
   movie: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
   movies: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
@@ -34,9 +36,17 @@ const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; classN
   episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600' }
 };
 
+function getMediaTypeConfig(mediaType: string) {
+  return MEDIA_TYPE_ICONS[mediaType.toLowerCase()] ?? null;
+}
+
+function canSubmitFeedback(mediaType: string) {
+  const typeKey = mediaType.toLowerCase();
+  return typeKey === 'movie' || typeKey === 'episode';
+}
+
 function MediaTypeIcon({ mediaType }: { mediaType: string }) {
-  const normalizedType = mediaType.toLowerCase();
-  const iconConfig = MEDIA_TYPE_ICONS[normalizedType];
+  const iconConfig = getMediaTypeConfig(mediaType);
 
   if (!iconConfig) {
     return <span className="text-xs uppercase tracking-wide text-gray-500">{mediaType}</span>;
@@ -51,6 +61,23 @@ function MediaTypeIcon({ mediaType }: { mediaType: string }) {
     >
       <Icon aria-hidden="true" size={16} strokeWidth={2} />
       <span className="sr-only">{iconConfig.label}</span>
+    </span>
+  );
+}
+
+function MediaTypeBadge({ mediaType }: { mediaType: string }) {
+  const iconConfig = getMediaTypeConfig(mediaType);
+
+  if (!iconConfig) {
+    return <span className="text-xs uppercase tracking-wide text-gray-500">{mediaType}</span>;
+  }
+
+  const Icon = iconConfig.icon;
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${iconConfig.className}`}>
+      <Icon aria-hidden="true" size={14} strokeWidth={2} />
+      <span>{iconConfig.label}</span>
     </span>
   );
 }
@@ -85,11 +112,320 @@ function RecommendationPoster({ posterUrl }: { posterUrl?: string | null }) {
   );
 }
 
+function RecommendationThemeChips({
+  semanticThemes,
+  compact = false,
+}: {
+  semanticThemes: string | null;
+  compact?: boolean;
+}) {
+  if (!semanticThemes) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {semanticThemes.split(',').map((tag, index) => (
+        <span
+          key={`${tag}-${index}`}
+          className={`inline-flex rounded-full bg-blue-100 text-blue-800 ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
+        >
+          {tag.trim()}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function RecommendationScore({
+  rec,
+  isPending,
+  isSubmitted,
+  compact = false,
+}: {
+  rec: Recommendation;
+  isPending: boolean;
+  isSubmitted: boolean;
+  compact?: boolean;
+}) {
+  const scorePct = rec.predicted_probability * 100;
+
+  return (
+    <div className={`flex flex-col ${compact ? 'items-end text-right' : ''}`}>
+      <span className={`${compact ? 'text-lg font-semibold leading-none' : 'mb-1 text-sm'}`}>
+        {scorePct.toFixed(1)}%
+      </span>
+      <div className={`w-full rounded-full bg-gray-200 ${compact ? 'mt-2 h-1.5 max-w-[6rem]' : 'h-2'}`}>
+        <div
+          className={`rounded-full bg-blue-600 ${compact ? 'h-1.5' : 'h-2'}`}
+          style={{ width: `${scorePct.toFixed(0)}%` }}
+        />
+      </div>
+      {rec.score_band && (
+        <span className="mt-2 text-xs text-gray-500">Band: {rec.score_band}</span>
+      )}
+      {isPending && (
+        <span className="mt-2 text-xs text-gray-500">Submitting feedback...</span>
+      )}
+      {isSubmitted && (
+        <span className="mt-2 text-xs font-medium text-green-700">Feedback submitted</span>
+      )}
+    </div>
+  );
+}
+
+function RecommendationFeedbackActions({
+  rec,
+  isPending,
+  isSubmitted,
+  onFeedback,
+  alwaysVisible = false,
+}: {
+  rec: Recommendation;
+  isPending: boolean;
+  isSubmitted: boolean;
+  onFeedback: (ratingKey: number, feedback: 'up' | 'down') => void;
+  alwaysVisible?: boolean;
+}) {
+  if (!canSubmitFeedback(rec.media_type) || isSubmitted) {
+    return null;
+  }
+
+  const visibilityClass = alwaysVisible
+    ? 'flex'
+    : 'flex opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100';
+
+  return (
+    <div className={`items-center gap-2 ${visibilityClass}`}>
+      <button
+        type="button"
+        aria-label={`Give thumbs up feedback for ${rec.title}`}
+        title="Thumbs up"
+        disabled={isPending}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onFeedback(rec.rating_key, 'up');
+        }}
+        className="inline-flex items-center justify-center text-base leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        👍
+      </button>
+      <button
+        type="button"
+        aria-label={`Give thumbs down feedback for ${rec.title}`}
+        title="Thumbs down"
+        disabled={isPending}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onFeedback(rec.rating_key, 'down');
+        }}
+        className="inline-flex items-center justify-center text-base leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        👎
+      </button>
+    </div>
+  );
+}
+
+function DesktopRecommendationsTable({
+  recommendations,
+  feedbackSubmittedKeys,
+  feedbackPendingKeys,
+  onSort,
+  onRowClick,
+  onFeedback,
+  isRowClickable,
+}: {
+  recommendations: Recommendation[];
+  feedbackSubmittedKeys: number[];
+  feedbackPendingKeys: number[];
+  onSort: (column: keyof Recommendation) => void;
+  onRowClick: (rec: Recommendation) => void;
+  onFeedback: (ratingKey: number, feedback: 'up' | 'down') => void;
+  isRowClickable: boolean;
+}) {
+  return (
+    <div className="hidden md:block">
+      <div className="overflow-x-auto">
+        <table className="min-w-full rounded-xl border border-gray-200 bg-white text-gray-900 shadow">
+          <thead>
+            <tr className="border-b bg-gray-100 text-left text-sm text-gray-600">
+              <th className="px-4 py-3 text-center">Type</th>
+              <th className="px-4 py-3">Title</th>
+              <th className="px-4 py-3">Show</th>
+              <th className="cursor-pointer px-4 py-3" onClick={() => onSort('season_number')}>Season</th>
+              <th className="cursor-pointer px-4 py-3" onClick={() => onSort('episode_number')}>Episode</th>
+              <th className="px-4 py-3">Year</th>
+              <th className="px-4 py-3">Genres</th>
+              <th className="px-4 py-3">Why this?</th>
+              <th className="px-4 py-3">Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            {recommendations.map((rec) => {
+              const isSubmitted = feedbackSubmittedKeys.includes(rec.rating_key);
+              const isPending = feedbackPendingKeys.includes(rec.rating_key);
+
+              return (
+                <tr
+                  key={rec.rating_key}
+                  onClick={() => onRowClick(rec)}
+                  className={`group border-b transition-colors duration-300 ${isSubmitted ? 'bg-green-50' : 'hover:bg-gray-100'} ${isRowClickable ? 'cursor-pointer' : ''}`}
+                >
+                  <td className="px-4 py-2 text-center">
+                    <MediaTypeIcon mediaType={rec.media_type} />
+                  </td>
+                  <td className="px-4 py-2">
+                    <div className="flex flex-col items-center gap-2 text-center">
+                      <RecommendationPoster posterUrl={rec.poster_url} />
+                      <span className="max-w-[8rem] text-sm font-semibold leading-tight text-gray-900">
+                        {rec.title}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2">{rec.show_title || '—'}</td>
+                  <td className="px-4 py-2">{rec.season_number ?? '—'}</td>
+                  <td className="px-4 py-2">{rec.episode_number ?? '—'}</td>
+                  <td className="px-4 py-2">{rec.year ?? '—'}</td>
+                  <td className="px-4 py-2">{rec.genres || '—'}</td>
+                  <td className="px-4 py-2">
+                    <RecommendationThemeChips semanticThemes={rec.semantic_themes} />
+                  </td>
+                  <td className="relative px-4 py-2">
+                    <div className="flex flex-col">
+                      <RecommendationScore rec={rec} isPending={isPending} isSubmitted={isSubmitted} />
+                      <RecommendationFeedbackActions
+                        rec={rec}
+                        isPending={isPending}
+                        isSubmitted={isSubmitted}
+                        onFeedback={onFeedback}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function MobileRecommendationsList({
+  recommendations,
+  feedbackSubmittedKeys,
+  feedbackPendingKeys,
+  onRowClick,
+  onFeedback,
+  isRowClickable,
+}: {
+  recommendations: Recommendation[];
+  feedbackSubmittedKeys: number[];
+  feedbackPendingKeys: number[];
+  onRowClick: (rec: Recommendation) => void;
+  onFeedback: (ratingKey: number, feedback: 'up' | 'down') => void;
+  isRowClickable: boolean;
+}) {
+  const handleCardKeyDown = (
+    event: KeyboardEvent<HTMLDivElement>,
+    rec: Recommendation,
+  ) => {
+    if (!isRowClickable) {
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onRowClick(rec);
+    }
+  };
+
+  return (
+    <div className="space-y-3 md:hidden">
+      {recommendations.map((rec) => {
+        const isSubmitted = feedbackSubmittedKeys.includes(rec.rating_key);
+        const isPending = feedbackPendingKeys.includes(rec.rating_key);
+
+        return (
+          <div
+            key={rec.rating_key}
+            role={isRowClickable ? 'button' : undefined}
+            tabIndex={isRowClickable ? 0 : undefined}
+            onClick={() => onRowClick(rec)}
+            onKeyDown={(event) => handleCardKeyDown(event, rec)}
+            className={`rounded-xl border bg-white p-4 text-gray-900 shadow-sm transition-colors duration-300 ${isSubmitted ? 'border-green-200 bg-green-50' : 'border-gray-200'} ${isRowClickable ? 'cursor-pointer active:bg-gray-50' : ''}`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <MediaTypeBadge mediaType={rec.media_type} />
+              <RecommendationScore rec={rec} isPending={isPending} isSubmitted={isSubmitted} compact />
+            </div>
+
+            <div className="mt-4 flex flex-col items-center gap-2 text-center">
+              <RecommendationPoster posterUrl={rec.poster_url} />
+              <span className="max-w-[14rem] text-sm font-semibold leading-tight text-gray-900">
+                {rec.title}
+              </span>
+            </div>
+
+            <div className="mt-4 space-y-1 text-sm text-gray-600">
+              {rec.show_title && (
+                <div>
+                  <span className="font-medium text-gray-700">Show:</span> {rec.show_title}
+                </div>
+              )}
+              {(rec.season_number != null || rec.episode_number != null) && (
+                <div>
+                  <span className="font-medium text-gray-700">Episode:</span>{' '}
+                  {[
+                    rec.season_number != null ? `Season ${rec.season_number}` : null,
+                    rec.episode_number != null ? `Episode ${rec.episode_number}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' • ')}
+                </div>
+              )}
+              {rec.year != null && (
+                <div>
+                  <span className="font-medium text-gray-700">Year:</span> {rec.year}
+                </div>
+              )}
+              {rec.genres && (
+                <div>
+                  <span className="font-medium text-gray-700">Genres:</span> {rec.genres}
+                </div>
+              )}
+            </div>
+
+            {rec.semantic_themes && (
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Why this?</p>
+                <RecommendationThemeChips semanticThemes={rec.semantic_themes} compact />
+              </div>
+            )}
+
+            <div className="mt-4">
+              <RecommendationFeedbackActions
+                rec={rec}
+                isPending={isPending}
+                isSubmitted={isSubmitted}
+                onFeedback={onFeedback}
+                alwaysVisible
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function Recommendations() {
   const [search, setSearch] = useState('');
   const [recs, setRecs] = useState<Recommendation[]>([]);
   const [darkMode, setDarkMode] = useState(false);
-  const [viewMode, setViewMode] = useState<'all' | 'movies' | 'shows' | 'seasons' | 'episodes'>('all');
+  const [viewMode, setViewMode] = useState<ViewMode>('all');
   const [selectedShow, setSelectedShow] = useState<{ key: number; title: string } | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<{ key: number; title: string } | null>(null);
   const [minScore, setMinScore] = useState(0);
@@ -99,7 +435,7 @@ export default function Recommendations() {
   const [feedbackSubmittedKeys, setFeedbackSubmittedKeys] = useState<number[]>([]);
   const [feedbackPendingKeys, setFeedbackPendingKeys] = useState<number[]>([]);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
-  const [sortOrder, setSortOrder] = useState<Array<{ column: keyof Recommendation; direction: 'asc' | 'desc' }>>([]);
+  const [sortOrder, setSortOrder] = useState<SortState[]>([]);
 
   useEffect(() => {
     const baseUrl = window.location.origin;
@@ -180,7 +516,6 @@ export default function Recommendations() {
       }
     } catch (error) {
       console.error(error);
-      // Roll back optimistic hide if the write failed.
       setFeedbackSubmittedKeys((prev) => prev.filter((key) => key !== ratingKey));
       setFeedbackError(error instanceof Error ? error.message : 'Failed to submit feedback.');
     } finally {
@@ -190,22 +525,22 @@ export default function Recommendations() {
 
   const handleSort = (column: keyof Recommendation, shiftKey = false) => {
     setSortOrder((prev) => {
-      const existing = prev.find((s) => s?.column === column);
+      const existing = prev.find((sort) => sort?.column === column);
 
       if (existing) {
-        return prev.map((s) =>
-          s.column === column
-            ? { ...s, direction: s.direction === 'asc' ? 'desc' : 'asc' }
-            : s
+        return prev.map((sort) =>
+          sort.column === column
+            ? { ...sort, direction: sort.direction === 'asc' ? 'desc' : 'asc' }
+            : sort
         );
-      } else {
-        const newSort = { column, direction: 'asc' as const };
-        return shiftKey ? [...prev, newSort] : [newSort];
       }
+
+      const newSort = { column, direction: 'asc' as const };
+      return shiftKey ? [...prev, newSort] : [newSort];
     });
   };
 
-  const handleViewSelect = (nextView: 'all' | 'movies' | 'shows' | 'seasons' | 'episodes') => {
+  const handleViewSelect = (nextView: ViewMode) => {
     setViewMode(nextView);
     setSelectedShow(null);
     setSelectedSeason(null);
@@ -259,12 +594,16 @@ export default function Recommendations() {
       return 0;
     });
 
-  return (
-    <div className={`p-4 max-w-7xl mx-auto ${darkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
-      <h1 className="text-3xl font-bold mb-2">🎬 Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}</h1>
+  const isRowClickable = viewMode === 'shows' || viewMode === 'seasons';
 
-      <div className="mb-4 flex justify-between items-center">
-        <div className="flex items-center gap-3">
+  return (
+    <div className={`mx-auto w-full max-w-7xl overflow-x-hidden px-3 py-4 sm:px-4 ${darkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
+      <h1 className="mb-2 text-2xl font-bold md:text-3xl">
+        🎬 Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}
+      </h1>
+
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center gap-3">
           {isAdmin && (
             <Link
               to="/admin"
@@ -280,19 +619,19 @@ export default function Recommendations() {
         </div>
       </div>
 
-      <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <input
           type="text"
           placeholder="Search by title, show, genre, or theme..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full p-2 border border-gray-300 rounded-md shadow-sm"
+          className="w-full rounded-md border border-gray-300 p-2 shadow-sm"
         />
 
         <select
           value={viewMode}
-          onChange={(e) => handleViewSelect(e.target.value as 'all' | 'movies' | 'shows' | 'seasons' | 'episodes')}
-          className="w-full p-2 border border-gray-300 rounded-md shadow-sm"
+          onChange={(e) => handleViewSelect(e.target.value as ViewMode)}
+          className="w-full rounded-md border border-gray-300 p-2 shadow-sm"
         >
           <option value="all">All</option>
           <option value="movies">Movies</option>
@@ -302,7 +641,7 @@ export default function Recommendations() {
         </select>
 
         <div className="col-span-1 sm:col-span-2">
-          <label htmlFor="score-range" className="block text-sm font-medium text-gray-700 mb-1">
+          <label htmlFor="score-range" className="mb-1 block text-sm font-medium text-gray-700">
             Minimum Score: {minScore}%
           </label>
           <input
@@ -325,7 +664,7 @@ export default function Recommendations() {
       )}
 
       {(viewMode === 'seasons' || viewMode === 'episodes') && selectedShow && (
-        <div className="mb-4 flex items-center gap-2 text-sm text-gray-600">
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-gray-600">
           <button
             onClick={() => {
               setSelectedSeason(null);
@@ -354,110 +693,34 @@ export default function Recommendations() {
         </div>
       )}
 
-      <div className="overflow-x-auto">
-        <table className="min-w-full bg-white text-gray-900 shadow rounded-xl border border-gray-200">
-          <thead>
-            <tr className="text-left text-gray-600 text-sm border-b bg-gray-100">
-              <th className="px-4 py-3 text-center">Type</th>
-              <th className="px-4 py-3">Title</th>
-              <th className="px-4 py-3">Show</th>
-              <th className="px-4 py-3 cursor-pointer" onClick={() => handleSort('season_number')}>Season</th>
-              <th className="px-4 py-3 cursor-pointer" onClick={() => handleSort('episode_number')}>Episode</th>
-              <th className="px-4 py-3">Year</th>
-              <th className="px-4 py-3">Genres</th>
-              <th className="px-4 py-3">Why this?</th>
-              <th className="px-4 py-3">Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredRecs.map((rec) => (
-              <tr
-                key={rec.rating_key}
-                onClick={() => handleRowClick(rec)}
-                className={`group border-b transition-colors duration-300 ${feedbackSubmittedKeys.includes(rec.rating_key) ? 'bg-green-50' : 'hover:bg-gray-100'} ${viewMode === 'shows' || viewMode === 'seasons' ? 'cursor-pointer' : ''}`}
-              >
-                <td className="px-4 py-2 text-center">
-                  <MediaTypeIcon mediaType={rec.media_type} />
-                </td>
-                  <td className="px-4 py-2">
-                    <div className="flex min-w-[7rem] flex-col items-center gap-2 text-center">
-                      <RecommendationPoster posterUrl={rec.poster_url} />
-                      <span className="max-w-[8rem] text-sm font-semibold leading-tight text-gray-900">
-                        {rec.title}
-                      </span>
-                    </div>
-                  </td>
-                <td className="px-4 py-2">{rec.show_title || '—'}</td>
-                <td className="px-4 py-2">{rec.season_number ?? '—'}</td>
-                <td className="px-4 py-2">{rec.episode_number ?? '—'}</td>
-                <td className="px-4 py-2">{rec.year}</td>
-                <td className="px-4 py-2">{rec.genres || '—'}</td>
-                <td className="px-4 py-2">
-                  {rec.semantic_themes
-                    ? rec.semantic_themes.split(',').map((tag, i) => (
-                      <span key={i} className="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full mr-1">
-                        {tag.trim()}
-                      </span>
-                    ))
-                    : null}
-                </td>
-                <td className="px-4 py-2 relative">
-                  <div className="flex flex-col">
-                    <span className="text-sm mb-1">{(rec.predicted_probability * 100).toFixed(1)}%</span>
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${(rec.predicted_probability * 100).toFixed(0)}%` }}></div>
-                    </div>
-                    {rec.score_band && (
-                      <span className="text-xs text-gray-500 mt-2">Band: {rec.score_band}</span>
-                    )}
-                    {feedbackPendingKeys.includes(rec.rating_key) && (
-                      <span className="text-xs text-gray-500 mt-2">Submitting feedback...</span>
-                    )}
-                    {feedbackSubmittedKeys.includes(rec.rating_key) && (
-                      <span className="text-xs font-medium text-green-700 mt-2">Feedback submitted</span>
-                    )}
-                    {(rec.media_type === 'movie' || rec.media_type === 'episode') && !feedbackSubmittedKeys.includes(rec.rating_key) ? (
-                      <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-                        <button
-                          type="button"
-                          aria-label={`Give thumbs up feedback for ${rec.title}`}
-                          title="Thumbs up"
-                          disabled={feedbackPendingKeys.includes(rec.rating_key)}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            sendFeedback(rec.rating_key, 'up');
-                          }}
-                          className="inline-flex items-center justify-center text-base leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          👍
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`Give thumbs down feedback for ${rec.title}`}
-                          title="Thumbs down"
-                          disabled={feedbackPendingKeys.includes(rec.rating_key)}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            sendFeedback(rec.rating_key, 'down');
-                          }}
-                          className="inline-flex items-center justify-center text-base leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          👎
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {filteredRecs.length === 0 ? (
+        <div className="rounded-xl border border-gray-200 bg-white px-4 py-6 text-sm text-gray-500 shadow-sm">
+          No recommendations match the current filters.
+        </div>
+      ) : (
+        <>
+          <MobileRecommendationsList
+            recommendations={filteredRecs}
+            feedbackSubmittedKeys={feedbackSubmittedKeys}
+            feedbackPendingKeys={feedbackPendingKeys}
+            onRowClick={handleRowClick}
+            onFeedback={sendFeedback}
+            isRowClickable={isRowClickable}
+          />
+          <DesktopRecommendationsTable
+            recommendations={filteredRecs}
+            feedbackSubmittedKeys={feedbackSubmittedKeys}
+            feedbackPendingKeys={feedbackPendingKeys}
+            onSort={handleSort}
+            onRowClick={handleRowClick}
+            onFeedback={sendFeedback}
+            isRowClickable={isRowClickable}
+          />
+        </>
+      )}
 
       {lastUpdated && (
-        <div className="mt-4 text-sm text-gray-500 text-right">
+        <div className="mt-4 text-right text-sm text-gray-500">
           Last updated: {new Date(lastUpdated).toLocaleString()}
         </div>
       )}
