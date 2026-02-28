@@ -9,6 +9,7 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.users import get_or_create_user
 from api.services.plex_service import get_plex_user_info
+from api.services.poster_service import build_poster_url
 
 router = APIRouter()
 
@@ -247,6 +248,8 @@ def admin_get_recommendations(
 
             cur.execute(sql, tuple(params))
             rec_rows = cur.fetchall()
+            for row in rec_rows:
+                row["poster_url"] = build_poster_url(row.get("rating_key"))
 
             cur.execute(
                 """

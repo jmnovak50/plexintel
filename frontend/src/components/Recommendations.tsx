@@ -66,7 +66,7 @@ function RecommendationPoster({ posterUrl }: { posterUrl?: string | null }) {
     return (
       <span
         aria-hidden="true"
-        className="inline-flex h-14 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-gray-200 bg-gray-100 text-[9px] font-semibold uppercase tracking-wide text-gray-400"
+        className="inline-flex h-20 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-gray-200 bg-gray-100 text-[9px] font-semibold uppercase tracking-wide text-gray-400"
       >
         No Art
       </span>
@@ -80,7 +80,7 @@ function RecommendationPoster({ posterUrl }: { posterUrl?: string | null }) {
       loading="lazy"
       decoding="async"
       onError={() => setHasImageError(true)}
-      className="h-14 w-10 shrink-0 rounded-md border border-gray-200 bg-gray-100 object-cover"
+      className="h-20 w-14 shrink-0 rounded-md border border-gray-200 bg-gray-100 object-cover"
     />
   );
 }
@@ -379,12 +379,14 @@ export default function Recommendations() {
                 <td className="px-4 py-2 text-center">
                   <MediaTypeIcon mediaType={rec.media_type} />
                 </td>
-                <td className="px-4 py-2">
-                  <div className="flex items-center gap-3">
-                    <RecommendationPoster posterUrl={rec.poster_url} />
-                    <span>{rec.title}</span>
-                  </div>
-                </td>
+                  <td className="px-4 py-2">
+                    <div className="flex min-w-[7rem] flex-col items-center gap-2 text-center">
+                      <RecommendationPoster posterUrl={rec.poster_url} />
+                      <span className="max-w-[8rem] text-sm font-semibold leading-tight text-gray-900">
+                        {rec.title}
+                      </span>
+                    </div>
+                  </td>
                 <td className="px-4 py-2">{rec.show_title || '—'}</td>
                 <td className="px-4 py-2">{rec.season_number ?? '—'}</td>
                 <td className="px-4 py-2">{rec.episode_number ?? '—'}</td>

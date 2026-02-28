@@ -39,3 +39,9 @@ def resolve_poster_path_from_row(row: Mapping[str, Any]) -> Optional[str]:
         parent_thumb_path=row.get("parent_thumb_path"),
         grandparent_thumb_path=row.get("grandparent_thumb_path"),
     )
+
+
+def build_poster_url(rating_key: Any) -> Optional[str]:
+    if rating_key is None:
+        return None
+    return f"/api/posters/{rating_key}"

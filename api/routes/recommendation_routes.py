@@ -7,6 +7,7 @@ from psycopg2.extras import RealDictCursor
 import pandas as pd
 from pgvector.psycopg2 import register_vector
 from dotenv import load_dotenv
+from api.services.poster_service import build_poster_url
 
 load_dotenv()
 
@@ -153,8 +154,7 @@ def get_recommendations(
         rec_rows = cur.fetchall()
         for row in rec_rows:
             rating_key = row.get("rating_key")
-            poster_path = row.get("poster_path")
-            row["poster_url"] = f"/api/posters/{rating_key}" if rating_key is not None and poster_path else None
+            row["poster_url"] = build_poster_url(rating_key)
             row.pop("poster_path", None)
 
         print(f"📦 Found {len(rec_rows)} recs for {plex_username}")
