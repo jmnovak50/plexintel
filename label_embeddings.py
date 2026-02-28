@@ -1,41 +1,44 @@
 # label_embeddings.py
-# Summarize and label embedding dimensions using GPT and watch/metadata context
+# Summarize and label embedding dimensions using a configurable LLM provider.
 
 from dotenv import load_dotenv
 load_dotenv()
-from gpt_utils import call_gpt_for_label, insert_label
+from gpt_utils import call_llm_for_label, insert_label, resolve_label_backend
 import psycopg2
 import pandas as pd
-from datetime import datetime
 from pgvector.psycopg2 import register_vector
 import argparse
 import os
-import openai
 
 
 DB_URL = os.getenv("DATABASE_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
 
 def connect_db():
     conn = psycopg2.connect(DB_URL)
     register_vector(conn)
     return conn
 
-def label_single_dimension(dimension, top_n=10, gpt_label=False, save_label=False):
+def label_single_dimension(
+    dimension,
+    top_n=10,
+    generate_label=False,
+    save_label=False,
+    label_provider=None,
+    label_model=None,
+):
     mode, top_ids = get_top_entities_for_dimension(dimension, top_n)
     if mode == "user":
         df = get_user_watch_history(top_ids)
     else:
         df = get_media_metadata(top_ids)
-        print("🔥 GETTING METADATA FOR:", top_ids)
     summary = generate_summary_text(df, dimension)
-    print(f"📄 Prompt for GPT (dim {dimension}):")
+    print(f"📄 Prompt for label generation (dim {dimension}):")
     print(summary)
 
-    if gpt_label:
-        label = call_gpt_for_label(summary)
-        print(f"🧠 Suggested label for dim {dimension}: {label}")
+    if generate_label:
+        provider_name, model_name = resolve_label_backend(label_provider, label_model)
+        label = call_llm_for_label(summary, provider=provider_name, model=model_name)
+        print(f"🧠 Suggested label for dim {dimension} via {provider_name}:{model_name}: {label}")
         if save_label:
             insert_label(dimension, label)
 
@@ -154,9 +157,6 @@ def get_media_metadata(rating_keys):
     conn.close()
 
     df = pd.DataFrame(rows, columns=colnames)
-    print("\n🎬 DEBUG METADATA SAMPLE:")
-    print(df[['rating_key', 'title', 'media_type', 'show_title', 'actor_tags', 'director_tags']].head(10).to_string(index=False))
-
     expected_cols = ["title", "year", "media_type", "show_title", "rating", "summary", "genre_tags", "actor_tags", "director_tags"]
     for col in expected_cols:
         if col not in df.columns:
@@ -165,36 +165,48 @@ def get_media_metadata(rating_keys):
     return df
 
 def generate_summary_text(df, dimension):
-    print("\n🎬 DEBUG SUMMARY INPUT:")
-    print(df[['title', 'actor_tags', 'director_tags']].head(5).to_string(index=False))
+    def _safe_str(value):
+        if value is None or pd.isna(value):
+            return ""
+        return str(value)
+
     lines = [f"Top items for embedding dimension {dimension}:\n"]
-    for _, row in df.head(10).iterrows():
-        media_type = row.get("media_type", "").strip().upper()
+    for _, row in df.head(6).iterrows():
+        media_type = _safe_str(row.get("media_type", "")).strip().upper()
         media_type_label = f"[{media_type}]" if media_type else "[UNKNOWN]"
 
-        show_title = row.get("show_title", "").strip()
-        base_title = f"{show_title}: {row['title']}" if show_title else row['title']
-        title = f"{media_type_label} {base_title} ({row['year']})"
+        show_title = _safe_str(row.get("show_title", "")).strip()
+        title_value = _safe_str(row.get("title", "")).strip()
+        year_value = _safe_str(row.get("year", "")).strip()
+        base_title = f"{show_title}: {title_value}" if show_title else title_value
+        title = f"{media_type_label} {base_title} ({year_value})"
 
-        title_line = f"- {title} | {row['genre_tags']}"
+        genre_tags = ", ".join(
+            tag.strip() for tag in _safe_str(row.get("genre_tags", "")).split(",")[:3] if tag.strip()
+        )
+        title_line = f"- {title}"
+        if genre_tags:
+            title_line += f" | {genre_tags}"
         extras = []
 
         if pd.notna(row.get('director_tags')) and row['director_tags']:
-            trimmed_directors = ", ".join(row['director_tags'].split(", ")[:3]) + "..."
+            trimmed_directors = ", ".join(row['director_tags'].split(", ")[:2])
             extras.append(f"Director(s): {trimmed_directors}")
 
         if pd.notna(row.get('actor_tags')) and row['actor_tags']:
-            trimmed_actors = ", ".join(row['actor_tags'].split(", ")[:4]) + "..."
+            trimmed_actors = ", ".join(row['actor_tags'].split(", ")[:2])
             extras.append(f"Actor(s): {trimmed_actors}")
 
-        if pd.notna(row.get('rating')):
+        if pd.notna(row.get('rating')) and _safe_str(row.get('rating')).strip():
             extras.append(f"Rating: {row['rating']}")
 
         if extras:
             title_line += "\n  " + " | ".join(extras)
 
         if pd.notna(row.get('summary')) and row['summary']:
-            summary_text = row['summary'][:500] + "..." if len(row['summary']) > 500 else row['summary']
+            summary_text = row['summary'][:220].strip()
+            if len(row['summary']) > 220:
+                summary_text += "..."
             title_line += f"\n  {summary_text}"
 
         lines.append(title_line + "\n")
@@ -206,14 +218,24 @@ def main():
     group.add_argument("--dimension", type=int, help="Single embedding dimension index")
     group.add_argument("--dimensions", nargs="+", type=int, help="List of embedding dimension indexes")
     parser.add_argument("--top_n", type=int, default=10, help="Number of top items or users to summarize")
-    parser.add_argument("--gpt_label", action="store_true", help="Use GPT to generate a label")
+    parser.add_argument("--label", action="store_true", help="Generate a label using the configured LLM provider")
+    parser.add_argument("--gpt_label", dest="label", action="store_true", help="Deprecated alias for --label")
+    parser.add_argument("--label_provider", choices=["openai", "ollama"], default=None, help="Override label provider")
+    parser.add_argument("--label_model", default=None, help="Override label model name")
     parser.add_argument("--save_label", action="store_true", help="Store the label in the embedding_labels table")
     args = parser.parse_args()
 
     dimensions = args.dimensions if args.dimensions else ([args.dimension])
 
     for dim in dimensions:
-        label_single_dimension(dim, top_n=args.top_n, gpt_label=args.gpt_label, save_label=args.save_label)
+        label_single_dimension(
+            dim,
+            top_n=args.top_n,
+            generate_label=args.label,
+            save_label=args.save_label,
+            label_provider=args.label_provider,
+            label_model=args.label_model,
+        )
 
 if __name__ == "__main__":
     main()

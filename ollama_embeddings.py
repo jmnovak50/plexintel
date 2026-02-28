@@ -16,12 +16,40 @@ import os, time, json, math
 import requests
 from typing import Iterable, List
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://192.168.1.123:31770")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "embeddinggemma")
-raw_default_bs = os.getenv("EMBED_BATCH_SIZE", "128")
-EMBED_BATCH_SIZE = int(str(raw_default_bs).strip().split()[0])
-OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "300"))
-OLLAMA_THREADS = os.getenv("OLLAMA_THREADS")  # string or None
+
+def _strip_inline_annotation(value: str) -> str:
+    cleaned = str(value).strip().strip("\"'")
+    if "(default:" in cleaned:
+        cleaned = cleaned.split("(default:", 1)[0].strip()
+    return cleaned
+
+
+def _get_env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    cleaned = _strip_inline_annotation(value)
+    return cleaned or default
+
+
+def _get_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    cleaned = _strip_inline_annotation(value)
+    if not cleaned:
+        return default
+    try:
+        return int(cleaned.split()[0])
+    except Exception:
+        return default
+
+
+OLLAMA_HOST = _get_env_str("OLLAMA_HOST", "http://192.168.1.123:31770").rstrip("/")
+OLLAMA_MODEL = _get_env_str("OLLAMA_MODEL", "embeddinggemma")
+EMBED_BATCH_SIZE = _get_env_int("EMBED_BATCH_SIZE", 128)
+OLLAMA_TIMEOUT_S = _get_env_int("OLLAMA_TIMEOUT_S", 300)
+OLLAMA_THREADS = _get_env_int("OLLAMA_THREADS", 0) or None
 
 class OllamaError(RuntimeError):
     pass
@@ -38,7 +66,7 @@ def _post_embed(inputs: List[str]) -> List[List[float]]:
     payload = {"model": OLLAMA_MODEL, "input": inputs, "keep_alive": "15m"}
     if OLLAMA_THREADS:
         # llama.cpp-compatible hint; Ollama will ignore if unsupported
-        payload["num_thread"] = int(OLLAMA_THREADS)
+        payload["num_thread"] = OLLAMA_THREADS
     r = requests.post(f"{OLLAMA_HOST}/api/embed", json=payload, timeout=OLLAMA_TIMEOUT_S)
     if r.status_code >= 400:
         raise OllamaError(f"Ollama error {r.status_code}: {r.text[:200]}")

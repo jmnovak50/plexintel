@@ -2,14 +2,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import psycopg2
-import pandas as pd
-from datetime import datetime
 from pgvector.psycopg2 import register_vector
 import argparse
 import os
 import csv
 from gpt_utils import (
-    call_gpt_for_label,
+    call_llm_for_label,
+    resolve_label_backend,
     get_top_media_for_dimension,
     get_top_users_for_dimension,
     get_media_metadata,
@@ -19,7 +18,6 @@ from gpt_utils import (
 
 
 DB_URL = os.getenv("DATABASE_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def connect_db():
     conn = psycopg2.connect(DB_URL)
@@ -103,7 +101,10 @@ def get_top_unlabeled_dimensions(cur, limit=25, dim_type='media'):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--gpt_label", action="store_true")
+    parser.add_argument("--label", action="store_true", help="Generate labels using the configured LLM provider")
+    parser.add_argument("--gpt_label", dest="label", action="store_true", help="Deprecated alias for --label")
+    parser.add_argument("--label_provider", choices=["openai", "ollama"], default=None, help="Override label provider")
+    parser.add_argument("--label_model", default=None, help="Override label model name")
     parser.add_argument("--export_csv", type=str)
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--save_label", action="store_true")
@@ -112,6 +113,11 @@ def main():
     args = parser.parse_args()
 
     csv_rows = []
+    provider_name = None
+    model_name = None
+
+    if args.label:
+        provider_name, model_name = resolve_label_backend(args.label_provider, args.label_model)
 
     conn = connect_db()
     cur = conn.cursor()
@@ -120,7 +126,7 @@ def main():
 
     for dim_stats in top_dims:
         dimension = dim_stats["dimension"]
-        gpt_label = None
+        generated_label = None
         mode = "user" if dimension < 768 else "media"
 
         if mode == "media":
@@ -132,16 +138,22 @@ def main():
 
         summary = generate_summary_text(df, dimension)
 
-        if args.gpt_label:
-            gpt_label = call_gpt_for_label(summary)
-            print(f"🧠 {mode.title()} dim {dimension} labeled as: {gpt_label}")
+        if args.label:
+            generated_label = call_llm_for_label(summary, provider=provider_name, model=model_name)
+            print(
+                f"🧠 {mode.title()} dim {dimension} labeled via "
+                f"{provider_name}:{model_name} as: {generated_label}"
+            )
 
         if args.export_csv:
             csv_rows.append({
                 "dimension": dimension,
                 "mode": mode,
                 "summary": summary,
-                "gpt_label": gpt_label or '',
+                "label_provider": provider_name or "",
+                "label_model": model_name or "",
+                "label": generated_label or "",
+                "gpt_label": generated_label or "",
                 "usage_count": dim_stats["usage_count"],
                 "sum_abs_shap": dim_stats.get("sum_abs_shap", 0.0),
                 "avg_abs_shap": dim_stats.get("avg_abs_shap", 0.0),
@@ -150,10 +162,10 @@ def main():
                 "stats_source": dim_stats.get("stats_source", "unknown"),
             })
 
-        if gpt_label and args.save_label:
+        if generated_label and args.save_label:
             cur.execute(
                 "INSERT INTO embedding_labels (dimension, label, created_at) VALUES (%s, %s, NOW())",
-                (dimension, gpt_label)
+                (dimension, generated_label)
             )
 
     if args.export_csv and csv_rows:
@@ -164,6 +176,9 @@ def main():
                     "dimension",
                     "mode",
                     "summary",
+                    "label_provider",
+                    "label_model",
+                    "label",
                     "gpt_label",
                     "usage_count",
                     "sum_abs_shap",
