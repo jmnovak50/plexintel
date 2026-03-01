@@ -1,19 +1,22 @@
-from fastapi import APIRouter, Request, HTTPException, Query
-from typing import Optional
-import requests
 import os
+from typing import Optional
+
 import psycopg2
-from psycopg2.extras import RealDictCursor
-import pandas as pd
-from pgvector.psycopg2 import register_vector
+import requests
 from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException, Query, Request
+from pgvector.psycopg2 import register_vector
+from psycopg2.extras import RealDictCursor
+
 from api.services.poster_service import build_poster_url
+
 
 load_dotenv()
 
 router = APIRouter()
 
 DB_URL = os.getenv("DATABASE_URL")
+
 
 def get_plex_username(token: str) -> str:
     headers = {
@@ -27,9 +30,37 @@ def get_plex_username(token: str) -> str:
 
     try:
         return resp.json()["user"]["username"]
-    except Exception as e:
-        print("❌ Failed to parse Plex username response:", resp.text)
+    except Exception:
+        print("Failed to parse Plex username response:", resp.text)
         raise HTTPException(status_code=500, detail="Malformed response from Plex")
+
+
+def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
+    return f"""
+        WITH feedback_by_item AS (
+            SELECT
+                rating_key,
+                BOOL_OR(feedback = 'up') AS has_up,
+                BOOL_OR(feedback = 'down') AS has_down
+            FROM user_feedback
+            WHERE username = %s
+            GROUP BY rating_key
+        ),
+        descendant_feedback AS (
+            SELECT
+                l.{group_column} AS {group_alias},
+                COUNT(*)::int AS descendant_episode_count,
+                COUNT(f.rating_key)::int AS descendant_feedback_total_count,
+                COUNT(*) FILTER (WHERE f.has_up)::int AS descendant_feedback_up_count,
+                COUNT(*) FILTER (WHERE f.has_down)::int AS descendant_feedback_down_count
+            FROM library l
+            LEFT JOIN feedback_by_item f ON f.rating_key = l.rating_key
+            WHERE l.media_type = 'episode'
+              AND l.{group_column} IS NOT NULL
+            GROUP BY l.{group_column}
+        )
+    """
+
 
 @router.get("/recommendations")
 def get_recommendations(
@@ -38,19 +69,17 @@ def get_recommendations(
     show_rating_key: Optional[int] = Query(None),
     season_rating_key: Optional[int] = Query(None),
 ):
-    print("📥 Session:", request.session)
+    print("Session:", request.session)
 
     token = request.session.get("plex_token")
-    print("🔑 Token from session:", token)
-
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
         plex_username = get_plex_username(token)
-        print("👤 Resolved Plex username:", plex_username)
-    except Exception as e:
-        print("❌ Error resolving Plex username:", str(e))
+        print("Resolved Plex username:", plex_username)
+    except Exception as exc:
+        print("Error resolving Plex username:", str(exc))
         raise HTTPException(status_code=403, detail="Invalid token")
 
     try:
@@ -63,72 +92,89 @@ def get_recommendations(
             raise HTTPException(status_code=400, detail=f"Unsupported view: {view}")
 
         if view_key == "shows":
-            sql = """
-                SELECT friendly_name,
-                       show_rating_key AS rating_key,
-                       show_title AS title,
-                       rollup_score AS predicted_probability,
-                       NULL::text AS semantic_themes,
-                       year,
-                       genres,
-                       show_title,
-                       NULL::int AS season_number,
-                       NULL::int AS episode_number,
-                       'show'::text AS media_type,
-                       scored_at,
-                       score_band,
-                       show_rating_key,
-                       NULL::int AS parent_rating_key,
-                       poster_path
-                FROM show_rollups_v
-                WHERE username = %s
-                ORDER BY rollup_score DESC
+            sql = _feedback_rollup_cte("show_rating_key", "group_rating_key") + """
+                SELECT
+                    sr.friendly_name,
+                    sr.show_rating_key AS rating_key,
+                    sr.show_title AS title,
+                    sr.rollup_score AS predicted_probability,
+                    NULL::text AS semantic_themes,
+                    sr.year,
+                    sr.genres,
+                    sr.show_title,
+                    NULL::int AS season_number,
+                    NULL::int AS episode_number,
+                    'show'::text AS media_type,
+                    sr.scored_at,
+                    sr.score_band,
+                    sr.show_rating_key,
+                    NULL::int AS parent_rating_key,
+                    sr.poster_path,
+                    COALESCE(df.descendant_episode_count, 0) AS descendant_episode_count,
+                    COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
+                    COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
+                    COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count
+                FROM show_rollups_v sr
+                LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
+                WHERE sr.username = %s
+                ORDER BY sr.rollup_score DESC
             """
-            params = [plex_username]
+            params = [plex_username, plex_username]
         elif view_key == "seasons":
-            sql = """
-                SELECT friendly_name,
-                       season_rating_key AS rating_key,
-                       season_title AS title,
-                       rollup_score AS predicted_probability,
-                       NULL::text AS semantic_themes,
-                       year,
-                       genres,
-                       show_title,
-                       season_number,
-                       NULL::int AS episode_number,
-                       'season'::text AS media_type,
-                       scored_at,
-                       score_band,
-                       show_rating_key,
-                       show_rating_key AS parent_rating_key,
-                       poster_path
-                FROM season_rollups_v
-                WHERE username = %s
+            sql = _feedback_rollup_cte("parent_rating_key", "group_rating_key") + """
+                SELECT
+                    sr.friendly_name,
+                    sr.season_rating_key AS rating_key,
+                    sr.season_title AS title,
+                    sr.rollup_score AS predicted_probability,
+                    NULL::text AS semantic_themes,
+                    sr.year,
+                    sr.genres,
+                    sr.show_title,
+                    sr.season_number,
+                    NULL::int AS episode_number,
+                    'season'::text AS media_type,
+                    sr.scored_at,
+                    sr.score_band,
+                    sr.show_rating_key,
+                    sr.show_rating_key AS parent_rating_key,
+                    sr.poster_path,
+                    COALESCE(df.descendant_episode_count, 0) AS descendant_episode_count,
+                    COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
+                    COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
+                    COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count
+                FROM season_rollups_v sr
+                LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.season_rating_key
+                WHERE sr.username = %s
             """
-            params = [plex_username]
+            params = [plex_username, plex_username]
             if show_rating_key is not None:
-                sql += " AND show_rating_key = %s"
+                sql += " AND sr.show_rating_key = %s"
                 params.append(show_rating_key)
-            sql += " ORDER BY rollup_score DESC"
+            sql += " ORDER BY sr.rollup_score DESC"
         else:
             sql = """
-                SELECT friendly_name,
-                       rating_key,
-                       title,
-                       predicted_probability,
-                       semantic_themes,
-                       year,
-                       genres,
-                       show_title,
-                       season_number,
-                       episode_number,
-                       media_type,
-                       scored_at,
-                       NULL::text AS score_band,
-                       show_rating_key,
-                       parent_rating_key,
-                       poster_path
+                SELECT
+                    friendly_name,
+                    rating_key,
+                    title,
+                    predicted_probability,
+                    semantic_themes,
+                    year,
+                    genres,
+                    show_title,
+                    season_number,
+                    episode_number,
+                    media_type,
+                    scored_at,
+                    NULL::text AS score_band,
+                    show_rating_key,
+                    parent_rating_key,
+                    poster_path,
+                    NULL::int AS descendant_episode_count,
+                    NULL::int AS descendant_feedback_up_count,
+                    NULL::int AS descendant_feedback_down_count,
+                    NULL::int AS descendant_feedback_total_count
                 FROM expanded_recs_w_label_v
                 WHERE username = %s
             """
@@ -149,39 +195,42 @@ def get_recommendations(
 
             sql += " ORDER BY predicted_probability DESC"
 
-        # Main recommendations query
         cur.execute(sql, tuple(params))
         rec_rows = cur.fetchall()
         for row in rec_rows:
-            rating_key = row.get("rating_key")
-            row["poster_url"] = build_poster_url(rating_key)
+            row["poster_url"] = build_poster_url(row.get("rating_key"))
             row.pop("poster_path", None)
 
-        print(f"📦 Found {len(rec_rows)} recs for {plex_username}")
+        print(f"Found {len(rec_rows)} recs for {plex_username}")
 
-        # ✅ Fetch feedback before closing the connection
-        cur.execute("""
+        cur.execute(
+            """
             SELECT DISTINCT rating_key
             FROM user_feedback
             WHERE username = %s
-        """, (plex_username,))
+            """,
+            (plex_username,),
+        )
         feedback_keys = [row["rating_key"] for row in cur.fetchall()]
 
         return {
             "username": plex_username,
             "recommendations": rec_rows,
             "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
-            "feedback_keys": feedback_keys
+            "feedback_keys": feedback_keys,
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception as exc:
         import traceback
-        print("💥 Database error:", repr(e))
+
+        print("Database error:", repr(exc))
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(exc)}")
 
     finally:
-        if 'cur' in locals() and not cur.closed:
+        if "cur" in locals() and not cur.closed:
             cur.close()
-        if 'conn' in locals() and not conn.closed:
+        if "conn" in locals() and not conn.closed:
             conn.close()

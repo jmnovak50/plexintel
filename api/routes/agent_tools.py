@@ -7,6 +7,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import logging
 
+from api.services.feedback_service import normalize_thumb, replace_feedback_rows
+
 logger = logging.getLogger(__name__)
 
 DB_URL = os.getenv("DATABASE_URL")
@@ -409,58 +411,11 @@ def agent_submit_feedback(
     payload: FeedbackPayload,
 ):
     """Agent can log one-click thumbs feedback."""
-    thumb = (payload.thumb or "").strip().lower()
-    if thumb not in ("up", "down"):
-        raise HTTPException(status_code=400, detail="thumb must be 'up' or 'down'")
+    thumb = normalize_thumb(payload.thumb, field_name="thumb")
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # Keep minimal internal reason rows present (handles truncated feedback_reason tables).
-            seed_reasons = [
-                ("thumb_up", "Thumbs up", "up", True),
-                ("thumb_down", "Thumbs down", "down", True),
-            ]
-            for code, label, applies_to, suppress_default in seed_reasons:
-                cur.execute(
-                    """
-                    INSERT INTO feedback_reason (code, label, applies_to, suppress_default)
-                    SELECT %s, %s, %s, %s
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM feedback_reason WHERE code = %s
-                    )
-                    """,
-                    (code, label, applies_to, suppress_default, code),
-                )
-
-            reason_code = "thumb_up" if thumb == "up" else "thumb_down"
-            cur.execute(
-                """
-                DELETE FROM user_feedback
-                WHERE username = %s AND rating_key = %s
-                """,
-                (payload.user, payload.rating_key),
-            )
-            cur.execute(
-                """
-                INSERT INTO user_feedback (
-                    username,
-                    rating_key,
-                    feedback,
-                    reason_code,
-                    suppress,
-                    created_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    payload.user,
-                    payload.rating_key,
-                    thumb,
-                    reason_code,
-                    True,
-                    datetime.utcnow(),
-                ),
-            )
+            replace_feedback_rows(cur, payload.user, [payload.rating_key], thumb)
         conn.commit()
 
     return FeedbackResponse(
