@@ -390,7 +390,7 @@ function RecommendationFeedbackActions({
 
   return (
     <FeedbackButtons
-      alwaysVisible={alwaysVisible}
+      alwaysVisible
       upAriaLabel={`Apply thumbs up to all episodes under ${rec.title}`}
       downAriaLabel={`Apply thumbs down to all episodes under ${rec.title}`}
       upTitle="Thumbs up all episodes"

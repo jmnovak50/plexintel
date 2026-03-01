@@ -22,10 +22,10 @@ def seed_thumb_reasons(cur) -> None:
     for code, label, applies_to, suppress_default in seed_reasons:
         cur.execute(
             """
-            INSERT INTO feedback_reason (code, label, applies_to, suppress_default)
+            INSERT INTO public.feedback_reason (code, label, applies_to, suppress_default)
             SELECT %s, %s, %s, %s
             WHERE NOT EXISTS (
-                SELECT 1 FROM feedback_reason WHERE code = %s
+                SELECT 1 FROM public.feedback_reason WHERE code = %s
             )
             """,
             (code, label, applies_to, suppress_default, code),
@@ -43,7 +43,7 @@ def replace_feedback_rows(cur, username: str, rating_keys: Sequence[int], thumb:
     reason_code = "thumb_up" if normalized_thumb == "up" else "thumb_down"
     cur.execute(
         """
-        DELETE FROM user_feedback
+        DELETE FROM public.user_feedback
         WHERE username = %s
           AND rating_key = ANY(%s)
         """,
@@ -51,7 +51,7 @@ def replace_feedback_rows(cur, username: str, rating_keys: Sequence[int], thumb:
     )
     cur.execute(
         """
-        INSERT INTO user_feedback (
+        INSERT INTO public.user_feedback (
             username,
             rating_key,
             feedback,
@@ -78,7 +78,7 @@ def resolve_bulk_target(cur, rating_key: int) -> dict:
     cur.execute(
         """
         SELECT rating_key, title, media_type
-        FROM library
+        FROM public.library
         WHERE rating_key = %s
         """,
         (rating_key,),
@@ -92,7 +92,7 @@ def resolve_bulk_target(cur, rating_key: int) -> dict:
         target_media_type = "show"
         child_sql = """
             SELECT rating_key
-            FROM library
+            FROM public.library
             WHERE media_type = 'episode'
               AND show_rating_key = %s
             ORDER BY rating_key
@@ -101,7 +101,7 @@ def resolve_bulk_target(cur, rating_key: int) -> dict:
         target_media_type = "season"
         child_sql = """
             SELECT rating_key
-            FROM library
+            FROM public.library
             WHERE media_type = 'episode'
               AND parent_rating_key = %s
             ORDER BY rating_key

@@ -42,7 +42,7 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
                 rating_key,
                 BOOL_OR(feedback = 'up') AS has_up,
                 BOOL_OR(feedback = 'down') AS has_down
-            FROM user_feedback
+            FROM public.user_feedback
             WHERE username = %s
             GROUP BY rating_key
         ),
@@ -53,7 +53,7 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
                 COUNT(f.rating_key)::int AS descendant_feedback_total_count,
                 COUNT(*) FILTER (WHERE f.has_up)::int AS descendant_feedback_up_count,
                 COUNT(*) FILTER (WHERE f.has_down)::int AS descendant_feedback_down_count
-            FROM library l
+            FROM public.library l
             LEFT JOIN feedback_by_item f ON f.rating_key = l.rating_key
             WHERE l.media_type = 'episode'
               AND l.{group_column} IS NOT NULL
@@ -206,7 +206,7 @@ def get_recommendations(
         cur.execute(
             """
             SELECT DISTINCT rating_key
-            FROM user_feedback
+            FROM public.user_feedback
             WHERE username = %s
             """,
             (plex_username,),

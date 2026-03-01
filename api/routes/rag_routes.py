@@ -13,7 +13,14 @@ load_dotenv()
 router = APIRouter()
 
 DB_URL = os.getenv("DATABASE_URL")
-model = SentenceTransformer("all-mpnet-base-v2")
+model = None
+
+
+def get_model() -> SentenceTransformer:
+    global model
+    if model is None:
+        model = SentenceTransformer("all-mpnet-base-v2")
+    return model
 
 @router.post("/rag-query")
 async def rag_query(request: Request):
@@ -28,7 +35,7 @@ async def rag_query(request: Request):
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         # Embed the user query
-        query_embedding = model.encode(query).tolist()
+        query_embedding = get_model().encode(query).tolist()
 
         # Query for most similar media
         cur.execute("""
