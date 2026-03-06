@@ -411,7 +411,11 @@ def _order_dataframe(df: pd.DataFrame, key_column: str, requested_keys: list, se
     return ordered.drop(columns=["_request_order"])
 
 
-def prepare_dimension_items(df: pd.DataFrame, min_valid_items: int = MIN_VALID_ITEMS) -> dict:
+def prepare_dimension_items(
+    df: pd.DataFrame,
+    min_valid_items: int = MIN_VALID_ITEMS,
+    dimension_mode: str = "media",
+) -> dict:
     if df is None or df.empty:
         empty = pd.DataFrame(columns=["display_title", "item_quality_reason", "is_valid_item"])
         return {
@@ -429,11 +433,12 @@ def prepare_dimension_items(df: pd.DataFrame, min_valid_items: int = MIN_VALID_I
         axis=1,
     )
 
-    duplicate_mask = prepared.duplicated(subset=["_dedupe_key"], keep="first")
-    prepared.loc[
-        duplicate_mask & prepared["item_quality_reason"].eq(""),
-        "item_quality_reason",
-    ] = "duplicate title/year in sample"
+    if dimension_mode != "user":
+        duplicate_mask = prepared.duplicated(subset=["_dedupe_key"], keep="first")
+        prepared.loc[
+            duplicate_mask & prepared["item_quality_reason"].eq(""),
+            "item_quality_reason",
+        ] = "duplicate title/year in sample"
 
     prepared["is_valid_item"] = prepared["item_quality_reason"].eq("")
     valid_items = prepared[prepared["is_valid_item"]].copy()
@@ -466,6 +471,17 @@ def _select_prompt_rows(
 
     working = items_df.copy()
     working["username"] = working["username"].map(_clean_whitespace)
+    working["_sample_dedupe_key"] = working.apply(
+        lambda row: (
+            f"{_clean_whitespace(row.get('username', ''))}|"
+            f"{_normalize_compare_text(row.get('display_title', ''))}|"
+            f"{_format_year(row.get('year', ''))}"
+        ),
+        axis=1,
+    )
+    working = working.drop_duplicates(subset=["_sample_dedupe_key"], keep="first").drop(
+        columns=["_sample_dedupe_key"]
+    )
     grouped_rows = []
     user_groups = []
     for username, group in working.groupby("username", sort=False):
@@ -526,8 +542,16 @@ def build_dimension_prompt(
     dimension_mode: str = "media",
     min_valid_items: int = MIN_VALID_ITEMS,
 ) -> dict:
-    positive_bundle = prepare_dimension_items(positive_df, min_valid_items=min_valid_items)
-    negative_bundle = prepare_dimension_items(negative_df if negative_df is not None else pd.DataFrame(), min_valid_items=0)
+    positive_bundle = prepare_dimension_items(
+        positive_df,
+        min_valid_items=min_valid_items,
+        dimension_mode=dimension_mode,
+    )
+    negative_bundle = prepare_dimension_items(
+        negative_df if negative_df is not None else pd.DataFrame(),
+        min_valid_items=0,
+        dimension_mode=dimension_mode,
+    )
 
     positive_items = _select_prompt_rows(
         positive_bundle["valid_items"],
@@ -575,7 +599,7 @@ def build_dimension_prompt(
 
 
 def generate_summary_text(df: pd.DataFrame, dimension: int, dimension_mode: str = "media") -> str:
-    bundle = prepare_dimension_items(df, min_valid_items=0)
+    bundle = prepare_dimension_items(df, min_valid_items=0, dimension_mode=dimension_mode)
     valid_items = _select_prompt_rows(bundle["valid_items"], DEFAULT_TOP_POSITIVE_ITEMS, dimension_mode)
     summary_target = "watched items" if dimension_mode == "user" else "items"
     lines = [f"Top positive {summary_target} for embedding dimension {dimension}:"]

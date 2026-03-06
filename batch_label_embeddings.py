@@ -192,16 +192,21 @@ def main():
         if skipped_reason:
             print(f"⚠️ Skipping LLM for dim {dimension}: {skipped_reason}", flush=True)
         elif should_call_model:
-            label_result = call_llm_for_label_result(
-                prompt_bundle["prompt_text"],
-                provider=provider_name,
-                model=model_name,
-            )
-            print(
-                f"🧠 {mode.title()} dim {dimension} labeled via "
-                f"{provider_name}:{model_name} as: {label_result['label']}",
-                flush=True,
-            )
+            try:
+                label_result = call_llm_for_label_result(
+                    prompt_bundle["prompt_text"],
+                    provider=provider_name,
+                    model=model_name,
+                )
+                print(
+                    f"🧠 {mode.title()} dim {dimension} labeled via "
+                    f"{provider_name}:{model_name} as: {label_result['label']}",
+                    flush=True,
+                )
+            except Exception as exc:
+                skipped_reason = f"LLM error: {str(exc).strip()}"
+                label_result = _default_label_result(skipped_reason)
+                print(f"⚠️ Skipping dim {dimension} due to LLM error: {exc}", flush=True)
 
         generated_label = label_result["label"]
         evidence = label_result.get("evidence", ["", "", ""])
