@@ -864,10 +864,13 @@ def run_incremental_load():
     else:
         print("✅ No new content to add.")
 
-    # 5. Sync new watch history
+    # 5. One-time backfill path for existing rows added before plex_guid existed.
+    backfill_missing_plex_guids(conn, cursor)
+
+    # 6. Sync new watch history
     sync_new_watch_history(conn, cursor)
 
-    # 6. Optionally embed new stuff immediately after sync
+    # 7. Optionally embed new stuff immediately after sync
     if os.getenv("ENABLE_EMBED_MEDIA", "1") == "1":
         generate_media_embeddings()
 
@@ -877,6 +880,39 @@ def run_incremental_load():
     conn.commit()
     conn.close()
     print("✅ Incremental update complete.")
+
+
+def backfill_missing_plex_guids(conn, cursor):
+    print("🪪 Checking for library rows missing plex_guid...")
+    cursor.execute(
+        """
+        SELECT rating_key
+        FROM library
+        WHERE plex_guid IS NULL
+        ORDER BY rating_key
+        """
+    )
+    missing_guid_keys = [row[0] for row in cursor.fetchall()]
+
+    if not missing_guid_keys:
+        print("✅ No existing library rows need plex_guid backfill.")
+        return
+
+    print(f"🪪 Backfilling plex_guid for {len(missing_guid_keys)} existing library rows...")
+    recovered_items = []
+    for rating_key in missing_guid_keys:
+        metadata = get_metadata(rating_key)
+        if metadata:
+            recovered_items.append(metadata)
+        else:
+            print(f"⚠️ Could not backfill metadata for rating_key={rating_key}")
+
+    if not recovered_items:
+        print("⚠️ plex_guid backfill found rows to repair, but no metadata could be recovered.")
+        return
+
+    store_library_data(conn, cursor, recovered_items)
+    print(f"✅ Backfilled plex_guid metadata for {len(recovered_items)} library rows.")
 
 
 def recover_missing_media(dry_run=False):
