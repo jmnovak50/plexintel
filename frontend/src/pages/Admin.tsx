@@ -1,15 +1,21 @@
+import { Ban, BookmarkPlus, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 interface AdminMe {
   username: string;
+  friendly_name: string | null;
+  display_name: string | null;
   is_admin: boolean;
   created_at: string | null;
   last_login: string | null;
 }
 
 interface AdminUser {
+  user_id: number;
   username: string;
+  friendly_name: string | null;
+  display_name: string | null;
   is_admin: boolean;
   created_at: string | null;
   last_login: string | null;
@@ -30,7 +36,7 @@ interface AdminRecommendation {
 interface AdminFeedbackItem {
   id: number;
   rating_key: number;
-  feedback: "up" | "down";
+  feedback: "interested" | "never_watch" | "watched_like" | "watched_dislike";
   reason_code: string | null;
   reason_label: string | null;
   suppress: boolean;
@@ -38,11 +44,51 @@ interface AdminFeedbackItem {
   media_type: string | null;
   title: string | null;
   show_title: string | null;
+  plex_watchlist_status: string | null;
+  plex_watchlist_synced_at: string | null;
 }
 
 function formatDate(value: string | null) {
   if (!value) return "—";
   return new Date(value).toLocaleString();
+}
+
+function formatUserDisplayName(user: Pick<AdminUser, "username" | "friendly_name" | "display_name">) {
+  if (user.display_name?.trim()) return user.display_name;
+  if (user.friendly_name?.trim()) return `${user.friendly_name} (${user.username})`;
+  return user.username;
+}
+
+function feedbackVisual(feedback: AdminFeedbackItem["feedback"]) {
+  switch (feedback) {
+    case "interested":
+      return { icon: BookmarkPlus, label: "Want to watch", className: "text-blue-700" };
+    case "never_watch":
+      return { icon: Ban, label: "Never watch", className: "text-red-700" };
+    case "watched_like":
+      return { icon: ThumbsUp, label: "Watched, liked", className: "text-emerald-700" };
+    case "watched_dislike":
+      return { icon: ThumbsDown, label: "Watched, disliked", className: "text-amber-700" };
+    default:
+      return { icon: BookmarkPlus, label: feedback, className: "text-slate-700" };
+  }
+}
+
+function watchlistStatusLabel(status: string | null) {
+  switch (status) {
+    case "synced":
+      return "Synced";
+    case "failed":
+      return "Failed";
+    case "auth_required":
+      return "Auth required";
+    case "unresolved":
+      return "Unavailable";
+    case "not_supported":
+      return "Unsupported";
+    default:
+      return "—";
+  }
 }
 
 export default function Admin() {
@@ -168,7 +214,7 @@ export default function Admin() {
         <div>
           <h1 className="text-3xl font-bold">Admin Persona View</h1>
           <p className="text-sm text-gray-600">
-            Signed in as {me?.username || "…"}
+            Signed in as {me?.display_name || me?.username || "…"}
           </p>
         </div>
         <Link
@@ -199,7 +245,7 @@ export default function Admin() {
               >
                 {users.map((u) => (
                   <option key={u.username} value={u.username}>
-                    {u.username}{u.is_admin ? " (admin)" : ""}
+                    {formatUserDisplayName(u)}
                   </option>
                 ))}
               </select>
@@ -288,24 +334,39 @@ export default function Admin() {
                 <thead className="bg-gray-50 text-gray-600">
                   <tr>
                     <th className="px-3 py-2 text-left">When</th>
-                    <th className="px-3 py-2 text-left">Thumb</th>
+                    <th className="px-3 py-2 text-left">Action</th>
                     <th className="px-3 py-2 text-left">Title</th>
                     <th className="px-3 py-2 text-left">Type</th>
                     <th className="px-3 py-2 text-left">Reason</th>
+                    <th className="px-3 py-2 text-left">Watchlist</th>
                     <th className="px-3 py-2 text-left">Suppress</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {feedbackRows.map((row) => (
-                    <tr key={row.id} className="border-t">
-                      <td className="px-3 py-2">{formatDate(row.created_at)}</td>
-                      <td className="px-3 py-2">{row.feedback === "up" ? "👍" : "👎"}</td>
-                      <td className="px-3 py-2">{row.title || `rating_key ${row.rating_key}`}</td>
-                      <td className="px-3 py-2">{row.media_type || "—"}</td>
-                      <td className="px-3 py-2">{row.reason_label || row.reason_code || "—"}</td>
-                      <td className="px-3 py-2">{row.suppress ? "Yes" : "No"}</td>
-                    </tr>
-                  ))}
+                  {feedbackRows.map((row) => {
+                    const visual = feedbackVisual(row.feedback);
+                    const Icon = visual.icon;
+
+                    return (
+                      <tr key={row.id} className="border-t">
+                        <td className="px-3 py-2">{formatDate(row.created_at)}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-flex items-center gap-2 ${visual.className}`}>
+                            <Icon aria-hidden="true" size={14} strokeWidth={2} />
+                            <span>{visual.label}</span>
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">{row.title || `rating_key ${row.rating_key}`}</td>
+                        <td className="px-3 py-2">{row.media_type || "—"}</td>
+                        <td className="px-3 py-2">{row.reason_label || row.reason_code || "—"}</td>
+                        <td className="px-3 py-2">
+                          {watchlistStatusLabel(row.plex_watchlist_status)}
+                          {row.plex_watchlist_synced_at ? ` · ${formatDate(row.plex_watchlist_synced_at)}` : ""}
+                        </td>
+                        <td className="px-3 py-2">{row.suppress ? "Yes" : "No"}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

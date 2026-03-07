@@ -1,6 +1,23 @@
-import { useEffect, useState, type KeyboardEvent } from 'react';
-import { Clapperboard, Layers, Play, Tv, type LucideIcon } from 'lucide-react';
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import {
+  Ban,
+  BookmarkPlus,
+  Clapperboard,
+  Layers,
+  Play,
+  RotateCcw,
+  ThumbsDown,
+  ThumbsUp,
+  Tv,
+  type LucideIcon,
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
+
+type FeedbackAction = 'interested' | 'never_watch' | 'watched_like' | 'watched_dislike';
+type FeedbackFilter = 'all' | 'saved' | 'unsaved';
+type ViewMode = 'all' | 'movies' | 'shows' | 'seasons' | 'episodes';
+type SortState = { column: keyof Recommendation; direction: 'asc' | 'desc' };
+type ScopedSelection = { key: number; title: string };
 
 interface Recommendation {
   friendly_name: string;
@@ -22,18 +39,31 @@ interface Recommendation {
   descendant_feedback_up_count?: number | null;
   descendant_feedback_down_count?: number | null;
   descendant_feedback_total_count?: number | null;
+  feedback_state?: FeedbackAction | null;
+  feedback_suppress?: boolean;
+  feedback_reason_code?: string | null;
+  plex_watchlist_status?: string | null;
 }
-
-type ViewMode = 'all' | 'movies' | 'shows' | 'seasons' | 'episodes';
-type Thumb = 'up' | 'down';
-type SortState = { column: keyof Recommendation; direction: 'asc' | 'desc' };
-type ScopedSelection = { key: number; title: string };
 
 interface RecommendationsResponse {
   username?: string | null;
   recommendations?: Recommendation[];
   last_updated?: string | null;
-  feedback_keys?: number[];
+}
+
+interface FeedbackApiResponse {
+  status: string;
+  feedback?: {
+    feedback: FeedbackAction;
+    feedback_label: string;
+    plex_watchlist_status: string | null;
+    suppress: boolean;
+  };
+}
+
+interface UndoState {
+  recommendation: Recommendation;
+  action: FeedbackAction;
 }
 
 const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; className: string }> = {
@@ -46,8 +76,50 @@ const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; classN
   season: { icon: Layers, label: 'Season', className: 'text-amber-600' },
   seasons: { icon: Layers, label: 'Season', className: 'text-amber-600' },
   episode: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
-  episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600' }
+  episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
 };
+
+const FEEDBACK_ACTIONS: Array<{
+  action: FeedbackAction;
+  label: string;
+  groupLabel: string;
+  icon: LucideIcon;
+  className: string;
+  activeClassName: string;
+}> = [
+  {
+    action: 'interested',
+    label: 'Want to watch',
+    groupLabel: 'Not watched',
+    icon: BookmarkPlus,
+    className: 'border-blue-200 text-blue-700 hover:bg-blue-50',
+    activeClassName: 'border-blue-300 bg-blue-50 text-blue-800',
+  },
+  {
+    action: 'never_watch',
+    label: 'Never watch',
+    groupLabel: 'Not watched',
+    icon: Ban,
+    className: 'border-red-200 text-red-700 hover:bg-red-50',
+    activeClassName: 'border-red-300 bg-red-50 text-red-800',
+  },
+  {
+    action: 'watched_like',
+    label: 'Watched, liked',
+    groupLabel: 'Already watched',
+    icon: ThumbsUp,
+    className: 'border-emerald-200 text-emerald-700 hover:bg-emerald-50',
+    activeClassName: 'border-emerald-300 bg-emerald-50 text-emerald-800',
+  },
+  {
+    action: 'watched_dislike',
+    label: 'Watched, disliked',
+    groupLabel: 'Already watched',
+    icon: ThumbsDown,
+    className: 'border-amber-200 text-amber-700 hover:bg-amber-50',
+    activeClassName: 'border-amber-300 bg-amber-50 text-amber-800',
+  },
+];
 
 function getMediaTypeConfig(mediaType: string) {
   return MEDIA_TYPE_ICONS[mediaType.toLowerCase()] ?? null;
@@ -58,51 +130,41 @@ function canSubmitLeafFeedback(mediaType: string) {
   return typeKey === 'movie' || typeKey === 'episode';
 }
 
-function canSubmitBulkFeedback(mediaType: string) {
-  const typeKey = mediaType.toLowerCase();
-  return typeKey === 'show' || typeKey === 'series' || typeKey === 'tv_show' || typeKey === 'season';
+function feedbackActionLabel(action: FeedbackAction | null | undefined) {
+  return FEEDBACK_ACTIONS.find((config) => config.action === action)?.label ?? null;
 }
 
-function getBulkCounts(rec: Recommendation) {
-  const total = rec.descendant_episode_count ?? 0;
-  const up = rec.descendant_feedback_up_count ?? 0;
-  const down = rec.descendant_feedback_down_count ?? 0;
-  const rated = rec.descendant_feedback_total_count ?? 0;
-  return { total, up, down, rated };
+function watchlistStatusLabel(status: string | null | undefined) {
+  switch (status) {
+    case 'synced':
+      return 'Plex watchlist synced';
+    case 'failed':
+      return 'Plex watchlist sync failed';
+    case 'auth_required':
+      return 'Plex login required';
+    case 'unresolved':
+      return 'Plex sync unavailable';
+    case 'not_supported':
+      return 'Plex watchlist unsupported';
+    default:
+      return null;
+  }
 }
 
-function getBulkStatusMessage(rec: Recommendation) {
-  const { total, up, down, rated } = getBulkCounts(rec);
-  if (total <= 0) {
-    return 'No episodes available';
+function watchlistStatusClassName(status: string | null | undefined) {
+  switch (status) {
+    case 'synced':
+      return 'border-blue-200 bg-blue-50 text-blue-700';
+    case 'failed':
+      return 'border-amber-200 bg-amber-50 text-amber-700';
+    case 'auth_required':
+      return 'border-slate-200 bg-slate-100 text-slate-700';
+    case 'unresolved':
+    case 'not_supported':
+      return 'border-slate-200 bg-slate-50 text-slate-600';
+    default:
+      return '';
   }
-  if (up === total) {
-    return `All ${total} episodes thumbs up`;
-  }
-  if (down === total) {
-    return `All ${total} episodes thumbs down`;
-  }
-  if (rated === 0) {
-    return `0 / ${total} episodes rated`;
-  }
-  return `${rated} / ${total} rated (${up} up, ${down} down)`;
-}
-
-function isBulkDirectionComplete(rec: Recommendation, feedback: Thumb) {
-  const { total, up, down } = getBulkCounts(rec);
-  if (total <= 0) {
-    return true;
-  }
-  return feedback === 'up' ? up === total : down === total;
-}
-
-function buildBulkConfirmationMessage(rec: Recommendation, feedback: Thumb) {
-  const { total } = getBulkCounts(rec);
-  const thumbLabel = feedback === 'up' ? 'thumbs up' : 'thumbs down';
-  if (rec.media_type.toLowerCase() === 'season') {
-    return `Apply ${thumbLabel} to all ${total} episodes in ${rec.title}? Existing feedback for episodes in this season will be overwritten.`;
-  }
-  return `Apply ${thumbLabel} to all ${total} episodes in ${rec.title}? Existing feedback for episodes under this show will be overwritten.`;
 }
 
 async function extractErrorMessage(res: Response, fallback: string) {
@@ -152,7 +214,6 @@ function normalizeRecommendationsResponse(data: RecommendationsResponse) {
     recommendations: Array.isArray(data.recommendations) ? data.recommendations : [],
     username: typeof data.username === 'string' ? data.username : null,
     lastUpdated: typeof data.last_updated === 'string' ? data.last_updated : null,
-    feedbackKeys: Array.isArray(data.feedback_keys) ? data.feedback_keys : [],
   };
 }
 
@@ -251,20 +312,13 @@ function RecommendationThemeChips({
 function RecommendationScore({
   rec,
   isPending,
-  statusMessage,
-  statusTone = 'muted',
   compact = false,
 }: {
   rec: Recommendation;
   isPending: boolean;
-  statusMessage?: string | null;
-  statusTone?: 'muted' | 'success';
   compact?: boolean;
 }) {
   const scorePct = rec.predicted_probability * 100;
-  const statusClass = statusTone === 'success'
-    ? 'mt-2 text-xs font-medium text-green-700'
-    : 'mt-2 text-xs text-gray-500';
 
   return (
     <div className={`flex flex-col ${compact ? 'items-end text-right' : ''}`}>
@@ -281,147 +335,143 @@ function RecommendationScore({
         <span className="mt-2 text-xs text-gray-500">Band: {rec.score_band}</span>
       )}
       {isPending && (
-        <span className="mt-2 text-xs text-gray-500">Submitting feedback...</span>
-      )}
-      {!isPending && statusMessage && (
-        <span className={statusClass}>{statusMessage}</span>
+        <span className="mt-2 text-xs text-gray-500">Saving feedback...</span>
       )}
     </div>
   );
 }
 
-function FeedbackButtons({
+function FeedbackStateBadges({ rec }: { rec: Recommendation }) {
+  const feedbackLabel = feedbackActionLabel(rec.feedback_state);
+  const watchlistLabel = rec.feedback_state === 'interested'
+    ? watchlistStatusLabel(rec.plex_watchlist_status)
+    : null;
+
+  if (!feedbackLabel && !watchlistLabel) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {feedbackLabel && (
+        <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+          Saved
+        </span>
+      )}
+      {watchlistLabel && (
+        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${watchlistStatusClassName(rec.plex_watchlist_status)}`}>
+          {watchlistLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function FeedbackActionButtons({
+  rec,
+  isPending,
+  onAction,
+  onUndo,
   alwaysVisible = false,
-  upAriaLabel,
-  downAriaLabel,
-  upTitle,
-  downTitle,
-  upDisabled,
-  downDisabled,
-  onUp,
-  onDown,
 }: {
+  rec: Recommendation;
+  isPending: boolean;
+  onAction: (rec: Recommendation, action: FeedbackAction) => void;
+  onUndo: (rec: Recommendation) => void;
   alwaysVisible?: boolean;
-  upAriaLabel: string;
-  downAriaLabel: string;
-  upTitle: string;
-  downTitle: string;
-  upDisabled: boolean;
-  downDisabled: boolean;
-  onUp: () => void;
-  onDown: () => void;
 }) {
+  if (!canSubmitLeafFeedback(rec.media_type)) {
+    return null;
+  }
+
+  const groups = ['Not watched', 'Already watched'];
   const visibilityClass = alwaysVisible
     ? 'flex'
     : 'flex opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100';
 
   return (
-    <div className={`items-center gap-2 ${visibilityClass}`}>
-      <button
-        type="button"
-        aria-label={upAriaLabel}
-        title={upTitle}
-        disabled={upDisabled}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onUp();
-        }}
-        className="inline-flex items-center justify-center text-base leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        👍
-      </button>
-      <button
-        type="button"
-        aria-label={downAriaLabel}
-        title={downTitle}
-        disabled={downDisabled}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onDown();
-        }}
-        className="inline-flex items-center justify-center text-base leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        👎
-      </button>
+    <div className={`flex-col gap-3 ${visibilityClass}`}>
+      {groups.map((groupLabel) => (
+        <div key={groupLabel} className="space-y-1">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{groupLabel}</p>
+          <div className="flex flex-wrap gap-2">
+            {FEEDBACK_ACTIONS.filter((config) => config.groupLabel === groupLabel).map((config) => {
+              const Icon = config.icon;
+              const isActive = rec.feedback_state === config.action;
+              return (
+                <button
+                  key={config.action}
+                  type="button"
+                  aria-label={`${config.label} for ${rec.title}`}
+                  title={config.label}
+                  disabled={isPending || isActive}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onAction(rec, config.action);
+                  }}
+                  className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${isActive ? config.activeClassName : config.className}`}
+                >
+                  <Icon aria-hidden="true" size={14} strokeWidth={2} />
+                  <span>{config.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      {rec.feedback_state === 'interested' && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onUndo(rec);
+          }}
+          disabled={isPending}
+          className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
+          <span>Undo</span>
+        </button>
+      )}
     </div>
   );
 }
 
-function RecommendationFeedbackActions({
+function RecommendationTitleCell({
   rec,
-  isPending,
-  isSubmitted,
-  onLeafFeedback,
-  onBulkFeedback,
-  alwaysVisible = false,
+  isCompact = false,
 }: {
   rec: Recommendation;
-  isPending: boolean;
-  isSubmitted: boolean;
-  onLeafFeedback: (ratingKey: number, feedback: Thumb) => void;
-  onBulkFeedback: (rec: Recommendation, feedback: Thumb) => void;
-  alwaysVisible?: boolean;
+  isCompact?: boolean;
 }) {
-  if (canSubmitLeafFeedback(rec.media_type)) {
-    if (isSubmitted) {
-      return null;
-    }
-
-    return (
-      <FeedbackButtons
-        alwaysVisible={alwaysVisible}
-        upAriaLabel={`Give thumbs up feedback for ${rec.title}`}
-        downAriaLabel={`Give thumbs down feedback for ${rec.title}`}
-        upTitle="Thumbs up"
-        downTitle="Thumbs down"
-        upDisabled={isPending}
-        downDisabled={isPending}
-        onUp={() => onLeafFeedback(rec.rating_key, 'up')}
-        onDown={() => onLeafFeedback(rec.rating_key, 'down')}
-      />
-    );
-  }
-
-  if (!canSubmitBulkFeedback(rec.media_type) || getBulkCounts(rec).total <= 0) {
-    return null;
-  }
-
   return (
-    <FeedbackButtons
-      alwaysVisible
-      upAriaLabel={`Apply thumbs up to all episodes under ${rec.title}`}
-      downAriaLabel={`Apply thumbs down to all episodes under ${rec.title}`}
-      upTitle="Thumbs up all episodes"
-      downTitle="Thumbs down all episodes"
-      upDisabled={isPending || isBulkDirectionComplete(rec, 'up')}
-      downDisabled={isPending || isBulkDirectionComplete(rec, 'down')}
-      onUp={() => onBulkFeedback(rec, 'up')}
-      onDown={() => onBulkFeedback(rec, 'down')}
-    />
+    <div className={`flex ${isCompact ? 'flex-col items-center text-center' : 'items-start gap-3'}`}>
+      <RecommendationPoster posterUrl={rec.poster_url} />
+      <div className={isCompact ? 'mt-2' : ''}>
+        <p className="text-sm font-semibold leading-tight text-gray-900">{rec.title}</p>
+        <FeedbackStateBadges rec={rec} />
+      </div>
+    </div>
   );
 }
 
 function DesktopRecommendationsTable({
   recommendations,
-  feedbackSubmittedKeys,
-  feedbackPendingKeys,
-  bulkFeedbackPendingKeys,
+  pendingKeys,
   onSort,
   onRowClick,
-  onLeafFeedback,
-  onBulkFeedback,
+  onAction,
+  onUndo,
   isRowClickable,
 }: {
   recommendations: Recommendation[];
-  feedbackSubmittedKeys: number[];
-  feedbackPendingKeys: number[];
-  bulkFeedbackPendingKeys: number[];
+  pendingKeys: number[];
   onSort: (column: keyof Recommendation, shiftKey?: boolean) => void;
   onRowClick: (rec: Recommendation) => void;
-  onLeafFeedback: (ratingKey: number, feedback: Thumb) => void;
-  onBulkFeedback: (rec: Recommendation, feedback: Thumb) => void;
+  onAction: (rec: Recommendation, action: FeedbackAction) => void;
+  onUndo: (rec: Recommendation) => void;
   isRowClickable: boolean;
 }) {
   return (
@@ -439,38 +489,24 @@ function DesktopRecommendationsTable({
               <th className="px-4 py-3">Genres</th>
               <th className="px-4 py-3">Why this?</th>
               <th className="px-4 py-3">Score</th>
+              <th className="px-4 py-3">Actions</th>
             </tr>
           </thead>
           <tbody>
             {recommendations.map((rec) => {
-              const isBulkFeedback = canSubmitBulkFeedback(rec.media_type);
-              const isSubmitted = feedbackSubmittedKeys.includes(rec.rating_key);
-              const isLeafPending = feedbackPendingKeys.includes(rec.rating_key);
-              const isBulkPending = bulkFeedbackPendingKeys.includes(rec.rating_key);
-              const isPending = isBulkFeedback ? isBulkPending : isLeafPending;
-              const statusMessage = isBulkFeedback
-                ? getBulkStatusMessage(rec)
-                : isSubmitted
-                  ? 'Feedback submitted'
-                  : null;
-              const statusTone = !isBulkFeedback && isSubmitted ? 'success' as const : 'muted' as const;
+              const isPending = pendingKeys.includes(rec.rating_key);
 
               return (
                 <tr
                   key={rec.rating_key}
                   onClick={() => onRowClick(rec)}
-                  className={`group border-b transition-colors duration-300 ${isSubmitted ? 'bg-green-50' : 'hover:bg-gray-100'} ${isRowClickable ? 'cursor-pointer' : ''}`}
+                  className={`group border-b transition-colors duration-300 hover:bg-gray-50 ${isRowClickable ? 'cursor-pointer' : ''}`}
                 >
                   <td className="px-4 py-2 text-center">
                     <MediaTypeIcon mediaType={rec.media_type} />
                   </td>
                   <td className="px-4 py-2">
-                    <div className="flex flex-col items-center gap-2 text-center">
-                      <RecommendationPoster posterUrl={rec.poster_url} />
-                      <span className="max-w-[8rem] text-sm font-semibold leading-tight text-gray-900">
-                        {rec.title}
-                      </span>
-                    </div>
+                    <RecommendationTitleCell rec={rec} />
                   </td>
                   <td className="px-4 py-2">{rec.show_title || '—'}</td>
                   <td className="px-4 py-2">{rec.season_number ?? '—'}</td>
@@ -480,22 +516,17 @@ function DesktopRecommendationsTable({
                   <td className="px-4 py-2">
                     <RecommendationThemeChips semanticThemes={rec.semantic_themes} />
                   </td>
-                  <td className="relative px-4 py-2">
-                    <div className="flex flex-col">
-                      <RecommendationScore
-                        rec={rec}
-                        isPending={isPending}
-                        statusMessage={statusMessage}
-                        statusTone={statusTone}
-                      />
-                      <RecommendationFeedbackActions
-                        rec={rec}
-                        isPending={isPending}
-                        isSubmitted={isSubmitted}
-                        onLeafFeedback={onLeafFeedback}
-                        onBulkFeedback={onBulkFeedback}
-                      />
-                    </div>
+                  <td className="px-4 py-2">
+                    <RecommendationScore rec={rec} isPending={isPending} />
+                  </td>
+                  <td className="px-4 py-2">
+                    <FeedbackActionButtons
+                      rec={rec}
+                      isPending={isPending}
+                      onAction={onAction}
+                      onUndo={onUndo}
+                      alwaysVisible={rec.feedback_state === 'interested'}
+                    />
                   </td>
                 </tr>
               );
@@ -509,21 +540,17 @@ function DesktopRecommendationsTable({
 
 function MobileRecommendationsList({
   recommendations,
-  feedbackSubmittedKeys,
-  feedbackPendingKeys,
-  bulkFeedbackPendingKeys,
+  pendingKeys,
   onRowClick,
-  onLeafFeedback,
-  onBulkFeedback,
+  onAction,
+  onUndo,
   isRowClickable,
 }: {
   recommendations: Recommendation[];
-  feedbackSubmittedKeys: number[];
-  feedbackPendingKeys: number[];
-  bulkFeedbackPendingKeys: number[];
+  pendingKeys: number[];
   onRowClick: (rec: Recommendation) => void;
-  onLeafFeedback: (ratingKey: number, feedback: Thumb) => void;
-  onBulkFeedback: (rec: Recommendation, feedback: Thumb) => void;
+  onAction: (rec: Recommendation, action: FeedbackAction) => void;
+  onUndo: (rec: Recommendation) => void;
   isRowClickable: boolean;
 }) {
   const handleCardKeyDown = (
@@ -542,17 +569,7 @@ function MobileRecommendationsList({
   return (
     <div className="space-y-3 md:hidden">
       {recommendations.map((rec) => {
-        const isBulkFeedback = canSubmitBulkFeedback(rec.media_type);
-        const isSubmitted = feedbackSubmittedKeys.includes(rec.rating_key);
-        const isLeafPending = feedbackPendingKeys.includes(rec.rating_key);
-        const isBulkPending = bulkFeedbackPendingKeys.includes(rec.rating_key);
-        const isPending = isBulkFeedback ? isBulkPending : isLeafPending;
-        const statusMessage = isBulkFeedback
-          ? getBulkStatusMessage(rec)
-          : isSubmitted
-            ? 'Feedback submitted'
-            : null;
-        const statusTone = !isBulkFeedback && isSubmitted ? 'success' as const : 'muted' as const;
+        const isPending = pendingKeys.includes(rec.rating_key);
 
         return (
           <div
@@ -561,24 +578,15 @@ function MobileRecommendationsList({
             tabIndex={isRowClickable ? 0 : undefined}
             onClick={() => onRowClick(rec)}
             onKeyDown={(event) => handleCardKeyDown(event, rec)}
-            className={`rounded-xl border bg-white p-4 text-gray-900 shadow-sm transition-colors duration-300 ${isSubmitted ? 'border-green-200 bg-green-50' : 'border-gray-200'} ${isRowClickable ? 'cursor-pointer active:bg-gray-50' : ''}`}
+            className={`rounded-xl border border-gray-200 bg-white p-4 text-gray-900 shadow-sm ${isRowClickable ? 'cursor-pointer active:bg-gray-50' : ''}`}
           >
             <div className="flex items-start justify-between gap-3">
               <MediaTypeBadge mediaType={rec.media_type} />
-              <RecommendationScore
-                rec={rec}
-                isPending={isPending}
-                statusMessage={statusMessage}
-                statusTone={statusTone}
-                compact
-              />
+              <RecommendationScore rec={rec} isPending={isPending} compact />
             </div>
 
-            <div className="mt-4 flex flex-col items-center gap-2 text-center">
-              <RecommendationPoster posterUrl={rec.poster_url} />
-              <span className="max-w-[14rem] text-sm font-semibold leading-tight text-gray-900">
-                {rec.title}
-              </span>
+            <div className="mt-4">
+              <RecommendationTitleCell rec={rec} isCompact />
             </div>
 
             <div className="mt-4 space-y-1 text-sm text-gray-600">
@@ -618,12 +626,11 @@ function MobileRecommendationsList({
             )}
 
             <div className="mt-4">
-              <RecommendationFeedbackActions
+              <FeedbackActionButtons
                 rec={rec}
                 isPending={isPending}
-                isSubmitted={isSubmitted}
-                onLeafFeedback={onLeafFeedback}
-                onBulkFeedback={onBulkFeedback}
+                onAction={onAction}
+                onUndo={onUndo}
                 alwaysVisible
               />
             </div>
@@ -645,11 +652,11 @@ export default function Recommendations() {
   const [plexUser, setPlexUser] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [feedbackSubmittedKeys, setFeedbackSubmittedKeys] = useState<number[]>([]);
-  const [feedbackPendingKeys, setFeedbackPendingKeys] = useState<number[]>([]);
-  const [bulkFeedbackPendingKeys, setBulkFeedbackPendingKeys] = useState<number[]>([]);
+  const [pendingKeys, setPendingKeys] = useState<number[]>([]);
   const [pageError, setPageError] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<SortState[]>([]);
+  const [feedbackFilter, setFeedbackFilter] = useState<FeedbackFilter>('all');
+  const [undoState, setUndoState] = useState<UndoState | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -668,7 +675,6 @@ export default function Recommendations() {
         setRecs(normalized.recommendations);
         setPlexUser(normalized.username);
         setLastUpdated(normalized.lastUpdated);
-        setFeedbackSubmittedKeys(normalized.feedbackKeys);
         setPageError(null);
       })
       .catch((error) => {
@@ -703,86 +709,125 @@ export default function Recommendations() {
     };
   }, []);
 
-  const sendLeafFeedback = async (ratingKey: number, feedback: Thumb) => {
+  const sendFeedback = async (rec: Recommendation, action: FeedbackAction) => {
     if (!plexUser) {
       setPageError('Unable to submit feedback: user session is missing.');
       return;
     }
-    if (feedbackPendingKeys.includes(ratingKey)) {
+    if (pendingKeys.includes(rec.rating_key)) {
       return;
     }
 
-    const payload = { username: plexUser, rating_key: ratingKey, feedback };
     setPageError(null);
-    setFeedbackPendingKeys((prev) => (prev.includes(ratingKey) ? prev : [...prev, ratingKey]));
-    setFeedbackSubmittedKeys((prev) => (prev.includes(ratingKey) ? prev : [...prev, ratingKey]));
+    setPendingKeys((prev) => (prev.includes(rec.rating_key) ? prev : [...prev, rec.rating_key]));
 
     try {
       const res = await fetch('/api/feedback', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          username: plexUser,
+          rating_key: rec.rating_key,
+          feedback: action,
+        }),
       });
 
       if (!res.ok) {
         throw new Error(await extractErrorMessage(res, `Failed to submit feedback (${res.status})`));
       }
+
+      const data = await res.json() as FeedbackApiResponse;
+      const returnedFeedback = data.feedback;
+
+      if (action === 'interested') {
+        setRecs((prev) => prev.map((item) => (
+          item.rating_key === rec.rating_key
+            ? {
+                ...item,
+                feedback_state: 'interested',
+                feedback_suppress: false,
+                feedback_reason_code: returnedFeedback?.feedback ?? 'interested',
+                plex_watchlist_status: returnedFeedback?.plex_watchlist_status ?? 'unresolved',
+              }
+            : item
+        )));
+        setUndoState(null);
+      } else {
+        setRecs((prev) => prev.filter((item) => item.rating_key !== rec.rating_key));
+        setUndoState({
+          recommendation: {
+            ...rec,
+            feedback_state: null,
+            feedback_suppress: false,
+            feedback_reason_code: null,
+            plex_watchlist_status: 'not_applicable',
+          },
+          action,
+        });
+      }
     } catch (error) {
       console.error(error);
-      setFeedbackSubmittedKeys((prev) => prev.filter((key) => key !== ratingKey));
       setPageError(error instanceof Error ? error.message : 'Failed to submit feedback.');
     } finally {
-      setFeedbackPendingKeys((prev) => prev.filter((key) => key !== ratingKey));
+      setPendingKeys((prev) => prev.filter((key) => key !== rec.rating_key));
     }
   };
 
-  const sendBulkFeedback = async (rec: Recommendation, feedback: Thumb) => {
+  const undoFeedback = async (rec: Recommendation) => {
     if (!plexUser) {
-      setPageError('Unable to submit feedback: user session is missing.');
+      setPageError('Unable to undo feedback: user session is missing.');
       return;
     }
-    if (bulkFeedbackPendingKeys.includes(rec.rating_key) || getBulkCounts(rec).total <= 0) {
-      return;
-    }
-    if (!window.confirm(buildBulkConfirmationMessage(rec, feedback))) {
+    if (pendingKeys.includes(rec.rating_key)) {
       return;
     }
 
-    const payload = { username: plexUser, rating_key: rec.rating_key, feedback };
     setPageError(null);
-    setBulkFeedbackPendingKeys((prev) => (
-      prev.includes(rec.rating_key) ? prev : [...prev, rec.rating_key]
-    ));
+    setPendingKeys((prev) => (prev.includes(rec.rating_key) ? prev : [...prev, rec.rating_key]));
 
     try {
-      const res = await fetch('/api/feedback/bulk', {
-        method: 'POST',
+      const res = await fetch(`/api/feedback/${rec.rating_key}?username=${encodeURIComponent(plexUser)}`, {
+        method: 'DELETE',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
       });
 
       if (!res.ok) {
-        throw new Error(await extractErrorMessage(res, `Failed to submit bulk feedback (${res.status})`));
+        throw new Error(await extractErrorMessage(res, `Failed to remove feedback (${res.status})`));
       }
 
-      const data = await loadRecommendationsData({
-        viewMode,
-        selectedShow,
-        selectedSeason,
+      setRecs((prev) => {
+        const exists = prev.some((item) => item.rating_key === rec.rating_key);
+        if (exists) {
+          return prev.map((item) => (
+            item.rating_key === rec.rating_key
+              ? {
+                  ...item,
+                  feedback_state: null,
+                  feedback_suppress: false,
+                  feedback_reason_code: null,
+                  plex_watchlist_status: 'not_applicable',
+                }
+              : item
+          ));
+        }
+        return [
+          ...prev,
+          {
+            ...rec,
+            feedback_state: null,
+            feedback_suppress: false,
+            feedback_reason_code: null,
+            plex_watchlist_status: 'not_applicable',
+          },
+        ];
       });
-      const normalized = normalizeRecommendationsResponse(data);
-      setRecs(normalized.recommendations);
-      setPlexUser(normalized.username);
-      setLastUpdated(normalized.lastUpdated);
-      setFeedbackSubmittedKeys(normalized.feedbackKeys);
-      setPageError(null);
+      setUndoState(null);
     } catch (error) {
       console.error(error);
-      setPageError(error instanceof Error ? error.message : 'Failed to submit bulk feedback.');
+      setPageError(error instanceof Error ? error.message : 'Failed to undo feedback.');
     } finally {
-      setBulkFeedbackPendingKeys((prev) => prev.filter((key) => key !== rec.rating_key));
+      setPendingKeys((prev) => prev.filter((key) => key !== rec.rating_key));
     }
   };
 
@@ -826,43 +871,50 @@ export default function Recommendations() {
     }
   };
 
-  const filteredRecs = [...recs]
-    .filter((rec) => {
-      const score = rec.predicted_probability * 100;
-      const searchLower = search.toLowerCase();
-      return (
-        score >= minScore &&
-        (
+  const filteredRecs = useMemo(() => (
+    [...recs]
+      .filter((rec) => {
+        const score = rec.predicted_probability * 100;
+        const searchLower = search.toLowerCase();
+        const usesSavedFilter = viewMode !== 'shows' && viewMode !== 'seasons';
+        const matchesSearch = (
           rec.title?.toLowerCase().includes(searchLower) ||
           rec.show_title?.toLowerCase().includes(searchLower) ||
           rec.genres?.toLowerCase().includes(searchLower) ||
           rec.semantic_themes?.toLowerCase().includes(searchLower)
-        )
-      );
-    })
-    .sort((a, b) => {
-      for (const { column, direction } of sortOrder) {
-        const aVal = a[column];
-        const bVal = b[column];
-        if (aVal == null || bVal == null) continue;
+        );
+        const matchesSavedFilter = (
+          !usesSavedFilter ||
+          feedbackFilter === 'all' ||
+          (feedbackFilter === 'saved' && rec.feedback_state === 'interested') ||
+          (feedbackFilter === 'unsaved' && rec.feedback_state !== 'interested')
+        );
+        return score >= minScore && matchesSearch && matchesSavedFilter;
+      })
+      .sort((a, b) => {
+        for (const { column, direction } of sortOrder) {
+          const aVal = a[column];
+          const bVal = b[column];
+          if (aVal == null || bVal == null) continue;
 
-        if (typeof aVal === 'string' && typeof bVal === 'string') {
-          const result = aVal.localeCompare(bVal);
-          if (result !== 0) return direction === 'asc' ? result : -result;
-        } else if (typeof aVal === 'number' && typeof bVal === 'number') {
-          const result = aVal - bVal;
-          if (result !== 0) return direction === 'asc' ? result : -result;
+          if (typeof aVal === 'string' && typeof bVal === 'string') {
+            const result = aVal.localeCompare(bVal);
+            if (result !== 0) return direction === 'asc' ? result : -result;
+          } else if (typeof aVal === 'number' && typeof bVal === 'number') {
+            const result = aVal - bVal;
+            if (result !== 0) return direction === 'asc' ? result : -result;
+          }
         }
-      }
-      return 0;
-    });
+        return b.predicted_probability - a.predicted_probability;
+      })
+  ), [feedbackFilter, minScore, recs, search, sortOrder, viewMode]);
 
   const isRowClickable = viewMode === 'shows' || viewMode === 'seasons';
 
   return (
     <div className={`mx-auto w-full max-w-7xl overflow-x-hidden px-3 py-4 sm:px-4 ${darkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
       <h1 className="mb-2 text-2xl font-bold md:text-3xl">
-        🎬 Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}
+        Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}
       </h1>
 
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -881,6 +933,22 @@ export default function Recommendations() {
           </label>
         </div>
       </div>
+
+      {undoState && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+          <span>
+            {feedbackActionLabel(undoState.action)} saved for <span className="font-medium">{undoState.recommendation.title}</span>.
+          </span>
+          <button
+            type="button"
+            onClick={() => undoFeedback(undoState.recommendation)}
+            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+          >
+            <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
+            <span>Undo</span>
+          </button>
+        </div>
+      )}
 
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <input
@@ -918,6 +986,27 @@ export default function Recommendations() {
             className="w-full"
           />
         </div>
+
+        {viewMode !== 'shows' && viewMode !== 'seasons' && (
+          <div className="col-span-1 sm:col-span-2">
+            <div className="flex flex-wrap gap-2">
+              {(['all', 'saved', 'unsaved'] as FeedbackFilter[]).map((filterValue) => (
+                <button
+                  key={filterValue}
+                  type="button"
+                  onClick={() => setFeedbackFilter(filterValue)}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    feedbackFilter === filterValue
+                      ? 'border-blue-300 bg-blue-50 text-blue-700'
+                      : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  {filterValue === 'all' ? 'All' : filterValue === 'saved' ? 'Saved' : 'Unsaved'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {pageError && (
@@ -964,23 +1053,19 @@ export default function Recommendations() {
         <>
           <MobileRecommendationsList
             recommendations={filteredRecs}
-            feedbackSubmittedKeys={feedbackSubmittedKeys}
-            feedbackPendingKeys={feedbackPendingKeys}
-            bulkFeedbackPendingKeys={bulkFeedbackPendingKeys}
+            pendingKeys={pendingKeys}
             onRowClick={handleRowClick}
-            onLeafFeedback={sendLeafFeedback}
-            onBulkFeedback={sendBulkFeedback}
+            onAction={sendFeedback}
+            onUndo={undoFeedback}
             isRowClickable={isRowClickable}
           />
           <DesktopRecommendationsTable
             recommendations={filteredRecs}
-            feedbackSubmittedKeys={feedbackSubmittedKeys}
-            feedbackPendingKeys={feedbackPendingKeys}
-            bulkFeedbackPendingKeys={bulkFeedbackPendingKeys}
+            pendingKeys={pendingKeys}
             onSort={handleSort}
             onRowClick={handleRowClick}
-            onLeafFeedback={sendLeafFeedback}
-            onBulkFeedback={sendBulkFeedback}
+            onAction={sendFeedback}
+            onUndo={undoFeedback}
             isRowClickable={isRowClickable}
           />
         </>

@@ -12,6 +12,7 @@ from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 # Ollama embedding client (NAS-hosted EmbeddingGemma)
 from ollama_embeddings import embed_texts
+from api.db.schema import ensure_app_schema
 # Optional: batch sizing from env
 EMBED_BATCH_SIZE = os.getenv("EMBED_BATCH_SIZE")
 
@@ -439,6 +440,7 @@ def get_metadata(rating_key):
         "thumb_path": metadata.get("thumb"),
         "parent_thumb_path": metadata.get("parent_thumb"),
         "grandparent_thumb_path": metadata.get("grandparent_thumb"),
+        "plex_guid": metadata.get("guid"),
         "season_number": season_number,
         "episode_number": episode_number,
         "genres": final_genres,    # ✅ Uses cascaded values
@@ -519,9 +521,9 @@ def store_library_data(conn, cursor, library_data):
         INSERT INTO library (
             rating_key, title, year, duration, media_type, summary, rating, added_at, 
             season_number, episode_number, parent_rating_key, show_rating_key, show_title, episode_title, episode_summary,
-            thumb_path, parent_thumb_path, grandparent_thumb_path
+            thumb_path, parent_thumb_path, grandparent_thumb_path, plex_guid
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (rating_key) DO UPDATE SET
             title = EXCLUDED.title,
@@ -540,7 +542,8 @@ def store_library_data(conn, cursor, library_data):
             episode_summary = EXCLUDED.episode_summary,
             thumb_path = EXCLUDED.thumb_path,
             parent_thumb_path = EXCLUDED.parent_thumb_path,
-            grandparent_thumb_path = EXCLUDED.grandparent_thumb_path;
+            grandparent_thumb_path = EXCLUDED.grandparent_thumb_path,
+            plex_guid = EXCLUDED.plex_guid;
     """
 
     successful_inserts = 0
@@ -577,6 +580,7 @@ def store_library_data(conn, cursor, library_data):
         thumb_path = item.get("thumb_path")
         parent_thumb_path = item.get("parent_thumb_path")
         grandparent_thumb_path = item.get("grandparent_thumb_path")
+        plex_guid = item.get("plex_guid")
 
         # ✅ Print debug info AFTER values are assigned
         print(f"🔎 DEBUG: Checking extracted values for rating_key={rating_key}")
@@ -608,6 +612,7 @@ def store_library_data(conn, cursor, library_data):
             "thumb_path": thumb_path,
             "parent_thumb_path": parent_thumb_path,
             "grandparent_thumb_path": grandparent_thumb_path,
+            "plex_guid": plex_guid,
             "genres": genres,
             "actors": actors,
             "directors": directors
@@ -618,7 +623,7 @@ def store_library_data(conn, cursor, library_data):
                 rating_key, title, year, duration, media_type, summary, rating,
                 added_at, season_number, episode_number, parent_rating_key,
                 show_rating_key, show_title, episode_title, episode_summary,
-                thumb_path, parent_thumb_path, grandparent_thumb_path
+                thumb_path, parent_thumb_path, grandparent_thumb_path, plex_guid
             ))
 
             # ✅ Store associated genres, actors, and directors (only if they exist)
@@ -1326,6 +1331,7 @@ def main():
     Main function to fetch and store library data and watch history from Tautulli API to PostgreSQL.
     """
     print("🚀 Script started...")
+    ensure_app_schema(DB_URL)
     conn, cursor = connect_to_db()
     if not conn:
         return

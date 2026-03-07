@@ -7,6 +7,8 @@ from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 import ast
 
+from api.db.schema import ensure_app_schema
+
 # ✅ Load environment variables
 load_dotenv()
 
@@ -25,6 +27,9 @@ FEEDBACK_BONUS = 0.1        # 👍 Bonus applied to thumbs-up engagement
 ENABLE_FEEDBACK = True      # Toggle feedback injection on/off
 USE_SAMPLE_WEIGHT = True
 WATCH_EMBED_MIN_ENGAGEMENT = float(os.getenv("WATCH_EMBED_MIN_ENGAGEMENT", "0.5"))
+INTERESTED_SAMPLE_WEIGHT = 0.75
+WATCHED_LIKE_SAMPLE_WEIGHT = 3.0
+NEGATIVE_SAMPLE_WEIGHT = 5.0
 
 
 def connect():
@@ -48,6 +53,18 @@ def cosine_similarity(a, b):
     if denom == 0:
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+def feedback_only_config(feedback: str):
+    if feedback == "interested":
+        return 1, INTERESTED_SAMPLE_WEIGHT, FEEDBACK_BONUS, "explicit_interest"
+    if feedback == "never_watch":
+        return 0, NEGATIVE_SAMPLE_WEIGHT, 0.0, "explicit_reject"
+    if feedback == "watched_like":
+        return 1, WATCHED_LIKE_SAMPLE_WEIGHT, FEEDBACK_BONUS, "explicit_watched_like"
+    if feedback == "watched_dislike":
+        return 0, NEGATIVE_SAMPLE_WEIGHT, 0.0, "explicit_watched_dislike"
+    return None
 
 
 def build_user_watch_vectors(conn):
@@ -110,21 +127,16 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
     watch_sim = cosine_similarity(user_watch_vec, media_embedding) if user_watch_vec is not None else 0.0
 
     if from_feedback_only:
-        if feedback == "down":
-            label = 0
-            sample_weight = 5.0
-            engagement_ratio = 0
-        elif feedback == "up":
-            label = 1
-            sample_weight = 2.0
-            engagement_ratio = FEEDBACK_BONUS
-        else:
+        feedback_config = feedback_only_config(feedback)
+        if not feedback_config:
             return None
+        label, sample_weight, engagement_ratio, label_source = feedback_config
 
         return (
             username, rating_key, label, combined_emb,
             genres, actors, directors, row.get("release_year"),
             None, None, 0, 0, engagement_ratio, watch_sim, sample_weight
+            , label_source, feedback
         )
 
     media_duration = row["media_duration"]
@@ -139,15 +151,18 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
 
     engagement_ratio = played_minutes / media_minutes
 
-    if ENABLE_FEEDBACK and feedback in ["up", "down"]:
-        if feedback == "down":
+    label_source = "watch_history"
+    feedback_value = feedback
+
+    if ENABLE_FEEDBACK and feedback in ["watched_like", "watched_dislike"]:
+        if feedback == "watched_dislike":
             label = 0
-            engagement_ratio = 0
-            sample_weight = 5.0
-        elif feedback == "up":
+            sample_weight = NEGATIVE_SAMPLE_WEIGHT
+            label_source = "explicit_watched_dislike"
+        else:
             label = 1
-            engagement_ratio += FEEDBACK_BONUS
-            sample_weight = 2.0
+            sample_weight = WATCHED_LIKE_SAMPLE_WEIGHT
+            label_source = "explicit_watched_like"
     else:
         if engagement_ratio > ENGAGEMENT_THRESHOLD:
             label = 1
@@ -162,11 +177,13 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
         username, rating_key, label, combined_emb,
         genres, actors, directors, row.get("release_year"),
         row.get("season_number"), row.get("episode_number"),
-        played_duration, media_duration, engagement_ratio, watch_sim, sample_weight
+        played_duration, media_duration, engagement_ratio, watch_sim, sample_weight,
+        label_source, feedback_value
     )
 
 
 def build_training_data():
+    ensure_app_schema(DB_URL)
     conn = connect()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -176,6 +193,14 @@ def build_training_data():
 
     print("📦 Fetching watch-based rows...")
     cur.execute("""
+        WITH latest_feedback AS (
+            SELECT DISTINCT ON (username, rating_key)
+                username,
+                rating_key,
+                feedback
+            FROM user_feedback
+            ORDER BY username, rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
+        )
         SELECT
     t.username,
     t.rating_key,
@@ -195,7 +220,7 @@ FROM watch_history t
 JOIN library l ON t.rating_key = l.rating_key
 JOIN media_embeddings me ON t.rating_key = me.rating_key
 JOIN user_embeddings ue ON t.username = ue.username
-LEFT JOIN user_feedback f ON f.username = t.username AND f.rating_key = l.rating_key
+LEFT JOIN latest_feedback f ON f.username = t.username AND f.rating_key = l.rating_key
 
 -- ✅ Subquery joins to fetch tags per media item
 LEFT JOIN LATERAL (
@@ -230,6 +255,14 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
 
     print("📅 Fetching feedback-only rows (no watch history)...")
     cur.execute("""
+        WITH latest_feedback AS (
+            SELECT DISTINCT ON (username, rating_key)
+                username,
+                rating_key,
+                feedback
+            FROM user_feedback
+            ORDER BY username, rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
+        )
         SELECT
             f.username,
             f.rating_key,
@@ -255,7 +288,7 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
             ) AS director_tags,
             me.embedding AS media_embedding,
             ue.embedding AS user_embedding
-        FROM user_feedback f
+        FROM latest_feedback f
         JOIN library l ON f.rating_key = l.rating_key
         JOIN media_embeddings me ON f.rating_key = me.rating_key
         JOIN user_embeddings ue ON f.username = ue.username
@@ -294,12 +327,14 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
         if result:
             inserts.append(result)
 
-    thumbs_down_count = sum(1 for r in inserts if r[2] == 0 and r[-1] == 5.0)
-    thumbs_up_count = sum(1 for r in inserts if r[2] == 1 and r[-1] == 2.0)
-    print(f"👎 Feedback rows (label=0, weight=5.0): {thumbs_down_count}")
-    print(f"👍 Feedback rows (label=1, weight=2.0): {thumbs_up_count}")
+    negative_feedback_count = sum(1 for r in inserts if r[2] == 0 and r[14] == NEGATIVE_SAMPLE_WEIGHT)
+    interested_count = sum(1 for r in inserts if r[2] == 1 and r[14] == INTERESTED_SAMPLE_WEIGHT)
+    watched_like_count = sum(1 for r in inserts if r[2] == 1 and r[14] == WATCHED_LIKE_SAMPLE_WEIGHT)
+    print(f"👎 Explicit negative feedback rows: {negative_feedback_count}")
+    print(f"🔖 Interested intent rows: {interested_count}")
+    print(f"👍 Explicit watched-like rows: {watched_like_count}")
 
-    rewatch_boosted = sum(1 for r in inserts if r[-1] > 1.0 and r[2] == 1)
+    rewatch_boosted = sum(1 for r in inserts if r[14] > 1.0 and r[2] == 1)
     print(f"🔁 Rewatch-boosted positive labels: {rewatch_boosted}")
 
     print(f"🧠 Inserting {len(inserts)} training records...")
@@ -309,9 +344,11 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
             genre_tags, actor_tags, director_tags, release_year, season_number, episode_number,
             played_duration, media_duration, engagement_ratio,
             watch_sim,
-            sample_weight
+            sample_weight,
+            label_source,
+            feedback_value
         )
-        VALUES (%s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     with conn.cursor() as insert_cur:

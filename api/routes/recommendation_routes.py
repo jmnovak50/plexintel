@@ -37,13 +37,23 @@ def get_plex_username(token: str) -> str:
 
 def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
     return f"""
-        WITH feedback_by_item AS (
-            SELECT
+        WITH latest_feedback AS (
+            SELECT DISTINCT ON (rating_key)
                 rating_key,
-                BOOL_OR(feedback = 'up') AS has_up,
-                BOOL_OR(feedback = 'down') AS has_down
+                feedback,
+                suppress,
+                reason_code,
+                plex_watchlist_status
             FROM public.user_feedback
             WHERE username = %s
+            ORDER BY rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
+        ),
+        feedback_by_item AS (
+            SELECT
+                rating_key,
+                BOOL_OR(feedback IN ('interested', 'watched_like')) AS has_up,
+                BOOL_OR(feedback IN ('never_watch', 'watched_dislike')) AS has_down
+            FROM latest_feedback
             GROUP BY rating_key
         ),
         descendant_feedback AS (
@@ -113,7 +123,11 @@ def get_recommendations(
                     COALESCE(df.descendant_episode_count, 0) AS descendant_episode_count,
                     COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
                     COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
-                    COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count
+                    COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count,
+                    NULL::text AS feedback_state,
+                    FALSE AS feedback_suppress,
+                    NULL::text AS feedback_reason_code,
+                    'not_applicable'::text AS plex_watchlist_status
                 FROM show_rollups_v sr
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
                 WHERE sr.username = %s
@@ -142,7 +156,11 @@ def get_recommendations(
                     COALESCE(df.descendant_episode_count, 0) AS descendant_episode_count,
                     COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
                     COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
-                    COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count
+                    COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count,
+                    NULL::text AS feedback_state,
+                    FALSE AS feedback_suppress,
+                    NULL::text AS feedback_reason_code,
+                    'not_applicable'::text AS plex_watchlist_status
                 FROM season_rollups_v sr
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.season_rating_key
                 WHERE sr.username = %s
@@ -154,46 +172,63 @@ def get_recommendations(
             sql += " ORDER BY sr.rollup_score DESC"
         else:
             sql = """
+                WITH latest_feedback AS (
+                    SELECT DISTINCT ON (rating_key)
+                        rating_key,
+                        feedback,
+                        suppress,
+                        reason_code,
+                        plex_watchlist_status
+                    FROM public.user_feedback
+                    WHERE username = %s
+                    ORDER BY rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
+                )
                 SELECT
-                    friendly_name,
-                    rating_key,
-                    title,
-                    predicted_probability,
-                    semantic_themes,
-                    year,
-                    genres,
-                    show_title,
-                    season_number,
-                    episode_number,
-                    media_type,
-                    scored_at,
+                    recs.friendly_name,
+                    recs.rating_key,
+                    recs.title,
+                    recs.predicted_probability,
+                    recs.semantic_themes,
+                    recs.year,
+                    recs.genres,
+                    recs.show_title,
+                    recs.season_number,
+                    recs.episode_number,
+                    recs.media_type,
+                    recs.scored_at,
                     NULL::text AS score_band,
-                    show_rating_key,
-                    parent_rating_key,
-                    poster_path,
+                    recs.show_rating_key,
+                    recs.parent_rating_key,
+                    recs.poster_path,
                     NULL::int AS descendant_episode_count,
                     NULL::int AS descendant_feedback_up_count,
                     NULL::int AS descendant_feedback_down_count,
-                    NULL::int AS descendant_feedback_total_count
-                FROM expanded_recs_w_label_v
-                WHERE username = %s
+                    NULL::int AS descendant_feedback_total_count,
+                    lf.feedback AS feedback_state,
+                    COALESCE(lf.suppress, FALSE) AS feedback_suppress,
+                    lf.reason_code AS feedback_reason_code,
+                    lf.plex_watchlist_status
+                FROM expanded_recs_w_label_v recs
+                LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
+                WHERE recs.username = %s
+                  AND COALESCE(lf.suppress, FALSE) = FALSE
             """
-            params = [plex_username]
+            params = [plex_username, plex_username]
             if view_key == "movies":
-                sql += " AND media_type = 'movie'"
+                sql += " AND recs.media_type = 'movie'"
             elif view_key == "episodes":
-                sql += " AND media_type = 'episode'"
+                sql += " AND recs.media_type = 'episode'"
             else:
-                sql += " AND media_type IN ('movie', 'episode')"
+                sql += " AND recs.media_type IN ('movie', 'episode')"
 
             if show_rating_key is not None:
-                sql += " AND show_rating_key = %s"
+                sql += " AND recs.show_rating_key = %s"
                 params.append(show_rating_key)
             if season_rating_key is not None:
-                sql += " AND parent_rating_key = %s"
+                sql += " AND recs.parent_rating_key = %s"
                 params.append(season_rating_key)
 
-            sql += " ORDER BY predicted_probability DESC"
+            sql += " ORDER BY recs.predicted_probability DESC"
 
         cur.execute(sql, tuple(params))
         rec_rows = cur.fetchall()
@@ -205,9 +240,15 @@ def get_recommendations(
 
         cur.execute(
             """
-            SELECT DISTINCT rating_key
-            FROM public.user_feedback
-            WHERE username = %s
+            WITH latest_feedback AS (
+                SELECT DISTINCT ON (rating_key)
+                    rating_key
+                FROM public.user_feedback
+                WHERE username = %s
+                ORDER BY rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
+            )
+            SELECT rating_key
+            FROM latest_feedback
             """,
             (plex_username,),
         )

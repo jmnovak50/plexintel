@@ -7,7 +7,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import logging
 
-from api.services.feedback_service import normalize_thumb, replace_feedback_rows
+from api.services.feedback_service import normalize_feedback_action, record_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class LibrarySearchResponse(BaseModel):
 class FeedbackPayload(BaseModel):
     user: str
     rating_key: int
-    thumb: str  # "up" or "down"
+    thumb: str  # Legacy field name; accepts explicit feedback actions too.
     # Kept for backwards compatibility with existing agent callers; ignored now.
     reasons: List[str] = Field(default_factory=list)
     note: Optional[str] = None
@@ -405,17 +405,24 @@ def agent_get_item(rating_key: int):
 @router.post(
     "/feedback",
     response_model=FeedbackResponse,
-    summary="Submit thumbs feedback on an item from a user.",
+    summary="Submit explicit feedback on an item from a user.",
 )
 def agent_submit_feedback(
     payload: FeedbackPayload,
 ):
-    """Agent can log one-click thumbs feedback."""
-    thumb = normalize_thumb(payload.thumb, field_name="thumb")
+    """Agent can log one-click recommendation feedback."""
+    action = normalize_feedback_action(payload.thumb, field_name="thumb")
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            replace_feedback_rows(cur, payload.user, [payload.rating_key], thumb)
+            record_feedback(
+                cur,
+                payload.user,
+                payload.rating_key,
+                action,
+                source="agent",
+                plex_token=None,
+            )
         conn.commit()
 
     return FeedbackResponse(

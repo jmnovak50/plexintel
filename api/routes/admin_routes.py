@@ -37,15 +37,36 @@ def _require_db_url() -> str:
     return DB_URL
 
 
+def _build_user_display_name(username: Optional[str], friendly_name: Optional[str]) -> Optional[str]:
+    normalized_username = (username or "").strip()
+    normalized_friendly_name = (friendly_name or "").strip()
+
+    if normalized_friendly_name and normalized_username:
+        return f"{normalized_friendly_name} ({normalized_username})"
+    if normalized_friendly_name:
+        return normalized_friendly_name
+    if normalized_username:
+        return normalized_username
+    return None
+
+
 def _load_user_record(username: str) -> Optional[dict]:
     conn = psycopg2.connect(_require_db_url(), cursor_factory=RealDictCursor)
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT user_id, username, is_admin, created_at, last_login
-                FROM users
-                WHERE username = %s
+                SELECT
+                    COALESCE(ufv.user_id, u.user_id) AS user_id,
+                    u.username,
+                    ufv.friendly_name,
+                    u.is_admin,
+                    COALESCE(ufv.created_at, u.created_at) AS created_at,
+                    COALESCE(ufv.last_login, u.last_login) AS last_login,
+                    COALESCE(ufv.modified_at, u.modified_at) AS modified_at
+                FROM users u
+                LEFT JOIN users_full_v ufv ON ufv.username = u.username
+                WHERE u.username = %s
                 """,
                 (username,),
             )
@@ -96,6 +117,8 @@ def require_admin(user=Depends(get_current_user)):
 def admin_me(user=Depends(get_current_user)):
     return {
         "username": user["username"],
+        "friendly_name": user.get("friendly_name"),
+        "display_name": _build_user_display_name(user.get("username"), user.get("friendly_name")),
         "is_admin": bool(user["is_admin"]),
         "created_at": user.get("created_at"),
         "last_login": user.get("last_login"),
@@ -110,27 +133,31 @@ def admin_list_users(user=Depends(require_admin)):
             cur.execute(
                 """
                 SELECT
-                    u.username,
-                    u.is_admin,
-                    u.created_at,
-                    u.last_login,
+                    uv.user_id,
+                    uv.username,
+                    uv.friendly_name,
+                    COALESCE(u.is_admin, FALSE) AS is_admin,
+                    uv.created_at,
+                    uv.last_login,
                     COALESCE(r.recommendation_count, 0) AS recommendation_count,
                     COALESCE(f.feedback_count, 0) AS feedback_count
-                FROM users u
+                FROM users_full_v uv
+                LEFT JOIN users u ON u.username = uv.username
                 LEFT JOIN (
                     SELECT username, COUNT(*)::int AS recommendation_count
                     FROM recommendations
                     GROUP BY username
-                ) r ON r.username = u.username
+                ) r ON r.username = uv.username
                 LEFT JOIN (
                     SELECT username, COUNT(*)::int AS feedback_count
                     FROM user_feedback
                     GROUP BY username
-                ) f ON f.username = u.username
+                ) f ON f.username = uv.username
                 ORDER BY
-                    u.is_admin DESC,
-                    COALESCE(u.last_login, u.created_at) DESC NULLS LAST,
-                    u.username ASC
+                    COALESCE(u.is_admin, FALSE) DESC,
+                    COALESCE(uv.last_login, uv.created_at) DESC NULLS LAST,
+                    COALESCE(NULLIF(BTRIM(uv.friendly_name), ''), uv.username) ASC,
+                    uv.username ASC
                 """
             )
             users = cur.fetchall()
@@ -139,6 +166,9 @@ def admin_list_users(user=Depends(require_admin)):
     finally:
         if "conn" in locals() and conn:
             conn.close()
+
+    for row in users:
+        row["display_name"] = _build_user_display_name(row.get("username"), row.get("friendly_name"))
 
     return {
         "count": len(users),
@@ -296,6 +326,8 @@ def admin_feedback_history(
                     f.reason_code,
                     fr.label AS reason_label,
                     f.suppress,
+                    f.plex_watchlist_status,
+                    f.plex_watchlist_synced_at,
                     f.created_at,
                     l.media_type,
                     l.title,

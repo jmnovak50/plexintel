@@ -17,6 +17,7 @@ from api.routes import poster_routes
 from api.routes import agent_tools
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
+from api.db.schema import ensure_app_schema
 from api.services.plex_service import get_plex_user_info
 from api.db.users import get_or_create_user
 
@@ -142,4 +143,5 @@ app.mount(
 
 @app.on_event("startup")
 def startup_log():
+    ensure_app_schema()
     print("🚀 Backend started with session middleware active.")

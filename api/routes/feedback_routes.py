@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
 from api.db.users import get_or_create_user
-from api.services.feedback_service import normalize_thumb, replace_feedback_rows, resolve_bulk_target
+from api.services.feedback_service import delete_feedback_row, normalize_feedback_action, record_feedback
 from api.services.plex_service import get_plex_user_info
 
 
@@ -54,14 +54,25 @@ def _resolve_username(request: Request, payload_username: str, require_session: 
 def submit_feedback(request: Request, feedback: FeedbackIn):
     try:
         username = _resolve_username(request, feedback.username)
-        thumb = normalize_thumb(feedback.feedback, field_name="feedback")
+        action = normalize_feedback_action(feedback.feedback, field_name="feedback")
+        plex_token = request.session.get("plex_token")
 
         conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
         with conn:
             with conn.cursor() as cur:
-                replace_feedback_rows(cur, username, [feedback.rating_key], thumb)
+                feedback_row = record_feedback(
+                    cur,
+                    username,
+                    feedback.rating_key,
+                    action,
+                    source="ui",
+                    plex_token=plex_token,
+                )
 
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "feedback": feedback_row,
+        }
 
     except HTTPException:
         raise
@@ -75,34 +86,37 @@ def submit_feedback(request: Request, feedback: FeedbackIn):
 
 @router.post("/feedback/bulk")
 def submit_bulk_feedback(request: Request, feedback: FeedbackIn):
+    raise HTTPException(
+        status_code=400,
+        detail="Bulk feedback is disabled for explicit four-state feedback. Use leaf item actions instead.",
+    )
+
+
+@router.delete("/feedback/{rating_key}")
+def remove_feedback(request: Request, rating_key: int, username: str | None = None):
     try:
-        username = _resolve_username(request, feedback.username, require_session=True)
-        thumb = normalize_thumb(feedback.feedback, field_name="feedback")
+        resolved_username = _resolve_username(request, username or "", require_session=False)
+        plex_token = request.session.get("plex_token")
 
         conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
         with conn:
             with conn.cursor() as cur:
-                target = resolve_bulk_target(cur, feedback.rating_key)
-                affected_count = replace_feedback_rows(
+                result = delete_feedback_row(
                     cur,
-                    username,
-                    target["descendant_rating_keys"],
-                    thumb,
+                    resolved_username,
+                    rating_key,
+                    plex_token=plex_token,
                 )
 
         return {
             "status": "ok",
-            "target_rating_key": target["target_rating_key"],
-            "target_media_type": target["target_media_type"],
-            "target_title": target["target_title"],
-            "feedback": thumb,
-            "affected_count": affected_count,
+            **result,
         }
 
     except HTTPException:
         raise
     except Exception as exc:
-        print("Bulk feedback insert error:", exc)
+        print("Feedback delete error:", exc)
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         if "conn" in locals() and conn:
