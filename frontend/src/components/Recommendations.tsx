@@ -39,6 +39,10 @@ interface Recommendation {
   descendant_feedback_up_count?: number | null;
   descendant_feedback_down_count?: number | null;
   descendant_feedback_total_count?: number | null;
+  descendant_interested_count?: number | null;
+  descendant_never_watch_count?: number | null;
+  descendant_watched_like_count?: number | null;
+  descendant_watched_dislike_count?: number | null;
   feedback_state?: FeedbackAction | null;
   feedback_suppress?: boolean;
   feedback_reason_code?: string | null;
@@ -59,6 +63,17 @@ interface FeedbackApiResponse {
     plex_watchlist_status: string | null;
     suppress: boolean;
   };
+}
+
+interface BulkFeedbackApiResponse {
+  status: string;
+  target_rating_key: number;
+  target_media_type: 'show' | 'season';
+  target_title: string;
+  feedback: 'interested' | 'never_watch';
+  descendant_total: number;
+  updated_count: number;
+  skipped_watched_count: number;
 }
 
 interface UndoState {
@@ -130,8 +145,102 @@ function canSubmitLeafFeedback(mediaType: string) {
   return typeKey === 'movie' || typeKey === 'episode';
 }
 
+function canSubmitBulkFeedback(mediaType: string) {
+  const typeKey = mediaType.toLowerCase();
+  return typeKey === 'show' || typeKey === 'series' || typeKey === 'tv_show' || typeKey === 'season';
+}
+
 function feedbackActionLabel(action: FeedbackAction | null | undefined) {
   return FEEDBACK_ACTIONS.find((config) => config.action === action)?.label ?? null;
+}
+
+const BULK_FEEDBACK_ACTIONS: Array<{
+  action: 'interested' | 'never_watch';
+  label: string;
+  groupLabel: string;
+  icon: LucideIcon;
+  className: string;
+  activeClassName: string;
+  bulkLabel: string;
+}> = FEEDBACK_ACTIONS
+  .filter((config): config is typeof FEEDBACK_ACTIONS[number] & { action: 'interested' | 'never_watch' } => (
+    config.action === 'interested' || config.action === 'never_watch'
+  ))
+  .map((config) => ({
+    ...config,
+    bulkLabel: config.action === 'interested' ? 'Want to watch all' : 'Never watch all',
+  }));
+
+function getDescendantCounts(rec: Recommendation) {
+  return {
+    total: rec.descendant_episode_count ?? 0,
+    tagged: rec.descendant_feedback_total_count ?? 0,
+    interested: rec.descendant_interested_count ?? 0,
+    neverWatch: rec.descendant_never_watch_count ?? 0,
+    watchedLike: rec.descendant_watched_like_count ?? 0,
+    watchedDislike: rec.descendant_watched_dislike_count ?? 0,
+  };
+}
+
+function getAggregateStatusMessage(rec: Recommendation) {
+  const counts = getDescendantCounts(rec);
+  if (counts.total <= 0) {
+    return 'No episodes available';
+  }
+  if (counts.interested === counts.total) {
+    return `All ${counts.total} episodes want to watch`;
+  }
+  if (counts.neverWatch === counts.total) {
+    return `All ${counts.total} episodes marked never watch`;
+  }
+
+  const parts = [
+    counts.interested > 0 ? `${counts.interested} want to watch` : null,
+    counts.neverWatch > 0 ? `${counts.neverWatch} never watch` : null,
+    counts.watchedLike > 0 ? `${counts.watchedLike} liked` : null,
+    counts.watchedDislike > 0 ? `${counts.watchedDislike} disliked` : null,
+  ].filter(Boolean);
+
+  if (parts.length === 0) {
+    return `0 / ${counts.total} tagged`;
+  }
+
+  return `${counts.tagged} / ${counts.total} tagged (${parts.join(', ')})`;
+}
+
+function isBulkActionComplete(rec: Recommendation, action: 'interested' | 'never_watch') {
+  const counts = getDescendantCounts(rec);
+  if (counts.total <= 0) {
+    return true;
+  }
+
+  const mutableCount = counts.total - counts.watchedLike - counts.watchedDislike;
+  if (mutableCount <= 0) {
+    return true;
+  }
+
+  return action === 'interested'
+    ? counts.interested >= mutableCount
+    : counts.neverWatch >= mutableCount;
+}
+
+function buildBulkConfirmationMessage(rec: Recommendation, action: 'interested' | 'never_watch') {
+  const counts = getDescendantCounts(rec);
+  const actionLabel = action === 'interested' ? 'Want to watch all' : 'Never watch all';
+  const targetLabel = rec.media_type.toLowerCase() === 'season' ? 'this season' : 'this show';
+  return `Apply "${actionLabel}" to all ${counts.total} episodes under ${targetLabel}? Episodes already marked "Watched, liked" or "Watched, disliked" will be left unchanged.`;
+}
+
+function buildBulkResultMessage(result: BulkFeedbackApiResponse) {
+  const actionLabel = result.feedback === 'interested' ? 'Want to watch' : 'Never watch';
+  const skippedMessage = result.skipped_watched_count > 0
+    ? ` ${result.skipped_watched_count} watched outcome${result.skipped_watched_count === 1 ? ' was' : 's were'} left unchanged.`
+    : '';
+
+  if (result.updated_count > 0) {
+    return `Updated ${result.updated_count} of ${result.descendant_total} episodes under ${result.target_title} with "${actionLabel}".${skippedMessage}`;
+  }
+  return `No descendant episodes changed under ${result.target_title}.${skippedMessage || ' All mutable episodes were already tagged that way.'}`;
 }
 
 function watchlistStatusLabel(status: string | null | undefined) {
@@ -312,10 +421,12 @@ function RecommendationThemeChips({
 function RecommendationScore({
   rec,
   isPending,
+  statusMessage,
   compact = false,
 }: {
   rec: Recommendation;
   isPending: boolean;
+  statusMessage?: string | null;
   compact?: boolean;
 }) {
   const scorePct = rec.predicted_probability * 100;
@@ -336,6 +447,9 @@ function RecommendationScore({
       )}
       {isPending && (
         <span className="mt-2 text-xs text-gray-500">Saving feedback...</span>
+      )}
+      {!isPending && statusMessage && (
+        <span className="mt-2 text-xs text-gray-500">{statusMessage}</span>
       )}
     </div>
   );
@@ -371,70 +485,106 @@ function FeedbackActionButtons({
   rec,
   isPending,
   onAction,
+  onBulkAction,
   onUndo,
   alwaysVisible = false,
 }: {
   rec: Recommendation;
   isPending: boolean;
   onAction: (rec: Recommendation, action: FeedbackAction) => void;
+  onBulkAction: (rec: Recommendation, action: 'interested' | 'never_watch') => void;
   onUndo: (rec: Recommendation) => void;
   alwaysVisible?: boolean;
 }) {
-  if (!canSubmitLeafFeedback(rec.media_type)) {
+  if (canSubmitLeafFeedback(rec.media_type)) {
+    const groups = ['Not watched', 'Already watched'];
+    const visibilityClass = alwaysVisible
+      ? 'flex'
+      : 'flex opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100';
+
+    return (
+      <div className={`flex-col gap-3 ${visibilityClass}`}>
+        {groups.map((groupLabel) => (
+          <div key={groupLabel} className="space-y-1">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{groupLabel}</p>
+            <div className="flex flex-wrap gap-2">
+              {FEEDBACK_ACTIONS.filter((config) => config.groupLabel === groupLabel).map((config) => {
+                const Icon = config.icon;
+                const isActive = rec.feedback_state === config.action;
+                return (
+                  <button
+                    key={config.action}
+                    type="button"
+                    aria-label={`${config.label} for ${rec.title}`}
+                    title={config.label}
+                    disabled={isPending || isActive}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onAction(rec, config.action);
+                    }}
+                    className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${isActive ? config.activeClassName : config.className}`}
+                  >
+                    <Icon aria-hidden="true" size={14} strokeWidth={2} />
+                    <span>{config.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        {rec.feedback_state === 'interested' && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onUndo(rec);
+            }}
+            disabled={isPending}
+            className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
+            <span>Undo</span>
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (!canSubmitBulkFeedback(rec.media_type)) {
     return null;
   }
 
-  const groups = ['Not watched', 'Already watched'];
-  const visibilityClass = alwaysVisible
-    ? 'flex'
-    : 'flex opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100';
-
   return (
-    <div className={`flex-col gap-3 ${visibilityClass}`}>
-      {groups.map((groupLabel) => (
-        <div key={groupLabel} className="space-y-1">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{groupLabel}</p>
-          <div className="flex flex-wrap gap-2">
-            {FEEDBACK_ACTIONS.filter((config) => config.groupLabel === groupLabel).map((config) => {
-              const Icon = config.icon;
-              const isActive = rec.feedback_state === config.action;
-              return (
-                <button
-                  key={config.action}
-                  type="button"
-                  aria-label={`${config.label} for ${rec.title}`}
-                  title={config.label}
-                  disabled={isPending || isActive}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onAction(rec, config.action);
-                  }}
-                  className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${isActive ? config.activeClassName : config.className}`}
-                >
-                  <Icon aria-hidden="true" size={14} strokeWidth={2} />
-                  <span>{config.label}</span>
-                </button>
-              );
-            })}
-          </div>
+    <div className="flex flex-col gap-3">
+      <div className="space-y-1">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">All episodes</p>
+        <div className="flex flex-wrap gap-2">
+          {BULK_FEEDBACK_ACTIONS.map((config) => {
+            const Icon = config.icon;
+            const isComplete = isBulkActionComplete(rec, config.action);
+            return (
+              <button
+                key={config.action}
+                type="button"
+                aria-label={`${config.bulkLabel} for ${rec.title}`}
+                title={config.bulkLabel}
+                disabled={isPending || isComplete}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onBulkAction(rec, config.action);
+                }}
+                className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${config.className}`}
+              >
+                <Icon aria-hidden="true" size={14} strokeWidth={2} />
+                <span>{config.bulkLabel}</span>
+              </button>
+            );
+          })}
         </div>
-      ))}
-      {rec.feedback_state === 'interested' && (
-        <button
-          type="button"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onUndo(rec);
-          }}
-          disabled={isPending}
-          className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
-          <span>Undo</span>
-        </button>
-      )}
+      </div>
     </div>
   );
 }
@@ -463,6 +613,7 @@ function DesktopRecommendationsTable({
   onSort,
   onRowClick,
   onAction,
+  onBulkAction,
   onUndo,
   isRowClickable,
 }: {
@@ -471,6 +622,7 @@ function DesktopRecommendationsTable({
   onSort: (column: keyof Recommendation, shiftKey?: boolean) => void;
   onRowClick: (rec: Recommendation) => void;
   onAction: (rec: Recommendation, action: FeedbackAction) => void;
+  onBulkAction: (rec: Recommendation, action: 'interested' | 'never_watch') => void;
   onUndo: (rec: Recommendation) => void;
   isRowClickable: boolean;
 }) {
@@ -495,6 +647,9 @@ function DesktopRecommendationsTable({
           <tbody>
             {recommendations.map((rec) => {
               const isPending = pendingKeys.includes(rec.rating_key);
+              const statusMessage = canSubmitBulkFeedback(rec.media_type)
+                ? getAggregateStatusMessage(rec)
+                : null;
 
               return (
                 <tr
@@ -517,13 +672,14 @@ function DesktopRecommendationsTable({
                     <RecommendationThemeChips semanticThemes={rec.semantic_themes} />
                   </td>
                   <td className="px-4 py-2">
-                    <RecommendationScore rec={rec} isPending={isPending} />
+                    <RecommendationScore rec={rec} isPending={isPending} statusMessage={statusMessage} />
                   </td>
                   <td className="px-4 py-2">
                     <FeedbackActionButtons
                       rec={rec}
                       isPending={isPending}
                       onAction={onAction}
+                      onBulkAction={onBulkAction}
                       onUndo={onUndo}
                       alwaysVisible={rec.feedback_state === 'interested'}
                     />
@@ -543,6 +699,7 @@ function MobileRecommendationsList({
   pendingKeys,
   onRowClick,
   onAction,
+  onBulkAction,
   onUndo,
   isRowClickable,
 }: {
@@ -550,6 +707,7 @@ function MobileRecommendationsList({
   pendingKeys: number[];
   onRowClick: (rec: Recommendation) => void;
   onAction: (rec: Recommendation, action: FeedbackAction) => void;
+  onBulkAction: (rec: Recommendation, action: 'interested' | 'never_watch') => void;
   onUndo: (rec: Recommendation) => void;
   isRowClickable: boolean;
 }) {
@@ -570,6 +728,9 @@ function MobileRecommendationsList({
     <div className="space-y-3 md:hidden">
       {recommendations.map((rec) => {
         const isPending = pendingKeys.includes(rec.rating_key);
+        const statusMessage = canSubmitBulkFeedback(rec.media_type)
+          ? getAggregateStatusMessage(rec)
+          : null;
 
         return (
           <div
@@ -582,7 +743,7 @@ function MobileRecommendationsList({
           >
             <div className="flex items-start justify-between gap-3">
               <MediaTypeBadge mediaType={rec.media_type} />
-              <RecommendationScore rec={rec} isPending={isPending} compact />
+              <RecommendationScore rec={rec} isPending={isPending} statusMessage={statusMessage} compact />
             </div>
 
             <div className="mt-4">
@@ -630,6 +791,7 @@ function MobileRecommendationsList({
                 rec={rec}
                 isPending={isPending}
                 onAction={onAction}
+                onBulkAction={onBulkAction}
                 onUndo={onUndo}
                 alwaysVisible
               />
@@ -654,27 +816,36 @@ export default function Recommendations() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [pendingKeys, setPendingKeys] = useState<number[]>([]);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [pageMessage, setPageMessage] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<SortState[]>([]);
   const [feedbackFilter, setFeedbackFilter] = useState<FeedbackFilter>('all');
   const [undoState, setUndoState] = useState<UndoState | null>(null);
 
-  useEffect(() => {
-    const controller = new AbortController();
+  const applyRecommendationsData = (data: RecommendationsResponse) => {
+    const normalized = normalizeRecommendationsResponse(data);
+    setRecs(normalized.recommendations);
+    setPlexUser(normalized.username);
+    setLastUpdated(normalized.lastUpdated);
+  };
 
-    loadRecommendationsData({
+  const refreshRecommendations = async (signal?: AbortSignal) => {
+    const data = await loadRecommendationsData({
       viewMode,
       selectedShow,
       selectedSeason,
-      signal: controller.signal,
-    })
-      .then((data) => {
+      signal,
+    });
+    applyRecommendationsData(data);
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    refreshRecommendations(controller.signal)
+      .then(() => {
         if (controller.signal.aborted) {
           return;
         }
-        const normalized = normalizeRecommendationsResponse(data);
-        setRecs(normalized.recommendations);
-        setPlexUser(normalized.username);
-        setLastUpdated(normalized.lastUpdated);
         setPageError(null);
       })
       .catch((error) => {
@@ -719,6 +890,7 @@ export default function Recommendations() {
     }
 
     setPageError(null);
+    setPageMessage(null);
     setPendingKeys((prev) => (prev.includes(rec.rating_key) ? prev : [...prev, rec.rating_key]));
 
     try {
@@ -784,6 +956,7 @@ export default function Recommendations() {
     }
 
     setPageError(null);
+    setPageMessage(null);
     setPendingKeys((prev) => (prev.includes(rec.rating_key) ? prev : [...prev, rec.rating_key]));
 
     try {
@@ -831,6 +1004,49 @@ export default function Recommendations() {
     }
   };
 
+  const sendBulkFeedback = async (rec: Recommendation, action: 'interested' | 'never_watch') => {
+    if (!plexUser) {
+      setPageError('Unable to submit feedback: user session is missing.');
+      return;
+    }
+    if (pendingKeys.includes(rec.rating_key) || isBulkActionComplete(rec, action)) {
+      return;
+    }
+    if (!window.confirm(buildBulkConfirmationMessage(rec, action))) {
+      return;
+    }
+
+    setPageError(null);
+    setPageMessage(null);
+    setPendingKeys((prev) => (prev.includes(rec.rating_key) ? prev : [...prev, rec.rating_key]));
+
+    try {
+      const res = await fetch('/api/feedback/bulk', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: plexUser,
+          rating_key: rec.rating_key,
+          feedback: action,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(await extractErrorMessage(res, `Failed to submit bulk feedback (${res.status})`));
+      }
+
+      const result = await res.json() as BulkFeedbackApiResponse;
+      await refreshRecommendations();
+      setPageMessage(buildBulkResultMessage(result));
+    } catch (error) {
+      console.error(error);
+      setPageError(error instanceof Error ? error.message : 'Failed to submit bulk feedback.');
+    } finally {
+      setPendingKeys((prev) => prev.filter((key) => key !== rec.rating_key));
+    }
+  };
+
   const handleSort = (column: keyof Recommendation, shiftKey = false) => {
     setSortOrder((prev) => {
       const existing = prev.find((sort) => sort?.column === column);
@@ -852,6 +1068,7 @@ export default function Recommendations() {
     setViewMode(nextView);
     setSelectedShow(null);
     setSelectedSeason(null);
+    setPageMessage(null);
   };
 
   const handleRowClick = (rec: Recommendation) => {
@@ -861,6 +1078,7 @@ export default function Recommendations() {
       setSelectedShow({ key: showKey, title: rec.title });
       setSelectedSeason(null);
       setViewMode('seasons');
+      setPageMessage(null);
     } else if (viewMode === 'seasons') {
       const showKey = rec.show_rating_key;
       if (showKey && !selectedShow) {
@@ -868,6 +1086,7 @@ export default function Recommendations() {
       }
       setSelectedSeason({ key: rec.rating_key, title: rec.title });
       setViewMode('episodes');
+      setPageMessage(null);
     }
   };
 
@@ -1015,12 +1234,19 @@ export default function Recommendations() {
         </div>
       )}
 
+      {pageMessage && (
+        <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+          {pageMessage}
+        </div>
+      )}
+
       {(viewMode === 'seasons' || viewMode === 'episodes') && selectedShow && (
         <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-gray-600">
           <button
             onClick={() => {
               setSelectedSeason(null);
               setViewMode('shows');
+              setPageMessage(null);
             }}
             className="text-blue-600 underline hover:text-blue-800"
           >
@@ -1034,6 +1260,7 @@ export default function Recommendations() {
                 onClick={() => {
                   setSelectedSeason(null);
                   setViewMode('seasons');
+                  setPageMessage(null);
                 }}
                 className="text-blue-600 underline hover:text-blue-800"
               >
@@ -1056,6 +1283,7 @@ export default function Recommendations() {
             pendingKeys={pendingKeys}
             onRowClick={handleRowClick}
             onAction={sendFeedback}
+            onBulkAction={sendBulkFeedback}
             onUndo={undoFeedback}
             isRowClickable={isRowClickable}
           />
@@ -1065,6 +1293,7 @@ export default function Recommendations() {
             onSort={handleSort}
             onRowClick={handleRowClick}
             onAction={sendFeedback}
+            onBulkAction={sendBulkFeedback}
             onUndo={undoFeedback}
             isRowClickable={isRowClickable}
           />

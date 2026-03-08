@@ -48,23 +48,23 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
             WHERE username = %s
             ORDER BY rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
         ),
-        feedback_by_item AS (
-            SELECT
-                rating_key,
-                BOOL_OR(feedback IN ('interested', 'watched_like')) AS has_up,
-                BOOL_OR(feedback IN ('never_watch', 'watched_dislike')) AS has_down
-            FROM latest_feedback
-            GROUP BY rating_key
-        ),
         descendant_feedback AS (
             SELECT
                 l.{group_column} AS {group_alias},
                 COUNT(*)::int AS descendant_episode_count,
                 COUNT(f.rating_key)::int AS descendant_feedback_total_count,
-                COUNT(*) FILTER (WHERE f.has_up)::int AS descendant_feedback_up_count,
-                COUNT(*) FILTER (WHERE f.has_down)::int AS descendant_feedback_down_count
+                COUNT(*) FILTER (
+                    WHERE f.feedback IN ('interested', 'watched_like')
+                )::int AS descendant_feedback_up_count,
+                COUNT(*) FILTER (
+                    WHERE f.feedback IN ('never_watch', 'watched_dislike')
+                )::int AS descendant_feedback_down_count,
+                COUNT(*) FILTER (WHERE f.feedback = 'interested')::int AS descendant_interested_count,
+                COUNT(*) FILTER (WHERE f.feedback = 'never_watch')::int AS descendant_never_watch_count,
+                COUNT(*) FILTER (WHERE f.feedback = 'watched_like')::int AS descendant_watched_like_count,
+                COUNT(*) FILTER (WHERE f.feedback = 'watched_dislike')::int AS descendant_watched_dislike_count
             FROM public.library l
-            LEFT JOIN feedback_by_item f ON f.rating_key = l.rating_key
+            LEFT JOIN latest_feedback f ON f.rating_key = l.rating_key
             WHERE l.media_type = 'episode'
               AND l.{group_column} IS NOT NULL
             GROUP BY l.{group_column}
@@ -124,6 +124,10 @@ def get_recommendations(
                     COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
                     COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
                     COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count,
+                    COALESCE(df.descendant_interested_count, 0) AS descendant_interested_count,
+                    COALESCE(df.descendant_never_watch_count, 0) AS descendant_never_watch_count,
+                    COALESCE(df.descendant_watched_like_count, 0) AS descendant_watched_like_count,
+                    COALESCE(df.descendant_watched_dislike_count, 0) AS descendant_watched_dislike_count,
                     NULL::text AS feedback_state,
                     FALSE AS feedback_suppress,
                     NULL::text AS feedback_reason_code,
@@ -157,6 +161,10 @@ def get_recommendations(
                     COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
                     COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
                     COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count,
+                    COALESCE(df.descendant_interested_count, 0) AS descendant_interested_count,
+                    COALESCE(df.descendant_never_watch_count, 0) AS descendant_never_watch_count,
+                    COALESCE(df.descendant_watched_like_count, 0) AS descendant_watched_like_count,
+                    COALESCE(df.descendant_watched_dislike_count, 0) AS descendant_watched_dislike_count,
                     NULL::text AS feedback_state,
                     FALSE AS feedback_suppress,
                     NULL::text AS feedback_reason_code,
@@ -204,6 +212,10 @@ def get_recommendations(
                     NULL::int AS descendant_feedback_up_count,
                     NULL::int AS descendant_feedback_down_count,
                     NULL::int AS descendant_feedback_total_count,
+                    NULL::int AS descendant_interested_count,
+                    NULL::int AS descendant_never_watch_count,
+                    NULL::int AS descendant_watched_like_count,
+                    NULL::int AS descendant_watched_dislike_count,
                     lf.feedback AS feedback_state,
                     COALESCE(lf.suppress, FALSE) AS feedback_suppress,
                     lf.reason_code AS feedback_reason_code,

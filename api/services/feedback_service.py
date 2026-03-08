@@ -16,6 +16,14 @@ CANONICAL_FEEDBACK_ACTIONS = {
     "watched_like",
     "watched_dislike",
 }
+BULK_FEEDBACK_ACTIONS = {
+    "interested",
+    "never_watch",
+}
+PROTECTED_BULK_FEEDBACK_ACTIONS = {
+    "watched_like",
+    "watched_dislike",
+}
 LEGACY_FEEDBACK_ALIASES = {
     "up": "interested",
     "down": "never_watch",
@@ -38,6 +46,16 @@ def normalize_feedback_action(value: str, field_name: str = "feedback") -> str:
                 f"{field_name} must be one of "
                 "'interested', 'never_watch', 'watched_like', 'watched_dislike'"
             ),
+        )
+    return normalized_value
+
+
+def normalize_bulk_feedback_action(value: str, field_name: str = "feedback") -> str:
+    normalized_value = normalize_feedback_action(value, field_name=field_name)
+    if normalized_value not in BULK_FEEDBACK_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be 'interested' or 'never_watch' for bulk feedback",
         )
     return normalized_value
 
@@ -134,34 +152,19 @@ def _build_feedback_response(
     }
 
 
-def record_feedback(
+def _upsert_feedback_row(
     cur,
     username: str,
     rating_key: int,
     action: str,
     *,
-    source: str = "ui",
-    plex_token: Optional[str] = None,
-) -> dict:
+    source: str,
+    plex_watchlist_status: str,
+    plex_watchlist_synced_at,
+):
     normalized_action = normalize_feedback_action(action)
-    seed_feedback_reasons(cur)
-
-    item = ensure_library_guid(cur, rating_key)
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
-
     defaults = action_defaults(normalized_action)
-    watchlist_status = defaults["plex_watchlist_status"]
-    watchlist_synced_at = None
-
-    if normalized_action == "interested":
-        watchlist_result = add_to_plex_watchlist(
-            plex_token,
-            item.get("plex_guid"),
-            item.get("media_type"),
-        )
-        watchlist_status = watchlist_result["status"]
-        watchlist_synced_at = watchlist_result.get("synced_at")
+    timestamp = datetime.utcnow()
 
     cur.execute(
         """
@@ -204,14 +207,54 @@ def record_feedback(
             normalized_action,
             defaults["reason_code"],
             defaults["suppress"],
-            datetime.utcnow(),
+            timestamp,
             source,
-            watchlist_status,
-            watchlist_synced_at,
-            datetime.utcnow(),
+            plex_watchlist_status,
+            plex_watchlist_synced_at,
+            timestamp,
         ),
     )
-    row = cur.fetchone()
+    return cur.fetchone()
+
+
+def record_feedback(
+    cur,
+    username: str,
+    rating_key: int,
+    action: str,
+    *,
+    source: str = "ui",
+    plex_token: Optional[str] = None,
+) -> dict:
+    normalized_action = normalize_feedback_action(action)
+    seed_feedback_reasons(cur)
+
+    item = ensure_library_guid(cur, rating_key)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    defaults = action_defaults(normalized_action)
+    watchlist_status = defaults["plex_watchlist_status"]
+    watchlist_synced_at = None
+
+    if normalized_action == "interested":
+        watchlist_result = add_to_plex_watchlist(
+            plex_token,
+            item.get("plex_guid"),
+            item.get("media_type"),
+        )
+        watchlist_status = watchlist_result["status"]
+        watchlist_synced_at = watchlist_result.get("synced_at")
+
+    row = _upsert_feedback_row(
+        cur,
+        username,
+        rating_key,
+        normalized_action,
+        source=source,
+        plex_watchlist_status=watchlist_status,
+        plex_watchlist_synced_at=watchlist_synced_at,
+    )
     return _build_feedback_response(
         row["username"],
         row["rating_key"],
@@ -224,6 +267,68 @@ def record_feedback(
         item.get("title"),
         item.get("media_type"),
     )
+
+
+def record_bulk_feedback(
+    cur,
+    username: str,
+    rating_key: int,
+    action: str,
+    *,
+    source: str = "bulk",
+) -> dict:
+    normalized_action = normalize_bulk_feedback_action(action)
+    seed_feedback_reasons(cur)
+    target = resolve_bulk_target(cur, rating_key)
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (rating_key)
+            rating_key,
+            feedback
+        FROM public.user_feedback
+        WHERE username = %s
+          AND rating_key = ANY(%s)
+        ORDER BY rating_key, COALESCE(modified_at, created_at, now()) DESC, id DESC
+        """,
+        (username, target["descendant_rating_keys"]),
+    )
+    existing_feedback = {
+        row["rating_key"]: row["feedback"]
+        for row in cur.fetchall()
+    }
+
+    updated_count = 0
+    skipped_watched_count = 0
+    for descendant_rating_key in target["descendant_rating_keys"]:
+        current_feedback = existing_feedback.get(descendant_rating_key)
+        if current_feedback in PROTECTED_BULK_FEEDBACK_ACTIONS:
+            skipped_watched_count += 1
+            continue
+        if current_feedback == normalized_action:
+            continue
+
+        _upsert_feedback_row(
+            cur,
+            username,
+            descendant_rating_key,
+            normalized_action,
+            source=source,
+            plex_watchlist_status="not_applicable",
+            plex_watchlist_synced_at=None,
+        )
+        updated_count += 1
+
+    return {
+        "target_rating_key": target["target_rating_key"],
+        "target_media_type": target["target_media_type"],
+        "target_title": target["target_title"],
+        "feedback": normalized_action,
+        "feedback_label": action_label(normalized_action),
+        "descendant_total": len(target["descendant_rating_keys"]),
+        "updated_count": updated_count,
+        "skipped_watched_count": skipped_watched_count,
+    }
 
 
 def replace_feedback_rows(

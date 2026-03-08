@@ -6,7 +6,13 @@ from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
 from api.db.users import get_or_create_user
-from api.services.feedback_service import delete_feedback_row, normalize_feedback_action, record_feedback
+from api.services.feedback_service import (
+    delete_feedback_row,
+    normalize_bulk_feedback_action,
+    normalize_feedback_action,
+    record_bulk_feedback,
+    record_feedback,
+)
 from api.services.plex_service import get_plex_user_info
 
 
@@ -86,10 +92,34 @@ def submit_feedback(request: Request, feedback: FeedbackIn):
 
 @router.post("/feedback/bulk")
 def submit_bulk_feedback(request: Request, feedback: FeedbackIn):
-    raise HTTPException(
-        status_code=400,
-        detail="Bulk feedback is disabled for explicit four-state feedback. Use leaf item actions instead.",
-    )
+    try:
+        username = _resolve_username(request, feedback.username, require_session=True)
+        action = normalize_bulk_feedback_action(feedback.feedback, field_name="feedback")
+
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
+        with conn:
+            with conn.cursor() as cur:
+                result = record_bulk_feedback(
+                    cur,
+                    username,
+                    feedback.rating_key,
+                    action,
+                    source="bulk",
+                )
+
+        return {
+            "status": "ok",
+            **result,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("Bulk feedback insert error:", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if "conn" in locals() and conn:
+            conn.close()
 
 
 @router.delete("/feedback/{rating_key}")
