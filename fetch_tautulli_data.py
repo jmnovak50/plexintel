@@ -824,28 +824,41 @@ def run_incremental_load():
     # 1. Fetch all current rating_keys from DB
     cursor.execute("SELECT rating_key FROM library")
     existing_keys = {str(row[0]) for row in cursor.fetchall()}
+    queued_keys = set()
+    new_items = []
+
+    def append_new_item(item):
+        rating_key = safe_int(item.get("rating_key")) if isinstance(item, dict) else None
+        if rating_key is None:
+            return
+        rating_key_str = str(rating_key)
+        if rating_key_str in existing_keys or rating_key_str in queued_keys:
+            return
+        new_items.append(item)
+        queued_keys.add(rating_key_str)
 
     # 2. Get movies
     print("🎞️ Fetching movies...")
     movies = get_library_media_info(section_id=1)
-    new_items = [m for m in movies if str(m["rating_key"]) not in existing_keys]
+    for movie in movies:
+        append_new_item(movie)
 
-    # 3. Get episodes via show → season → episode
-    print("📺 Fetching episodes...")
+    # 3. Get shows, seasons, and episodes via show → season → episode
+    print("📺 Fetching shows, seasons, and episodes...")
     shows = get_library_media_info(section_id=2)
     for show in shows:
+        append_new_item(show)
         show_key = show["rating_key"]
         seasons = get_children_metadata(show_key)
         for season in seasons:
             if season.get("media_type") != "season":
                 continue
+            append_new_item(season)
             season_key = season["rating_key"]
             episodes = get_children_metadata(season_key)
             for ep in episodes:
                 if ep.get("media_type") == "episode":
-                    rk = str(ep["rating_key"])
-                    if rk not in existing_keys:
-                        new_items.append(ep)
+                    append_new_item(ep)
 
     print(f"📌 New media items to insert: {len(new_items)}")
 
@@ -864,13 +877,16 @@ def run_incremental_load():
     else:
         print("✅ No new content to add.")
 
-    # 5. One-time backfill path for existing rows added before plex_guid existed.
+    # 5. Repair missing parent header rows implied by already-ingested descendants.
+    backfill_missing_header_records(conn, cursor)
+
+    # 6. One-time backfill path for existing rows added before plex_guid existed.
     backfill_missing_plex_guids(conn, cursor)
 
-    # 6. Sync new watch history
+    # 7. Sync new watch history
     sync_new_watch_history(conn, cursor)
 
-    # 7. Optionally embed new stuff immediately after sync
+    # 8. Optionally embed new stuff immediately after sync
     if os.getenv("ENABLE_EMBED_MEDIA", "1") == "1":
         generate_media_embeddings()
 
@@ -880,6 +896,69 @@ def run_incremental_load():
     conn.commit()
     conn.close()
     print("✅ Incremental update complete.")
+
+
+def backfill_missing_header_records(conn, cursor):
+    print("🧱 Checking for missing show and season header records...")
+    cursor.execute(
+        """
+        WITH missing_seasons AS (
+            SELECT DISTINCT e.parent_rating_key AS rating_key
+            FROM library e
+            LEFT JOIN library s ON s.rating_key = e.parent_rating_key
+            WHERE e.media_type = 'episode'
+              AND e.parent_rating_key IS NOT NULL
+              AND s.rating_key IS NULL
+        ),
+        missing_shows_from_episodes AS (
+            SELECT DISTINCT e.show_rating_key AS rating_key
+            FROM library e
+            LEFT JOIN library sh ON sh.rating_key = e.show_rating_key
+            WHERE e.media_type = 'episode'
+              AND e.show_rating_key IS NOT NULL
+              AND sh.rating_key IS NULL
+        ),
+        missing_shows_from_seasons AS (
+            SELECT DISTINCT s.parent_rating_key AS rating_key
+            FROM library s
+            LEFT JOIN library sh ON sh.rating_key = s.parent_rating_key
+            WHERE s.media_type = 'season'
+              AND s.parent_rating_key IS NOT NULL
+              AND sh.rating_key IS NULL
+        )
+        SELECT DISTINCT rating_key
+        FROM (
+            SELECT rating_key FROM missing_seasons
+            UNION ALL
+            SELECT rating_key FROM missing_shows_from_episodes
+            UNION ALL
+            SELECT rating_key FROM missing_shows_from_seasons
+        ) missing_headers
+        WHERE rating_key IS NOT NULL
+        ORDER BY rating_key
+        """
+    )
+    missing_header_keys = [row[0] for row in cursor.fetchall()]
+
+    if not missing_header_keys:
+        print("✅ No missing show or season header records found.")
+        return
+
+    print(f"🧱 Backfilling {len(missing_header_keys)} missing show/season header records...")
+    recovered_items = []
+    for rating_key in missing_header_keys:
+        metadata = get_metadata(rating_key)
+        if metadata:
+            recovered_items.append(metadata)
+        else:
+            print(f"⚠️ Could not backfill header metadata for rating_key={rating_key}")
+
+    if not recovered_items:
+        print("⚠️ Missing header records were detected, but no metadata could be recovered.")
+        return
+
+    store_library_data(conn, cursor, recovered_items)
+    print(f"✅ Backfilled {len(recovered_items)} missing header records.")
 
 
 def backfill_missing_plex_guids(conn, cursor):
@@ -1407,29 +1486,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plex/Tautulli Media Metadata Importer")
     parser.add_argument(
         "--mode",
-    choices=["full", "incremental", "recover", "embeddings", "watch_embeddings"],
-    default="full",
-    help="Select run mode: full (default), incremental, recover missing items, generate embeddings, or generate watch history embeddings"
-)
-parser.add_argument(
-    "--dry-run",
-    action="store_true",
-    help="If set, missing items will only be printed and NOT inserted into the database"
-)
-args = parser.parse_args()
+        choices=["full", "incremental", "recover", "embeddings", "watch_embeddings"],
+        default="full",
+        help="Select run mode: full (default), incremental, recover missing items, generate embeddings, or generate watch history embeddings",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="If set, missing items will only be printed and NOT inserted into the database",
+    )
+    args = parser.parse_args()
 
+    print(f"🚀 Starting script in '{args.mode}' mode...")
 
-print(f"🚀 Starting script in '{args.mode}' mode...")
-
-if args.mode == "full":
-    main()
-elif args.mode == "incremental":
-    run_incremental_load()
-elif args.mode == "recover":
-    recover_missing_media(dry_run=args.dry_run)
-elif args.mode == "embeddings":
-    # Media embeddings via Ollama + VectorChord
-    generate_media_embeddings()
-elif args.mode == "watch_embeddings":
-    # Watch embeddings via Ollama + VectorChord
-    generate_watch_embeddings()
+    if args.mode == "full":
+        main()
+    elif args.mode == "incremental":
+        run_incremental_load()
+    elif args.mode == "recover":
+        recover_missing_media(dry_run=args.dry_run)
+    elif args.mode == "embeddings":
+        # Media embeddings via Ollama + VectorChord
+        generate_media_embeddings()
+    elif args.mode == "watch_embeddings":
+        # Watch embeddings via Ollama + VectorChord
+        generate_watch_embeddings()
