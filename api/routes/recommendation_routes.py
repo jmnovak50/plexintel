@@ -135,6 +135,7 @@ def get_recommendations(
                 FROM show_rollups_v sr
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
                 WHERE sr.username = %s
+                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
                 ORDER BY sr.rollup_score DESC
             """
             params = [plex_username, plex_username]
@@ -172,6 +173,7 @@ def get_recommendations(
                 FROM season_rollups_v sr
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.season_rating_key
                 WHERE sr.username = %s
+                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
             """
             params = [plex_username, plex_username]
             if show_rating_key is not None:
@@ -217,13 +219,19 @@ def get_recommendations(
                     NULL::int AS descendant_watched_like_count,
                     NULL::int AS descendant_watched_dislike_count,
                     lf.feedback AS feedback_state,
-                    COALESCE(lf.suppress, FALSE) AS feedback_suppress,
+                    CASE
+                        WHEN lf.feedback = 'interested' THEN TRUE
+                        ELSE COALESCE(lf.suppress, FALSE)
+                    END AS feedback_suppress,
                     lf.reason_code AS feedback_reason_code,
                     lf.plex_watchlist_status
                 FROM expanded_recs_w_label_v recs
                 LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
                 WHERE recs.username = %s
-                  AND COALESCE(lf.suppress, FALSE) = FALSE
+                  AND CASE
+                      WHEN lf.feedback = 'interested' THEN TRUE
+                      ELSE COALESCE(lf.suppress, FALSE)
+                  END = FALSE
             """
             params = [plex_username, plex_username]
             if view_key == "movies":

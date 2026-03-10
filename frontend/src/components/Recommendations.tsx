@@ -14,7 +14,6 @@ import {
 import { Link } from 'react-router-dom';
 
 type FeedbackAction = 'interested' | 'never_watch' | 'watched_like' | 'watched_dislike';
-type FeedbackFilter = 'all' | 'saved' | 'unsaved';
 type ViewMode = 'all' | 'movies' | 'shows' | 'seasons' | 'episodes';
 type SortState = { column: keyof Recommendation; direction: 'asc' | 'desc' };
 type ScopedSelection = { key: number; title: string };
@@ -243,39 +242,6 @@ function buildBulkResultMessage(result: BulkFeedbackApiResponse) {
   return `No descendant episodes changed under ${result.target_title}.${skippedMessage || ' All mutable episodes were already tagged that way.'}`;
 }
 
-function watchlistStatusLabel(status: string | null | undefined) {
-  switch (status) {
-    case 'synced':
-      return 'Plex watchlist synced';
-    case 'failed':
-      return 'Plex watchlist sync failed';
-    case 'auth_required':
-      return 'Plex login required';
-    case 'unresolved':
-      return 'Plex sync unavailable';
-    case 'not_supported':
-      return 'Plex watchlist unsupported';
-    default:
-      return null;
-  }
-}
-
-function watchlistStatusClassName(status: string | null | undefined) {
-  switch (status) {
-    case 'synced':
-      return 'border-blue-200 bg-blue-50 text-blue-700';
-    case 'failed':
-      return 'border-amber-200 bg-amber-50 text-amber-700';
-    case 'auth_required':
-      return 'border-slate-200 bg-slate-100 text-slate-700';
-    case 'unresolved':
-    case 'not_supported':
-      return 'border-slate-200 bg-slate-50 text-slate-600';
-    default:
-      return '';
-  }
-}
-
 async function extractErrorMessage(res: Response, fallback: string) {
   try {
     const data = await res.json();
@@ -455,32 +421,6 @@ function RecommendationScore({
   );
 }
 
-function FeedbackStateBadges({ rec }: { rec: Recommendation }) {
-  const feedbackLabel = feedbackActionLabel(rec.feedback_state);
-  const watchlistLabel = rec.feedback_state === 'interested'
-    ? watchlistStatusLabel(rec.plex_watchlist_status)
-    : null;
-
-  if (!feedbackLabel && !watchlistLabel) {
-    return null;
-  }
-
-  return (
-    <div className="mt-2 flex flex-wrap gap-2">
-      {feedbackLabel && (
-        <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
-          Saved
-        </span>
-      )}
-      {watchlistLabel && (
-        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${watchlistStatusClassName(rec.plex_watchlist_status)}`}>
-          {watchlistLabel}
-        </span>
-      )}
-    </div>
-  );
-}
-
 function FeedbackActionButtons({
   rec,
   isPending,
@@ -601,7 +541,6 @@ function RecommendationTitleCell({
       <RecommendationPoster posterUrl={rec.poster_url} />
       <div className={isCompact ? 'mt-2' : ''}>
         <p className="text-sm font-semibold leading-tight text-gray-900">{rec.title}</p>
-        <FeedbackStateBadges rec={rec} />
       </div>
     </div>
   );
@@ -681,7 +620,7 @@ function DesktopRecommendationsTable({
                       onAction={onAction}
                       onBulkAction={onBulkAction}
                       onUndo={onUndo}
-                      alwaysVisible={rec.feedback_state === 'interested'}
+                      alwaysVisible={false}
                     />
                   </td>
                 </tr>
@@ -818,7 +757,6 @@ export default function Recommendations() {
   const [pageError, setPageError] = useState<string | null>(null);
   const [pageMessage, setPageMessage] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<SortState[]>([]);
-  const [feedbackFilter, setFeedbackFilter] = useState<FeedbackFilter>('all');
   const [undoState, setUndoState] = useState<UndoState | null>(null);
 
   const applyRecommendationsData = (data: RecommendationsResponse) => {
@@ -912,32 +850,17 @@ export default function Recommendations() {
       const data = await res.json() as FeedbackApiResponse;
       const returnedFeedback = data.feedback;
 
-      if (action === 'interested') {
-        setRecs((prev) => prev.map((item) => (
-          item.rating_key === rec.rating_key
-            ? {
-                ...item,
-                feedback_state: 'interested',
-                feedback_suppress: false,
-                feedback_reason_code: returnedFeedback?.feedback ?? 'interested',
-                plex_watchlist_status: returnedFeedback?.plex_watchlist_status ?? 'unresolved',
-              }
-            : item
-        )));
-        setUndoState(null);
-      } else {
-        setRecs((prev) => prev.filter((item) => item.rating_key !== rec.rating_key));
-        setUndoState({
-          recommendation: {
-            ...rec,
-            feedback_state: null,
-            feedback_suppress: false,
-            feedback_reason_code: null,
-            plex_watchlist_status: 'not_applicable',
-          },
-          action,
-        });
-      }
+      setRecs((prev) => prev.filter((item) => item.rating_key !== rec.rating_key));
+      setUndoState({
+        recommendation: {
+          ...rec,
+          feedback_state: null,
+          feedback_suppress: false,
+          feedback_reason_code: null,
+          plex_watchlist_status: returnedFeedback?.plex_watchlist_status ?? 'not_applicable',
+        },
+        action,
+      });
     } catch (error) {
       console.error(error);
       setPageError(error instanceof Error ? error.message : 'Failed to submit feedback.');
@@ -1095,20 +1018,13 @@ export default function Recommendations() {
       .filter((rec) => {
         const score = rec.predicted_probability * 100;
         const searchLower = search.toLowerCase();
-        const usesSavedFilter = viewMode !== 'shows' && viewMode !== 'seasons';
         const matchesSearch = (
           rec.title?.toLowerCase().includes(searchLower) ||
           rec.show_title?.toLowerCase().includes(searchLower) ||
           rec.genres?.toLowerCase().includes(searchLower) ||
           rec.semantic_themes?.toLowerCase().includes(searchLower)
         );
-        const matchesSavedFilter = (
-          !usesSavedFilter ||
-          feedbackFilter === 'all' ||
-          (feedbackFilter === 'saved' && rec.feedback_state === 'interested') ||
-          (feedbackFilter === 'unsaved' && rec.feedback_state !== 'interested')
-        );
-        return score >= minScore && matchesSearch && matchesSavedFilter;
+        return score >= minScore && matchesSearch;
       })
       .sort((a, b) => {
         for (const { column, direction } of sortOrder) {
@@ -1126,7 +1042,7 @@ export default function Recommendations() {
         }
         return b.predicted_probability - a.predicted_probability;
       })
-  ), [feedbackFilter, minScore, recs, search, sortOrder, viewMode]);
+  ), [minScore, recs, search, sortOrder]);
 
   const isRowClickable = viewMode === 'shows' || viewMode === 'seasons';
 
@@ -1156,7 +1072,7 @@ export default function Recommendations() {
       {undoState && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
           <span>
-            {feedbackActionLabel(undoState.action)} saved for <span className="font-medium">{undoState.recommendation.title}</span>.
+            {feedbackActionLabel(undoState.action)} recorded for <span className="font-medium">{undoState.recommendation.title}</span>.
           </span>
           <button
             type="button"
@@ -1205,27 +1121,6 @@ export default function Recommendations() {
             className="w-full"
           />
         </div>
-
-        {viewMode !== 'shows' && viewMode !== 'seasons' && (
-          <div className="col-span-1 sm:col-span-2">
-            <div className="flex flex-wrap gap-2">
-              {(['all', 'saved', 'unsaved'] as FeedbackFilter[]).map((filterValue) => (
-                <button
-                  key={filterValue}
-                  type="button"
-                  onClick={() => setFeedbackFilter(filterValue)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
-                    feedbackFilter === filterValue
-                      ? 'border-blue-300 bg-blue-50 text-blue-700'
-                      : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
-                  }`}
-                >
-                  {filterValue === 'all' ? 'All' : filterValue === 'saved' ? 'Saved' : 'Unsaved'}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       {pageError && (

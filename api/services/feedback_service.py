@@ -86,7 +86,7 @@ def seed_feedback_reasons(cur) -> None:
 
 def action_defaults(action: str) -> dict:
     normalized_action = normalize_feedback_action(action)
-    suppress = normalized_action != "interested"
+    suppress = True
     watchlist_status = "not_applicable"
     if normalized_action == "interested":
         watchlist_status = "unresolved"
