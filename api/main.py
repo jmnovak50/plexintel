@@ -7,6 +7,7 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 
+from api.db.connection import connect_db
 from api.routes import auth_routes
 from api.routes import plex_oauth_routes
 from api.routes import feedback_routes  # <- wherever your route is
@@ -59,7 +60,7 @@ def _has_admin_session(request: Request) -> bool:
     conn = None
     cur = None
     try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        conn = connect_db()
         cur = conn.cursor()
         cur.execute("SELECT is_admin FROM users WHERE username = %s", (username,))
         row = cur.fetchone()
@@ -111,7 +112,7 @@ async def admin_entry(request: Request):
 @app.get("/api/recs")
 async def get_recommendations(username: str = Query(...)):
     try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        conn = connect_db()
         cur = conn.cursor()
 
         query = """

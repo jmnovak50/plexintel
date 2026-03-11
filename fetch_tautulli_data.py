@@ -3,35 +3,19 @@ import os
 import time
 import requests
 import json
-import psycopg2
 import argparse
 import pandas as pd
 from datetime import datetime
-import psycopg2
 from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 # Ollama embedding client (NAS-hosted EmbeddingGemma)
 from ollama_embeddings import embed_texts
+from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
-# Optional: batch sizing from env
-EMBED_BATCH_SIZE = os.getenv("EMBED_BATCH_SIZE")
+from api.services.app_settings import get_setting_value
 
 # ✅ Load environment variables
 load_dotenv()
-
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT")
-}
-
-DB_URL = os.getenv("DATABASE_URL")
-
-TAUTULLI_API_URL = os.getenv("TAUTULLI_API_URL")
-TAUTULLI_API_KEY = os.getenv("TAUTULLI_API_KEY")
-TAUTULLI_URL = os.getenv("TAUTULLI_URL")
 
 def safe_int(value):
     """Convert value to an integer safely, returning None if conversion fails."""
@@ -42,12 +26,20 @@ def safe_int(value):
     except ValueError:
         return None
 
+def get_embed_batch_size() -> int:
+    return get_setting_value("embeddings.batch_size", default=128)
 
-# ✅ Fetch data from Tautulli API
-import requests
-import json
-import psycopg2
-import os
+
+def get_tautulli_api_url() -> str | None:
+    return get_setting_value("tautulli.api_url")
+
+
+def get_tautulli_api_key() -> str | None:
+    return get_setting_value("tautulli.api_key")
+
+
+def get_tautulli_base_url() -> str | None:
+    return get_setting_value("tautulli.base_url")
 
 def clear_tautulli_cache():
     """
@@ -55,11 +47,14 @@ def clear_tautulli_cache():
     Uses the same TAUTULLI_URL and TAUTULLI_API_KEY as the rest of the script.
     """
     params = {
-        "apikey": TAUTULLI_API_KEY,
+        "apikey": get_tautulli_api_key(),
         "cmd": "delete_cache",
     }
     try:
-        resp = requests.get(f"{TAUTULLI_URL}/api/v2", params=params, timeout=30)
+        tautulli_url = get_tautulli_base_url()
+        if not tautulli_url:
+            raise ValueError("Tautulli base URL is not configured")
+        resp = requests.get(f"{tautulli_url}/api/v2", params=params, timeout=30)
         resp.raise_for_status()
         print("✅ Cleared Tautulli cache via delete_cache")
     except Exception as e:
@@ -70,10 +65,10 @@ def fetch_tautulli_data(endpoint, params=None):
     if params is None:
         params = {}
     params["cmd"] = endpoint  
-    params["apikey"] = os.getenv("TAUTULLI_API_KEY")
+    params["apikey"] = get_tautulli_api_key()
 
     try:
-        response = requests.get(os.getenv("TAUTULLI_API_URL"), params=params)
+        response = requests.get(get_tautulli_api_url(), params=params)
         # print(f"🔍 DEBUG: API call to {endpoint} returned status {response.status_code}")
 
         try:
@@ -171,10 +166,7 @@ def sync_users_from_tautulli(conn, cursor):
 # ✅ Connect to PostgreSQL Database
 def connect_to_db():
     try:
-        if DB_URL:
-            conn = psycopg2.connect(DB_URL)
-        else:
-            conn = psycopg2.connect(**DB_CONFIG)
+        conn = connect_db()
         # ✅ Tell psycopg2 how to handle pgvector's `vector` type
         register_vector(conn)
 
@@ -887,10 +879,10 @@ def run_incremental_load():
     sync_new_watch_history(conn, cursor)
 
     # 8. Optionally embed new stuff immediately after sync
-    if os.getenv("ENABLE_EMBED_MEDIA", "1") == "1":
+    if get_setting_value("embeddings.enable_media", default=True):
         generate_media_embeddings()
 
-    if os.getenv("ENABLE_EMBED_WATCHES", "1") == "1":
+    if get_setting_value("embeddings.enable_watches", default=True):
         generate_watch_embeddings()
 
     conn.commit()
@@ -1188,7 +1180,7 @@ def sync_new_watch_history(conn, cursor):
 
     store_watch_history(conn, cursor, valid_rows)
 
-def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
+def generate_media_embeddings(batch_size: int | None = None):
     """
     Generate embeddings for media items in `library` that are missing in `media_embeddings`.
 
@@ -1223,13 +1215,13 @@ def generate_media_embeddings(batch_size: int = EMBED_BATCH_SIZE):
     
     print(f"📦 Media items to embed: {len(rows)}")
     # ✅ Optional: list what will be embedded (like the old behavior)
-    if os.getenv("LOG_EMBED_TITLES", "1").lower() in ("1", "true", "yes", "on"):
+    if get_setting_value("embeddings.log_titles", default=True):
         for rk, title, _summary in rows:
             print(f"   🎬 {title} (rating_key={rk})")
 
     texts = [_media_text_for_embedding(r) for r in rows]
     
-    raw_bs = batch_size
+    raw_bs = batch_size if batch_size is not None else get_embed_batch_size()
     try:
         norm_bs = int(str(raw_bs).strip().split()[0])
     except Exception:
@@ -1323,7 +1315,7 @@ def _watch_text_for_embedding(
     ]
     return ". ".join(p for p in parts if p).strip()
 
-def generate_watch_embeddings(batch_size: int = 16):
+def generate_watch_embeddings(batch_size: int | None = None):
     """
     Generate embeddings for watch_history rows that are missing watch_embeddings.
     Uses library + genre/actor/director context to build the text.
@@ -1414,6 +1406,9 @@ def generate_watch_embeddings(batch_size: int = 16):
         ) in rows
     ]
 
+    if batch_size is None:
+        batch_size = get_embed_batch_size()
+
     vectors = embed_texts(texts, batch_size=batch_size)
     assert len(vectors) == len(rows)
 
@@ -1446,7 +1441,7 @@ def main():
     Main function to fetch and store library data and watch history from Tautulli API to PostgreSQL.
     """
     print("🚀 Script started...")
-    ensure_app_schema(DB_URL)
+    ensure_app_schema()
     conn, cursor = connect_to_db()
     if not conn:
         return

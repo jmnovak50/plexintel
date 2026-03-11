@@ -1,23 +1,18 @@
-# api/public_recommendation_routes.py
-
-import os
 import uuid
 from fastapi import APIRouter, Query, HTTPException
 from typing import Optional
-from dotenv import load_dotenv
-import psycopg2
 from psycopg2.extras import RealDictCursor
+
+from api.db.connection import connect_db
+from api.services.app_settings import get_setting_value
 
 router = APIRouter()
 
-# 🔐 Load .env and API key
-load_dotenv()
-PUBLIC_API_KEY = os.getenv("PUBLIC_API_KEY")
-
 # ✅ Validate API Key format + value
 def validate_api_key(apikey: Optional[str]):
+    expected_api_key = get_setting_value("public_api.api_key")
     try:
-        if not apikey or str(uuid.UUID(apikey)) != PUBLIC_API_KEY:
+        if not apikey or str(uuid.UUID(apikey)) != expected_api_key:
             raise ValueError()
     except Exception:
         raise HTTPException(status_code=403, detail="Invalid or missing API key")
@@ -52,7 +47,7 @@ def fetch_recommendations(username, genre, media_type, score_threshold, page, pa
     params_with_pagination = params + [page_size, offset]
 
     try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        conn = connect_db(cursor_factory=RealDictCursor)
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         cur.execute(count_query, tuple(params))
@@ -72,7 +67,7 @@ def fetch_recommendations(username, genre, media_type, score_threshold, page, pa
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if conn:
+        if "conn" in locals() and conn:
             conn.close()
 
 # 🚀 Clean public endpoint

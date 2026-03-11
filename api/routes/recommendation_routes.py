@@ -3,19 +3,14 @@ from typing import Optional
 
 import psycopg2
 import requests
-from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Query, Request
 from pgvector.psycopg2 import register_vector
 from psycopg2.extras import RealDictCursor
 
+from api.db.connection import connect_db
 from api.services.poster_service import build_poster_url
 
-
-load_dotenv()
-
 router = APIRouter()
-
-DB_URL = os.getenv("DATABASE_URL")
 
 
 def get_plex_username(token: str) -> str:
@@ -93,7 +88,7 @@ def get_recommendations(
         raise HTTPException(status_code=403, detail="Invalid token")
 
     try:
-        conn = psycopg2.connect(DB_URL)
+        conn = connect_db()
         register_vector(conn)
         cur = conn.cursor(cursor_factory=RealDictCursor)
 

@@ -1,67 +1,31 @@
 import json
-import os
 import re
 import time
 from datetime import datetime
 
 import openai
 import pandas as pd
-import psycopg2
 import requests
-from dotenv import load_dotenv
 from pgvector.psycopg2 import register_vector
 
-load_dotenv()
-DB_URL = os.getenv("DATABASE_URL")
+from api.db.connection import connect_db as connect_bootstrap_db
+from api.services.app_settings import get_setting_value
 
-MIN_VALID_ITEMS = 6
-DEFAULT_TOP_POSITIVE_ITEMS = 6
-DEFAULT_TOP_NEGATIVE_ITEMS = 4
-DEFAULT_FETCH_ITEMS = 10
-SUMMARY_HINT_CHARS = 140
-MAX_GENRE_TAGS = 3
-MAX_CAST_NAMES = 2
-MAX_DIRECTOR_NAMES = 2
-MAX_ITEMS_PER_USER_IN_PROMPT = 2
+MIN_VALID_ITEMS = get_setting_value("labeling.min_valid_items", default=6)
+DEFAULT_TOP_POSITIVE_ITEMS = get_setting_value("labeling.default_top_positive_items", default=6)
+DEFAULT_TOP_NEGATIVE_ITEMS = get_setting_value("labeling.default_top_negative_items", default=4)
+DEFAULT_FETCH_ITEMS = get_setting_value("labeling.default_fetch_items", default=10)
+SUMMARY_HINT_CHARS = get_setting_value("labeling.summary_hint_chars", default=140)
+MAX_GENRE_TAGS = get_setting_value("labeling.max_genre_tags", default=3)
+MAX_CAST_NAMES = get_setting_value("labeling.max_cast_names", default=2)
+MAX_DIRECTOR_NAMES = get_setting_value("labeling.max_director_names", default=2)
+MAX_ITEMS_PER_USER_IN_PROMPT = get_setting_value("labeling.max_items_per_user_in_prompt", default=2)
 UNCLEAR_LABEL = "UNCLEAR / MIXED SIGNAL"
-
-
-def _strip_inline_annotation(value: str) -> str:
-    cleaned = str(value).strip().strip("\"'")
-    if "(default:" in cleaned:
-        cleaned = cleaned.split("(default:", 1)[0].strip()
-    return cleaned
-
-
-def _get_env_str(name: str, default: str) -> str:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    cleaned = _strip_inline_annotation(value)
-    return cleaned or default
-
-
-def _get_env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-
-    cleaned = _strip_inline_annotation(value)
-    if not cleaned:
-        return default
-
-    try:
-        return int(cleaned.split()[0])
-    except ValueError:
-        print(f"⚠️ Invalid {name}={value!r}; using default {default}")
-        return default
-
-
-LABEL_PROVIDER = _get_env_str("LABEL_PROVIDER", "ollama").lower()
-OPENAI_LABEL_MODEL = _get_env_str("OPENAI_LABEL_MODEL", _get_env_str("LABEL_MODEL", "gpt-4"))
-OLLAMA_HOST = _get_env_str("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-OLLAMA_LABEL_MODEL = _get_env_str("OLLAMA_LABEL_MODEL", _get_env_str("LABEL_MODEL", "gemma3"))
-OLLAMA_TIMEOUT_S = _get_env_int("OLLAMA_TIMEOUT_S", 300)
+LABEL_PROVIDER = str(get_setting_value("labeling.provider", default="ollama")).lower()
+OPENAI_LABEL_MODEL = get_setting_value("labeling.openai_model", default="gpt-4")
+OLLAMA_HOST = str(get_setting_value("ollama.host", default="http://localhost:11434")).rstrip("/")
+OLLAMA_LABEL_MODEL = get_setting_value("labeling.ollama_model", default="gemma3")
+OLLAMA_TIMEOUT_S = get_setting_value("ollama.timeout_s", default=300)
 
 SYSTEM_PROMPT = """
 You label one embedding dimension for film and TV data.
@@ -138,7 +102,7 @@ LOW ITEMS:
 
 
 def connect_db():
-    conn = psycopg2.connect(DB_URL)
+    conn = connect_bootstrap_db()
     register_vector(conn)
     return conn
 
@@ -659,7 +623,7 @@ def _extract_label_from_response(response_text: str) -> str:
 
 
 def _call_openai_for_label_result(prompt_text: str, model: str) -> dict:
-    client = openai.OpenAI()
+    client = openai.OpenAI(api_key=get_setting_value("openai.api_key"))
     response = client.chat.completions.create(
         model=model,
         messages=[

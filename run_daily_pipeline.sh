@@ -54,6 +54,6 @@ echo "🔮 Scoring recommendations..."
 "$PY" "$APP/score_model.py" --all-users
 
 echo "🏷  Auto-labeling SHAP dimensions with Ollama..."
-"$PY" "$APP/batch_label_embeddings.py" --label --label_provider ollama --label_model gpt-oss:120b-cloud --save_label --export_csv shap_labels_$(date +%F).csv --limit 100
+"$PY" "$APP/batch_label_embeddings.py" --label --save_label --export_csv shap_labels_$(date +%F).csv --limit 100
 
 echo "✅ Daily pipeline complete: $(date)"

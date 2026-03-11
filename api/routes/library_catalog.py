@@ -1,10 +1,9 @@
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query
-import os
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
-DB_URL = os.getenv("DATABASE_URL")  # already used elsewhere in PlexIntel
+from api.db.connection import connect_db
+
 router = APIRouter()
 
 BASE = """
@@ -17,7 +16,7 @@ FROM library_catalog_v
 """
 
 def q(sql: str, params=()):
-    with psycopg2.connect(DB_URL, cursor_factory=RealDictCursor) as conn:
+    with connect_db(cursor_factory=RealDictCursor) as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()

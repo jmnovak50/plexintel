@@ -1,10 +1,8 @@
-import os
-
-import psycopg2
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
+from api.db.connection import connect_db
 from api.db.users import get_or_create_user
 from api.services.feedback_service import (
     delete_feedback_row,
@@ -63,7 +61,7 @@ def submit_feedback(request: Request, feedback: FeedbackIn):
         action = normalize_feedback_action(feedback.feedback, field_name="feedback")
         plex_token = request.session.get("plex_token")
 
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
+        conn = connect_db(cursor_factory=RealDictCursor)
         with conn:
             with conn.cursor() as cur:
                 feedback_row = record_feedback(
@@ -96,7 +94,7 @@ def submit_bulk_feedback(request: Request, feedback: FeedbackIn):
         username = _resolve_username(request, feedback.username, require_session=True)
         action = normalize_bulk_feedback_action(feedback.feedback, field_name="feedback")
 
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
+        conn = connect_db(cursor_factory=RealDictCursor)
         with conn:
             with conn.cursor() as cur:
                 result = record_bulk_feedback(
@@ -128,7 +126,7 @@ def remove_feedback(request: Request, rating_key: int, username: str | None = No
         resolved_username = _resolve_username(request, username or "", require_session=False)
         plex_token = request.session.get("plex_token")
 
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
+        conn = connect_db(cursor_factory=RealDictCursor)
         with conn:
             with conn.cursor() as cur:
                 result = delete_feedback_row(

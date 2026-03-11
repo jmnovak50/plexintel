@@ -2,6 +2,8 @@ import os
 
 import psycopg2
 
+from api.db.connection import connect_db, get_database_url
+from api.services.app_settings import bootstrap_settings_from_env, ensure_settings_schema
 
 CANONICAL_FEEDBACK_VALUES = (
     "interested",
@@ -13,6 +15,7 @@ CANONICAL_FEEDBACK_VALUES = (
 
 def apply_schema_updates(conn) -> None:
     with conn.cursor() as cur:
+        ensure_settings_schema(conn)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS public.feedback_reason (
@@ -227,14 +230,15 @@ def apply_schema_updates(conn) -> None:
             """
         )
     conn.commit()
+    bootstrap_settings_from_env(conn)
 
 
 def ensure_app_schema(db_url: str | None = None) -> None:
-    resolved_db_url = db_url or os.getenv("DATABASE_URL")
+    resolved_db_url = db_url or get_database_url()
     if not resolved_db_url:
         return
 
-    conn = psycopg2.connect(resolved_db_url)
+    conn = psycopg2.connect(resolved_db_url) if db_url else connect_db()
     try:
         apply_schema_updates(conn)
     finally:

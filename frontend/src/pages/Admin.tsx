@@ -217,12 +217,20 @@ export default function Admin() {
             Signed in as {me?.display_name || me?.username || "…"}
           </p>
         </div>
-        <Link
-          to="/recs"
-          className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-        >
-          Back to Recommendations
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            to="/admin/settings"
+            className="inline-flex items-center rounded-md border border-slate-300 bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
+          >
+            Settings Workspace
+          </Link>
+          <Link
+            to="/recs"
+            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+          >
+            Back to Recommendations
+          </Link>
+        </div>
       </div>
 
       {error && (

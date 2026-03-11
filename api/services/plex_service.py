@@ -1,5 +1,3 @@
-# plex_service.py
-import os
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -7,19 +5,22 @@ from typing import Optional
 
 import httpx
 
-PLEX_CLIENT_ID = os.getenv("PLEX_CLIENT_ID") or str(uuid.uuid4())
-PLEX_PRODUCT = os.getenv("PLEX_PRODUCT", "PlexIntel")
-PLEX_VERSION = os.getenv("PLEX_VERSION", "1.0")
+from api.services.app_settings import get_setting_value
+
+_DEFAULT_PLEX_CLIENT_ID = str(uuid.uuid4())
 PLEX_API = "https://plex.tv/api/v2"
 PLEX_DISCOVER_API = "https://discover.provider.plex.tv"
 PLEX_WATCHLIST_SUPPORTED_MEDIA_TYPES = {"movie", "show", "series", "tv_show"}
 
 
 def _build_plex_headers(token: Optional[str] = None, accept: str = "application/xml") -> dict:
+    client_id = get_setting_value("plex.client_id", default=_DEFAULT_PLEX_CLIENT_ID)
+    product = get_setting_value("plex.product", default="PlexIntel")
+    version = get_setting_value("plex.version", default="1.0")
     headers = {
-        "X-Plex-Client-Identifier": PLEX_CLIENT_ID,
-        "X-Plex-Product": PLEX_PRODUCT,
-        "X-Plex-Version": PLEX_VERSION,
+        "X-Plex-Client-Identifier": client_id,
+        "X-Plex-Product": product,
+        "X-Plex-Version": version,
         "Accept": accept,
     }
     if token:

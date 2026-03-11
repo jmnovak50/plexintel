@@ -1,32 +1,26 @@
-import os
-
-import psycopg2
 import requests
-from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Request, Response
 from psycopg2.extras import RealDictCursor
 
+from api.db.connection import connect_db
+from api.services.app_settings import get_setting_value
 from api.services.poster_service import resolve_poster_path_from_row
 
-load_dotenv()
-
 router = APIRouter()
-
-DB_URL = os.getenv("DATABASE_URL")
-TAUTULLI_URL = os.getenv("TAUTULLI_URL")
-TAUTULLI_API_URL = os.getenv("TAUTULLI_API_URL")
-TAUTULLI_API_KEY = os.getenv("TAUTULLI_API_KEY")
 
 
 def _fetch_tautulli_image(poster_path: str) -> requests.Response:
     last_error = None
+    tautulli_url = get_setting_value("tautulli.base_url")
+    tautulli_api_url = get_setting_value("tautulli.api_url")
+    tautulli_api_key = get_setting_value("tautulli.api_key")
 
-    if TAUTULLI_URL:
-        proxy_url = f"{TAUTULLI_URL.rstrip('/')}/pms_image_proxy"
+    if tautulli_url:
+        proxy_url = f"{tautulli_url.rstrip('/')}/pms_image_proxy"
         try:
             direct_response = requests.get(
                 proxy_url,
-                params={"img": poster_path, "apikey": TAUTULLI_API_KEY},
+                params={"img": poster_path, "apikey": tautulli_api_key},
                 timeout=20,
             )
             if direct_response.status_code == 200:
@@ -34,13 +28,13 @@ def _fetch_tautulli_image(poster_path: str) -> requests.Response:
         except requests.RequestException as exc:
             last_error = exc
 
-    if TAUTULLI_API_URL:
+    if tautulli_api_url:
         try:
             api_response = requests.get(
-                TAUTULLI_API_URL,
+                tautulli_api_url,
                 params={
                     "cmd": "pms_image_proxy",
-                    "apikey": TAUTULLI_API_KEY,
+                    "apikey": tautulli_api_key,
                     "img": poster_path,
                 },
                 timeout=20,
@@ -62,13 +56,17 @@ def get_poster(rating_key: int, request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    if not DB_URL or not TAUTULLI_API_KEY or (not TAUTULLI_URL and not TAUTULLI_API_URL):
+    tautulli_url = get_setting_value("tautulli.base_url")
+    tautulli_api_url = get_setting_value("tautulli.api_url")
+    tautulli_api_key = get_setting_value("tautulli.api_key")
+
+    if not tautulli_api_key or (not tautulli_url and not tautulli_api_url):
         raise HTTPException(status_code=500, detail="Poster proxy is not configured.")
 
     conn = None
     cur = None
     try:
-        conn = psycopg2.connect(DB_URL)
+        conn = connect_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
             """

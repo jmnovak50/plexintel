@@ -1,20 +1,5 @@
 from dotenv import load_dotenv
-import os
-
-script_dir = os.path.dirname(os.path.abspath(__file__))
-dotenv_path = os.path.join(script_dir, '.env')
-load_dotenv(dotenv_path=dotenv_path)
-
-SHAP_PRUNE_DAYS = int(os.getenv("SHAP_PRUNE_DAYS", "3"))
-SHAP_MAX_ITEMS = int(os.getenv("SHAP_MAX_ITEMS", "100"))
-SHAP_RAW_MIN_DIMS = int(os.getenv("SHAP_RAW_MIN_DIMS", "5"))
-SHAP_RAW_MAX_DIMS = int(os.getenv("SHAP_RAW_MAX_DIMS", "20"))
-SHAP_RAW_CUMABS_TARGET = float(os.getenv("SHAP_RAW_CUMABS_TARGET", "0.90"))
-SHAP_AGG_TOP_DIMS = int(os.getenv("SHAP_AGG_TOP_DIMS", "50"))
-WATCHED_ENGAGEMENT_THRESHOLD = float(os.getenv("WATCHED_ENGAGEMENT_THRESHOLD", "0.5"))
-WATCH_EMBED_MIN_ENGAGEMENT = float(os.getenv("WATCH_EMBED_MIN_ENGAGEMENT", "0.5"))
-DB_URL = os.getenv("DATABASE_URL")
-print("DB_URL is:", DB_URL)
+load_dotenv()
 
 import pandas as pd
 import numpy as np
@@ -26,7 +11,21 @@ from datetime import datetime
 import xgboost as xgb
 from sklearn.preprocessing import MultiLabelBinarizer
 import warnings
+from api.db.connection import connect_db, get_database_url
+from api.db.schema import ensure_app_schema
+from api.services.app_settings import get_setting_value
+
 warnings.filterwarnings("ignore", category=UserWarning, module='sklearn')
+
+SHAP_PRUNE_DAYS = get_setting_value("scoring.shap_prune_days", default=3)
+SHAP_MAX_ITEMS = get_setting_value("scoring.shap_max_items", default=100)
+SHAP_RAW_MIN_DIMS = get_setting_value("scoring.shap_raw_min_dims", default=5)
+SHAP_RAW_MAX_DIMS = get_setting_value("scoring.shap_raw_max_dims", default=20)
+SHAP_RAW_CUMABS_TARGET = get_setting_value("scoring.shap_raw_cumabs_target", default=0.90)
+SHAP_AGG_TOP_DIMS = get_setting_value("scoring.shap_agg_top_dims", default=50)
+WATCHED_ENGAGEMENT_THRESHOLD = get_setting_value("scoring.watched_engagement_threshold", default=0.5)
+WATCH_EMBED_MIN_ENGAGEMENT = get_setting_value("training.watch_embed_min_engagement", default=0.5)
+DB_URL = get_database_url()
 
 def get_engine():
     return create_engine(DB_URL)
@@ -60,7 +59,7 @@ def ensure_shap_snapshot_schema(conn):
     cur.close()
 
 def reset_shap_snapshot_tables():
-    conn = psycopg2.connect(DB_URL)
+    conn = connect_db()
     try:
         ensure_shap_snapshot_schema(conn)
         cur = conn.cursor()
@@ -154,7 +153,7 @@ def get_user_watch_vector(username):
     Build a per-user average watch-embedding vector (from watch_history + watch_embeddings).
     Only includes watch events above WATCH_EMBED_MIN_ENGAGEMENT.
     """
-    conn = psycopg2.connect(DB_URL)
+    conn = connect_db()
     cur = conn.cursor()
     cur.execute(
         """
@@ -496,7 +495,7 @@ def score_and_store(username, skip_shap=False):
     shap_values = explainer.shap_values(X_top)
 
     print("\n🔍 SHAP Feature Impact (Top Rows):")
-    conn = psycopg2.connect(DB_URL)
+    conn = connect_db()
     cur = conn.cursor()
     ensure_shap_snapshot_schema(conn)
 
@@ -550,6 +549,7 @@ def get_all_users():
 if __name__ == "__main__":
     import argparse
 
+    ensure_app_schema()
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--user", type=str, help="Username to score recommendations for")

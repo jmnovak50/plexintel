@@ -52,18 +52,30 @@ npm run build
 
 4. Set up environment variables
 
-Create a .env file in the root of the backend:
+Create a bootstrap-only `.env` file in the project root:
 
+```
 DATABASE_URL=postgresql://username:password@localhost:5432/plexintel
-PLEX_CLIENT_ID=your_plex_client_id
-PLEX_PRODUCT=plexintel
-PLEX_DEVICE=plexintel-client
-PLEX_REDIRECT_URI=http://localhost:8489/auth/callback
-OPENAI_API_KEY=sk-...
+SESSION_SECRET=replace-me
+```
+
+Optional: if you are migrating from an older `.env`-driven install, you can temporarily keep legacy config vars in `.env`. PlexIntel now auto-imports missing settings into the database on startup, and after that you should manage them from the admin settings workspace at `/admin/settings`.
+
+An example bootstrap file is included at `.env.bootstrap.example`.
 
 5. Start the backend
 
 uvicorn api.main:app --host 0.0.0.0 --port 8489
+
+6. Configure integrations in admin
+
+Start the app, sign in as an admin user, then open `/admin/settings` to configure:
+
+- Tautulli connectivity
+- Plex client metadata
+- Public API access
+- Ollama / OpenAI / labeling defaults
+- Training and scoring thresholds
 
 ⚙️ Nightly Pipeline
 
@@ -101,7 +113,7 @@ plexintel/
 ├── train_model.py
 ├── score_model.py
 ├── explore_embedding_dimension.py
-├── .env                  # Environment config
+├── .env.bootstrap.example
 └── run_daily_pipeline.sh
 
 🧪 Testing
@@ -114,4 +126,3 @@ npm run dev
 🧠 Credits
 
 Built by Jason Novak to bring smarter discovery to Plex libraries. 🧩
-

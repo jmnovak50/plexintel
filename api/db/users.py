@@ -1,13 +1,12 @@
 # users.py
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import os
 from datetime import datetime
 
-DB_URL = os.getenv("DATABASE_URL")
+from psycopg2.extras import RealDictCursor
+
+from api.db.connection import connect_db
 
 def get_or_create_user(username: str, email: str = None, token: str = None):
-    conn = psycopg2.connect(DB_URL)
+    conn = connect_db(cursor_factory=RealDictCursor)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     cursor.execute("SELECT user_id FROM users WHERE username = %s", (username,))

@@ -4,11 +4,11 @@ load_dotenv()
 
 import argparse
 import csv
-import os
 
-import psycopg2
 from pgvector.psycopg2 import register_vector
 
+from api.db.connection import connect_db as connect_bootstrap_db
+from api.db.schema import ensure_app_schema
 from gpt_utils import (
     DEFAULT_FETCH_ITEMS,
     UNCLEAR_LABEL,
@@ -24,11 +24,8 @@ from gpt_utils import (
 )
 
 
-DB_URL = os.getenv("DATABASE_URL")
-
-
 def connect_db():
-    conn = psycopg2.connect(DB_URL)
+    conn = connect_bootstrap_db()
     register_vector(conn)
     return conn
 
@@ -289,4 +286,5 @@ def main():
 
 
 if __name__ == "__main__":
+    ensure_app_schema()
     main()

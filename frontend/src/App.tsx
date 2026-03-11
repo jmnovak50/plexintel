@@ -3,6 +3,7 @@ import Login from "./pages/Login";
 import Welcome from "./pages/Welcome";
 import PostLogin from "./pages/PostLogin";
 import Admin from "./pages/Admin";
+import AdminSettings from "./pages/AdminSettings";
 import Recommendations from "./components/Recommendations";
 
 function App() {
@@ -14,6 +15,7 @@ function App() {
         <Route path="/post-login" element={<PostLogin />} />
         <Route path="/recs" element={<Recommendations />} />
         <Route path="/admin" element={<Admin />} />
+        <Route path="/admin/settings" element={<AdminSettings />} />
       </Routes>
     </BrowserRouter>
   );

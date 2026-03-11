@@ -1,33 +1,22 @@
 from dotenv import load_dotenv
-import os
-import psycopg2
 import numpy as np
 from psycopg2.extras import RealDictCursor
 from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 
+from api.db.connection import connect_db
+from api.db.schema import ensure_app_schema
+from api.services.app_settings import get_setting_value
+
 # ✅ Load environment variables
 load_dotenv()
 
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT")
-}
-
-DB_URL = os.getenv("DATABASE_URL")
-
 EMBEDDING_DIMENSION = 768
-ENGAGEMENT_THRESHOLD = 0.5
+ENGAGEMENT_THRESHOLD = get_setting_value("user_embeddings.engagement_threshold", default=0.5)
 
 
 def connect():
-    if DB_URL:
-        conn = psycopg2.connect(DB_URL)
-    else:
-        conn = psycopg2.connect(**DB_CONFIG)
+    conn = connect_db()
     register_vector(conn)
     return conn
 
@@ -97,4 +86,5 @@ def main():
 
 
 if __name__ == "__main__":
+    ensure_app_schema()
     main()

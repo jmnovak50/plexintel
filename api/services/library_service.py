@@ -1,24 +1,20 @@
-import os
 from typing import Optional
 
 import requests
-from dotenv import load_dotenv
 
-
-load_dotenv()
-
-TAUTULLI_API_URL = os.getenv("TAUTULLI_API_URL")
-TAUTULLI_API_KEY = os.getenv("TAUTULLI_API_KEY")
+from api.services.app_settings import get_setting_value
 
 
 def fetch_tautulli_metadata(rating_key: int) -> Optional[dict]:
-    if not TAUTULLI_API_URL or not TAUTULLI_API_KEY:
+    api_url = get_setting_value("tautulli.api_url")
+    api_key = get_setting_value("tautulli.api_key")
+    if not api_url or not api_key:
         return None
 
     response = requests.get(
-        TAUTULLI_API_URL,
+        api_url,
         params={
-            "apikey": TAUTULLI_API_KEY,
+            "apikey": api_key,
             "cmd": "get_metadata",
             "rating_key": rating_key,
         },

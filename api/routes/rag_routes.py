@@ -1,17 +1,12 @@
 from fastapi import APIRouter, Request, HTTPException
-import os
-import psycopg2
 from psycopg2.extras import RealDictCursor
 from pgvector.psycopg2 import register_vector
-from dotenv import load_dotenv
 import traceback
 from typing import Any
 
-load_dotenv()
+from api.db.connection import connect_db
 
 router = APIRouter()
-
-DB_URL = os.getenv("DATABASE_URL")
 model = None
 
 
@@ -36,7 +31,7 @@ async def rag_query(request: Request):
         username = data.get("username", "jmnovak")
 
         # Connect to DB
-        conn = psycopg2.connect(DB_URL)
+        conn = connect_db()
         register_vector(conn)
         cur = conn.cursor(cursor_factory=RealDictCursor)
 

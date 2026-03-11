@@ -1,16 +1,11 @@
 # Updated plex_oauth_routes.py for real OAuth redirect flow
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import RedirectResponse
 from api.services.plex_service import poll_plex_pin, get_plex_user_info
 from typing import Optional
-import httpx, os
 from api.db.users import get_or_create_user
+from api.services.app_settings import get_setting_value
 
 router = APIRouter()
-
-PLEX_CLIENT_ID = os.getenv("PLEX_CLIENT_ID")
-PLEX_PRODUCT = os.getenv("PLEX_PRODUCT", "PlexIntel")
-REDIRECT_URI = os.getenv("PLEX_REDIRECT_URI", "http://localhost:8489/api/auth/redirect")
 
 # # STEP 1: Redirect user to Plex OAuth authorize endpoint
 # @router.get("/login")
@@ -73,6 +68,7 @@ def initiate_login(request: Request, pin_id: Optional[int] = None):
     client_id = pin["clientIdentifier"]
     code = pin["code"]
     real_pin_id = pin["id"]
+    plex_product = get_setting_value("plex.product", default="PlexIntel")
 
     base_url = str(request.base_url).rstrip("/")
     forward_url = f"{base_url}/post-login?pin_id={real_pin_id}"
@@ -81,7 +77,7 @@ def initiate_login(request: Request, pin_id: Optional[int] = None):
         f"https://app.plex.tv/auth#"
         f"?clientID={client_id}"
         f"&code={code}"
-        f"&context%5Bdevice%5D%5Bproduct%5D={PLEX_PRODUCT}"
+        f"&context%5Bdevice%5D%5Bproduct%5D={plex_product}"
         f"&forwardUrl={forward_url}"
     )
 
@@ -118,7 +114,6 @@ def check_auth_status(pin_id: int, request: Request):
             "new_user": new_user,
         }
     return {"authenticated": False}
-
 
 
 

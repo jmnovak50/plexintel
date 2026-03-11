@@ -1,42 +1,29 @@
 from dotenv import load_dotenv
-import os
-import psycopg2
 import numpy as np
 from psycopg2.extras import RealDictCursor
 from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 import ast
 
+from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
+from api.services.app_settings import get_setting_value
 
 # ✅ Load environment variables
 load_dotenv()
 
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT")
-}
-
-DB_URL = os.getenv("DATABASE_URL")
-
-ENGAGEMENT_THRESHOLD = 0.7  # Label threshold
-FEEDBACK_BONUS = 0.1        # 👍 Bonus applied to thumbs-up engagement
-ENABLE_FEEDBACK = True      # Toggle feedback injection on/off
-USE_SAMPLE_WEIGHT = True
-WATCH_EMBED_MIN_ENGAGEMENT = float(os.getenv("WATCH_EMBED_MIN_ENGAGEMENT", "0.5"))
-INTERESTED_SAMPLE_WEIGHT = 0.75
-WATCHED_LIKE_SAMPLE_WEIGHT = 3.0
-NEGATIVE_SAMPLE_WEIGHT = 5.0
+ENGAGEMENT_THRESHOLD = get_setting_value("training.engagement_threshold", default=0.7)
+FEEDBACK_BONUS = get_setting_value("training.feedback_bonus", default=0.1)
+ENABLE_FEEDBACK = get_setting_value("training.enable_feedback", default=True)
+USE_SAMPLE_WEIGHT = get_setting_value("training.use_sample_weight", default=True)
+WATCH_EMBED_MIN_ENGAGEMENT = get_setting_value("training.watch_embed_min_engagement", default=0.5)
+INTERESTED_SAMPLE_WEIGHT = get_setting_value("training.interested_sample_weight", default=0.75)
+WATCHED_LIKE_SAMPLE_WEIGHT = get_setting_value("training.watched_like_sample_weight", default=3.0)
+NEGATIVE_SAMPLE_WEIGHT = get_setting_value("training.negative_sample_weight", default=5.0)
 
 
 def connect():
-    if DB_URL:
-        conn = psycopg2.connect(DB_URL)
-    else:
-        conn = psycopg2.connect(**DB_CONFIG)
+    conn = connect_db()
     register_vector(conn)
     return conn
 
@@ -362,4 +349,5 @@ GROUP BY t.username, t.rating_key, t.played_duration, l.duration, l.year,
 
 
 if __name__ == "__main__":
+    ensure_app_schema()
     build_training_data()

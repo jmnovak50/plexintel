@@ -12,44 +12,20 @@ ENV (all optional):
   OLLAMA_TIMEOUT_S  e.g. 60                           (default: 60)
 """
 from __future__ import annotations
-import os, time, json, math
-import requests
+import json
+import math
+import time
 from typing import Iterable, List
 
+import numpy as np
+import psycopg2
+import requests
+from pgvector import Vector
+from pgvector.psycopg2 import register_vector
+from psycopg2.extras import RealDictCursor
 
-def _strip_inline_annotation(value: str) -> str:
-    cleaned = str(value).strip().strip("\"'")
-    if "(default:" in cleaned:
-        cleaned = cleaned.split("(default:", 1)[0].strip()
-    return cleaned
-
-
-def _get_env_str(name: str, default: str) -> str:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    cleaned = _strip_inline_annotation(value)
-    return cleaned or default
-
-
-def _get_env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    cleaned = _strip_inline_annotation(value)
-    if not cleaned:
-        return default
-    try:
-        return int(cleaned.split()[0])
-    except Exception:
-        return default
-
-
-OLLAMA_HOST = _get_env_str("OLLAMA_HOST", "http://192.168.1.123:31770").rstrip("/")
-OLLAMA_MODEL = _get_env_str("OLLAMA_MODEL", "embeddinggemma")
-EMBED_BATCH_SIZE = _get_env_int("EMBED_BATCH_SIZE", 128)
-OLLAMA_TIMEOUT_S = _get_env_int("OLLAMA_TIMEOUT_S", 300)
-OLLAMA_THREADS = _get_env_int("OLLAMA_THREADS", 0) or None
+from api.db.connection import connect_db
+from api.services.app_settings import get_setting_value
 
 class OllamaError(RuntimeError):
     pass
@@ -63,11 +39,16 @@ def chunks(seq, batch):
 
 
 def _post_embed(inputs: List[str]) -> List[List[float]]:
-    payload = {"model": OLLAMA_MODEL, "input": inputs, "keep_alive": "15m"}
-    if OLLAMA_THREADS:
+    ollama_model = get_setting_value("ollama.embedding_model", default="embeddinggemma")
+    ollama_threads = get_setting_value("ollama.threads")
+    ollama_host = str(get_setting_value("ollama.host", default="http://localhost:11434")).rstrip("/")
+    ollama_timeout_s = get_setting_value("ollama.timeout_s", default=300)
+
+    payload = {"model": ollama_model, "input": inputs, "keep_alive": "15m"}
+    if ollama_threads:
         # llama.cpp-compatible hint; Ollama will ignore if unsupported
-        payload["num_thread"] = OLLAMA_THREADS
-    r = requests.post(f"{OLLAMA_HOST}/api/embed", json=payload, timeout=OLLAMA_TIMEOUT_S)
+        payload["num_thread"] = ollama_threads
+    r = requests.post(f"{ollama_host}/api/embed", json=payload, timeout=ollama_timeout_s)
     if r.status_code >= 400:
         raise OllamaError(f"Ollama error {r.status_code}: {r.text[:200]}")
     data = r.json()
@@ -97,7 +78,8 @@ def embed_texts(
     #   - an int
     #   - a string like "128"
     #   - or a string like "128 (default: 128)" ← problematic
-    raw_bs = batch_size if batch_size is not None else EMBED_BATCH_SIZE
+    default_batch_size = get_setting_value("embeddings.batch_size", default=128)
+    raw_bs = batch_size if batch_size is not None else default_batch_size
 
     # Extract the first numeric chunk safely
     # e.g. "128 (default: 128)" → "128"
@@ -231,33 +213,12 @@ def embed_texts(
 # ------------------------------------------------------------------------------
 
 # build_user_embeddings.py (REPLACEMENT)
-from dotenv import load_dotenv
-import os
-import psycopg2
-import numpy as np
-from psycopg2.extras import RealDictCursor
-from pgvector.psycopg2 import register_vector
-from pgvector import Vector
-
-# ✅ Load environment variables
-load_dotenv()
-
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT"),
-}
-
-DB_URL = os.getenv("DATABASE_URL")
-
 EMBEDDING_DIMENSION = 768
-ENGAGEMENT_THRESHOLD = float(os.getenv("ENGAGEMENT_THRESHOLD", "0.5"))
 
 
 def fetch_user_vectors(conn):
     """Fetch engaged watches joined directly to media embeddings to avoid N queries."""
+    engagement_threshold = get_setting_value("user_embeddings.engagement_threshold", default=0.5)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
@@ -271,7 +232,7 @@ def fetch_user_vectors(conn):
               AND wh.played_duration IS NOT NULL
               AND (wh.played_duration::float / (l.duration / 1000.0)) > %s
             """,
-            (ENGAGEMENT_THRESHOLD,),
+            (engagement_threshold,),
         )
         return cur.fetchall()
 
@@ -305,10 +266,7 @@ def build_user_embeddings(user_rows, conn):
 
 
 def main():
-    if DB_URL:
-        conn = psycopg2.connect(DB_URL)
-    else:
-        conn = psycopg2.connect(**DB_CONFIG)
+    conn = connect_db()
     register_vector(conn)
 
     print("🔍 Fetching engaged user vectors (joined with media_embeddings)…")

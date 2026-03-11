@@ -7,6 +7,7 @@ load_dotenv()
 
 import argparse
 
+from api.db.schema import ensure_app_schema
 from gpt_utils import (
     UNCLEAR_LABEL,
     build_dimension_prompt,
@@ -104,4 +105,5 @@ def main():
 
 
 if __name__ == "__main__":
+    ensure_app_schema()
     main()

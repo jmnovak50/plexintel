@@ -1,13 +1,21 @@
-import os
 import subprocess
 from typing import Optional
 
 import psycopg2
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor
 
+from api.db.connection import connect_db
 from api.db.users import get_or_create_user
+from api.services.app_settings import (
+    SettingsValidationError,
+    get_settings_payload,
+    save_settings,
+    test_ollama_settings,
+    test_tautulli_settings,
+)
 from api.services.plex_service import get_plex_user_info
 from api.services.poster_service import build_poster_url
 
@@ -24,17 +32,18 @@ ALLOWED_SCRIPTS = {
     "run_daily_pipeline.sh",
 }
 
-DB_URL = os.getenv("DATABASE_URL")
-
-
 class ScriptRequest(BaseModel):
     script: str
 
 
-def _require_db_url() -> str:
-    if not DB_URL:
-        raise HTTPException(status_code=500, detail="DATABASE_URL not configured")
-    return DB_URL
+class SettingsUpdateRequest(BaseModel):
+    updates: dict[str, bool | int | float | str | None] = Field(default_factory=dict)
+    clear_keys: list[str] = Field(default_factory=list)
+
+
+class SettingsTestRequest(BaseModel):
+    updates: dict[str, bool | int | float | str | None] = Field(default_factory=dict)
+    clear_keys: list[str] = Field(default_factory=list)
 
 
 def _build_user_display_name(username: Optional[str], friendly_name: Optional[str]) -> Optional[str]:
@@ -51,7 +60,7 @@ def _build_user_display_name(username: Optional[str], friendly_name: Optional[st
 
 
 def _load_user_record(username: str) -> Optional[dict]:
-    conn = psycopg2.connect(_require_db_url(), cursor_factory=RealDictCursor)
+    conn = connect_db(cursor_factory=RealDictCursor)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -128,7 +137,7 @@ def admin_me(user=Depends(get_current_user)):
 @router.get("/admin/users")
 def admin_list_users(user=Depends(require_admin)):
     try:
-        conn = psycopg2.connect(_require_db_url(), cursor_factory=RealDictCursor)
+        conn = connect_db(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -186,7 +195,7 @@ def admin_get_recommendations(
     admin_user=Depends(require_admin),
 ):
     try:
-        conn = psycopg2.connect(_require_db_url(), cursor_factory=RealDictCursor)
+        conn = connect_db(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
             view_key = (view or "all").lower()
             if view_key not in {"all", "movies", "shows", "seasons", "episodes"}:
@@ -314,7 +323,7 @@ def admin_feedback_history(
     admin_user=Depends(require_admin),
 ):
     try:
-        conn = psycopg2.connect(_require_db_url(), cursor_factory=RealDictCursor)
+        conn = connect_db(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -353,6 +362,67 @@ def admin_feedback_history(
         "username": target_username,
         "count": len(rows),
         "feedback": rows,
+    }
+
+
+@router.get("/admin/settings")
+def admin_get_settings(admin_user=Depends(require_admin)):
+    return {
+        "requested_by": admin_user["username"],
+        "sections": get_settings_payload(),
+    }
+
+
+@router.put("/admin/settings")
+def admin_save_settings(req: SettingsUpdateRequest, admin_user=Depends(require_admin)):
+    try:
+        save_settings(
+            updates=req.updates,
+            clear_keys=req.clear_keys,
+            updated_by=admin_user["username"],
+        )
+    except SettingsValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed saving settings: {exc}") from exc
+
+    return {
+        "requested_by": admin_user["username"],
+        "sections": get_settings_payload(),
+    }
+
+
+@router.post("/admin/settings/test/tautulli")
+def admin_test_tautulli(req: SettingsTestRequest, admin_user=Depends(require_admin)):
+    try:
+        result = test_tautulli_settings(updates=req.updates, clear_keys=req.clear_keys)
+    except SettingsValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Tautulli test failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Tautulli test failed: {exc}") from exc
+
+    return {
+        "requested_by": admin_user["username"],
+        **result,
+    }
+
+
+@router.post("/admin/settings/test/ollama")
+def admin_test_ollama(req: SettingsTestRequest, admin_user=Depends(require_admin)):
+    try:
+        result = test_ollama_settings(updates=req.updates, clear_keys=req.clear_keys)
+    except SettingsValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Ollama test failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ollama test failed: {exc}") from exc
+
+    return {
+        "requested_by": admin_user["username"],
+        **result,
     }
 
 
