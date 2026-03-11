@@ -1,12 +1,11 @@
-
 from fastapi import APIRouter, Request, HTTPException
-from sentence_transformers import SentenceTransformer
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from pgvector.psycopg2 import register_vector
 from dotenv import load_dotenv
 import traceback
+from typing import Any
 
 load_dotenv()
 
@@ -16,9 +15,16 @@ DB_URL = os.getenv("DATABASE_URL")
 model = None
 
 
-def get_model() -> SentenceTransformer:
+def get_model() -> Any:
     global model
     if model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG embeddings are unavailable in this container image",
+            ) from exc
         model = SentenceTransformer("all-mpnet-base-v2")
     return model
 
@@ -52,6 +58,8 @@ async def rag_query(request: Request):
 
         return { "context": context }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("💥 Error in /api/rag-query:", repr(e))
         traceback.print_exc()

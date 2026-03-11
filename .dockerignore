@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+
+__pycache__/
+*.pyc
+
+plexenv/
+node_modules/
+frontend/node_modules/
+
+logs/
+
+.DS_Store
