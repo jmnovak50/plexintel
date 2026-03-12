@@ -170,7 +170,7 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
 
 
 def build_training_data():
-    ensure_app_schema(DB_URL)
+    ensure_app_schema()
     conn = connect()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
