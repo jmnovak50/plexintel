@@ -369,7 +369,7 @@ export default function AdminSettings() {
                     return (
                       <div key={field.key} className="rounded-2xl border border-stone-200 bg-stone-50 p-4">
                         <div className="flex items-start justify-between gap-4">
-                          <div>
+                          <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <h3 className="text-sm font-semibold text-slate-900">{field.label}</h3>
                               {field.secret && (
@@ -383,7 +383,9 @@ export default function AdminSettings() {
                               <p className="mt-2 text-sm text-slate-600">{field.description}</p>
                             )}
                           </div>
-                          <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${sourceClassName}`}>
+                          <span
+                            className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${sourceClassName}`}
+                          >
                             {sourceText}
                           </span>
                         </div>
@@ -423,31 +425,36 @@ export default function AdminSettings() {
                             />
                           )}
 
-                          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
-                            <div className="space-y-1">
-                              <p>
-                                Current:{" "}
-                                {field.secret
-                                  ? field.masked_value || "Not set"
-                                  : field.has_value
-                                    ? String(field.value)
-                                    : "Not set"}
+                          <div className="flex flex-wrap items-start justify-between gap-3 text-xs text-slate-500">
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <p className="min-w-0">
+                                <span className="font-medium text-slate-600">Current:</span>
+                                <span className="mt-0.5 block break-all text-slate-500">
+                                  {field.secret
+                                    ? field.masked_value || "Not set"
+                                    : field.has_value
+                                      ? String(field.value)
+                                      : "Not set"}
+                                </span>
                               </p>
-                              <p>
-                                Default:{" "}
-                                {field.default_value === null || field.default_value === undefined
-                                  ? "None"
-                                  : String(field.default_value)}
+                              <p className="min-w-0">
+                                <span className="font-medium text-slate-600">Default:</span>
+                                <span className="mt-0.5 block break-words text-slate-500">
+                                  {field.default_value === null || field.default_value === undefined
+                                    ? "None"
+                                    : String(field.default_value)}
+                                </span>
                               </p>
-                              <p>
-                                Updated: {formatDate(field.updated_at)}
+                              <p className="break-words">
+                                <span className="font-medium text-slate-600">Updated:</span>{" "}
+                                {formatDate(field.updated_at)}
                                 {field.updated_by ? ` by ${field.updated_by}` : ""}
                               </p>
                             </div>
                             <button
                               type="button"
                               onClick={() => resetField(field.key)}
-                              className="rounded-full border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-stone-100"
+                              className="shrink-0 rounded-full border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-stone-100"
                             >
                               Reset to default
                             </button>

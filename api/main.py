@@ -1,30 +1,43 @@
+from contextlib import asynccontextmanager
+import os
+
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import ORJSONResponse, FileResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 import psycopg2
-import os
 from dotenv import load_dotenv
 
 from api.db.connection import connect_db
+from api.db.schema import ensure_app_schema
+from api.db.users import get_or_create_user
 from api.routes import auth_routes
-from api.routes import plex_oauth_routes
-from api.routes import feedback_routes  # <- wherever your route is
 from api.routes import admin_routes
-from api.routes import rag_routes
-from api.routes import library_catalog
-from api.routes import poster_routes
 from api.routes import agent_tools
+from api.routes import feedback_routes  # <- wherever your route is
+from api.routes import library_catalog
+from api.routes import plex_oauth_routes
+from api.routes import poster_routes
+from api.routes import rag_routes
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
-from api.db.schema import ensure_app_schema
 from api.services.plex_service import get_plex_user_info
-from api.db.users import get_or_create_user
+from api.services.mcp_server import mcp_mount_app, mcp_runtime
 
 load_dotenv()
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    ensure_app_schema()
+    print("🚀 Backend started with session middleware active.")
+    async with mcp_runtime.lifespan():
+        yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class SPAStaticFiles(StaticFiles):
@@ -73,14 +86,13 @@ def _has_admin_session(request: Request) -> bool:
         if conn is not None:
             conn.close()
 
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],   # or ["https://<your-openwebui-host>"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Mcp-Session-Id"],
 )
 
 app.add_middleware(
@@ -99,6 +111,7 @@ app.include_router(rag_routes.router, prefix="/api")
 app.include_router(poster_routes.router, prefix="/api")
 app.include_router(library_catalog.router, prefix="/api/library", tags=["library"])
 app.include_router(agent_tools.router, prefix="/api/agent", tags=["agent-tools"])
+app.mount("/mcp", mcp_mount_app, name="mcp")
 
 
 @app.get("/admin", include_in_schema=False)
@@ -141,8 +154,3 @@ app.mount(
     SPAStaticFiles(directory="frontend/dist", html=True),
     name="frontend",
 )
-
-@app.on_event("startup")
-def startup_log():
-    ensure_app_schema()
-    print("🚀 Backend started with session middleware active.")
