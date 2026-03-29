@@ -3,13 +3,19 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
 import requests
+from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 
 
 SETTINGS_TABLE = "public.app_settings"
@@ -510,6 +516,13 @@ SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFINITI
 
 class SettingsValidationError(ValueError):
     pass
+
+
+def load_settings_env() -> None:
+    load_dotenv(DEFAULT_DOTENV_PATH, override=False)
+
+
+load_settings_env()
 
 
 def ensure_settings_schema(conn) -> None:

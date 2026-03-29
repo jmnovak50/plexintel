@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import ORJSONResponse, FileResponse, RedirectResponse
@@ -9,6 +10,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 import psycopg2
 from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
@@ -25,8 +28,6 @@ from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
 from api.services.plex_service import get_plex_user_info
 from api.services.mcp_server import mcp_mount_app, mcp_runtime
-
-load_dotenv()
 
 
 @asynccontextmanager

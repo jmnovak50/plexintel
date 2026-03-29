@@ -9,6 +9,11 @@ from api.services.poster_service import resolve_poster_path_from_row
 router = APIRouter()
 
 
+def _is_image_response(response: requests.Response) -> bool:
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    return response.status_code == 200 and content_type.startswith("image/")
+
+
 def _fetch_tautulli_image(poster_path: str) -> requests.Response:
     last_error = None
     tautulli_url = get_setting_value("tautulli.base_url")
@@ -21,9 +26,10 @@ def _fetch_tautulli_image(poster_path: str) -> requests.Response:
             direct_response = requests.get(
                 proxy_url,
                 params={"img": poster_path, "apikey": tautulli_api_key},
+                allow_redirects=False,
                 timeout=20,
             )
-            if direct_response.status_code == 200:
+            if _is_image_response(direct_response):
                 return direct_response
         except requests.RequestException as exc:
             last_error = exc
@@ -39,7 +45,7 @@ def _fetch_tautulli_image(poster_path: str) -> requests.Response:
                 },
                 timeout=20,
             )
-            if api_response.status_code == 200:
+            if _is_image_response(api_response):
                 return api_response
         except requests.RequestException as exc:
             last_error = exc

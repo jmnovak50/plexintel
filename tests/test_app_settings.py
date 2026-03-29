@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from api.services import app_settings
@@ -42,6 +43,15 @@ class FakeConnection:
 
 
 class AppSettingsTests(unittest.TestCase):
+    def test_load_settings_env_targets_repo_dotenv(self):
+        with patch.object(app_settings, "load_dotenv") as mock_load_dotenv:
+            app_settings.load_settings_env()
+
+        mock_load_dotenv.assert_called_once_with(
+            Path(app_settings.__file__).resolve().parents[2] / ".env",
+            override=False,
+        )
+
     def test_resolve_settings_precedence(self):
         with patch.dict(os.environ, {"OLLAMA_HOST": "http://env-host:11434"}, clear=True):
             with patch.object(
