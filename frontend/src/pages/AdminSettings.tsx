@@ -345,6 +345,13 @@ export default function AdminSettings() {
                     <p className="mt-1 text-sm text-slate-500">
                       Changes are stored in Postgres and applied on the next request or script run.
                     </p>
+                    {section.key === "email_digests" && (
+                      <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        Gmail and Google Workspace SMTP usually will not accept a normal Google account password.
+                        Use an App Password with <span className="font-medium">smtp.gmail.com</span>, or a Workspace
+                        SMTP relay / OAuth setup instead.
+                      </div>
+                    )}
                     {testMessages[section.key] && (
                       <p className="mt-2 text-sm text-sky-700">{testMessages[section.key]}</p>
                     )}

@@ -447,10 +447,12 @@ export default function AdminDigest() {
               key={editorVersion}
               ref={editorRef}
               contentEditable
+              dir="ltr"
               suppressContentEditableWarning
               onInput={() => syncEditorHtml()}
               dangerouslySetInnerHTML={{ __html: editorHtml }}
               className="min-h-[300px] rounded-md border border-stone-300 bg-stone-50 px-4 py-3 text-sm leading-6 outline-none focus:border-sky-400 focus:bg-white"
+              style={{ direction: "ltr", unicodeBidi: "plaintext", textAlign: "left" }}
             />
 
             <div className="flex flex-wrap items-center gap-3">
@@ -513,7 +515,8 @@ export default function AdminDigest() {
             <div className="rounded-md border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-slate-600">
               SMTP server, port, username, password, encryption, From, and Reply-To are managed in
               <span className="font-medium"> Admin Settings </span>
-              so the digest mailer matches Tautulli-style SMTP configuration.
+              so the digest mailer matches Tautulli-style SMTP configuration. Gmail and Google Workspace usually
+              need an App Password or relay setup rather than a normal account password.
             </div>
           </div>
         </section>

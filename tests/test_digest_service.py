@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
+import smtplib
 
 from api.services import digest_service
 
@@ -33,6 +34,41 @@ class DigestServiceTests(unittest.TestCase):
         self.assertIn("Intro", rendered)
         self.assertIn("- One", rendered)
         self.assertIn("- Two", rendered)
+
+    def test_render_item_grid_includes_table_cells_and_posters(self):
+        rendered = digest_service._render_item_grid(
+            [
+                {
+                    "title": "Movie One",
+                    "year": 2024,
+                    "genres": "Drama",
+                    "semantic_themes": "Character Focus",
+                    "predicted_probability": 0.985,
+                    "poster_src": "/api/posters/101",
+                },
+                {
+                    "title": "Movie Two",
+                    "year": 2023,
+                    "genres": "Comedy",
+                    "predicted_probability": 0.973,
+                    "poster_src": "/api/posters/102",
+                },
+            ],
+            "Top Movies",
+        )
+
+        self.assertIn("<table", rendered)
+        self.assertIn("/api/posters/101", rendered)
+        self.assertIn("Movie One", rendered)
+        self.assertIn("Top Movies", rendered)
+
+    def test_describe_smtp_auth_error_mentions_google_guidance(self):
+        error = smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+        message = digest_service._describe_smtp_auth_error(error)
+
+        self.assertIn("App Password", message)
+        self.assertIn("normal Google account password", message)
 
     def test_schedule_slot_uses_latest_daily_slot(self):
         now = datetime(2026, 4, 15, 8, 30, tzinfo=ZoneInfo("America/Chicago"))

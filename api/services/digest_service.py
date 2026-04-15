@@ -5,6 +5,7 @@ import smtplib
 import ssl
 from datetime import datetime, time as time_of_day, timedelta
 from email.message import EmailMessage
+from email.utils import make_msgid
 from html import escape
 from html.parser import HTMLParser
 from typing import Any
@@ -16,6 +17,7 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
+from api.services.poster_service import build_poster_url, fetch_poster_image_for_rating_key
 from api.services.user_sync_service import sync_users_from_tautulli
 
 
@@ -501,30 +503,103 @@ def fetch_top_show_recommendations(conn, username: str, limit: int) -> list[dict
         return cur.fetchall()
 
 
-def _render_item_list(items: list[dict[str, Any]], kind_label: str) -> str:
+def _build_item_subtitle(item: dict[str, Any]) -> str:
+    subtitle_parts = [
+        str(item["year"]) if item.get("year") is not None else None,
+        item.get("genres"),
+        item.get("semantic_themes"),
+    ]
+    return " | ".join(part for part in subtitle_parts if part)
+
+
+def _decorate_items_with_proxy_posters(items: list[dict[str, Any]]) -> None:
+    for item in items:
+        item["poster_src"] = build_poster_url(item.get("rating_key"))
+
+
+def _decorate_items_with_inline_posters(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    inline_images: list[dict[str, Any]] = []
+    for item in items:
+        rating_key = item.get("rating_key")
+        if rating_key is None:
+            item["poster_src"] = None
+            continue
+        try:
+            payload = fetch_poster_image_for_rating_key(rating_key, allow_unconfigured=True)
+        except Exception:
+            payload = None
+        if not payload:
+            item["poster_src"] = None
+            continue
+
+        cid = make_msgid()[1:-1]
+        item["poster_src"] = f"cid:{cid}"
+        inline_images.append(
+            {
+                "cid": cid,
+                "content": payload["content"],
+                "content_type": payload["content_type"],
+                "filename": f"poster-{rating_key}",
+            }
+        )
+    return inline_images
+
+
+def _render_item_card(item: dict[str, Any]) -> str:
+    score_pct = float(item.get("predicted_probability") or 0) * 100
+    title = escape(item.get("title") or "Untitled")
+    subtitle = _build_item_subtitle(item)
+    poster_src = item.get("poster_src")
+    if poster_src:
+        poster_html = (
+            f"<img src=\"{escape(poster_src, quote=True)}\" alt=\"{title} poster\" width=\"100%\" "
+            "style=\"display:block;width:100%;height:auto;aspect-ratio:2 / 3;object-fit:cover;background:#e2e8f0;"
+            "border-radius:8px 8px 0 0;\" />"
+        )
+    else:
+        poster_html = (
+            "<div style=\"height:168px;background:#e2e8f0;border-radius:8px 8px 0 0;color:#64748b;"
+            "font-size:12px;line-height:168px;text-align:center;\">Poster unavailable</div>"
+        )
+
+    return (
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+        "style=\"border:1px solid #e2e8f0;border-radius:8px;background:#ffffff;\">"
+        "<tr><td style=\"padding:0;\">"
+        f"{poster_html}"
+        "</td></tr>"
+        "<tr><td style=\"padding:12px;vertical-align:top;\">"
+        f"<div style=\"font-size:15px;font-weight:700;line-height:1.35;color:#0f172a;\">{title}</div>"
+        f"<div style=\"margin-top:6px;font-size:13px;color:#475569;\">Match score: {score_pct:.1f}%</div>"
+        f"{f'<div style=\"margin-top:6px;font-size:12px;line-height:1.45;color:#64748b;\">{escape(subtitle)}</div>' if subtitle else ''}"
+        "</td></tr>"
+        "</table>"
+    )
+
+
+def _render_item_grid(items: list[dict[str, Any]], kind_label: str) -> str:
     if not items:
         return ""
+
     rows: list[str] = []
-    for item in items:
-        score_pct = float(item.get("predicted_probability") or 0) * 100
-        subtitle_parts = [
-            str(item["year"]) if item.get("year") is not None else None,
-            item.get("genres"),
-            item.get("semantic_themes"),
-        ]
-        subtitle = " | ".join(part for part in subtitle_parts if part)
+    for index in range(0, len(items), 2):
+        left = _render_item_card(items[index])
+        right = _render_item_card(items[index + 1]) if index + 1 < len(items) else ""
         rows.append(
             (
-                "<li style=\"margin:0 0 12px 0;\">"
-                f"<div style=\"font-weight:600;color:#111827;\">{escape(item.get('title') or 'Untitled')}</div>"
-                f"<div style=\"font-size:13px;color:#475569;\">Match score: {score_pct:.1f}%</div>"
-                f"{f'<div style=\"font-size:13px;color:#64748b;\">{escape(subtitle)}</div>' if subtitle else ''}"
-                "</li>"
+                "<tr>"
+                f"<td width=\"50%\" valign=\"top\" style=\"padding:0 8px 16px 0;\">{left}</td>"
+                f"<td width=\"50%\" valign=\"top\" style=\"padding:0 0 16px 8px;\">{right}</td>"
+                "</tr>"
             )
         )
+
     return (
-        f"<h2 style=\"margin:24px 0 10px 0;font-size:18px;color:#0f172a;\">{escape(kind_label)}</h2>"
-        f"<ul style=\"padding-left:20px;margin:0;\">{''.join(rows)}</ul>"
+        f"<h2 style=\"margin:28px 0 12px 0;font-size:18px;color:#0f172a;\">{escape(kind_label)}</h2>"
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+        "style=\"border-collapse:collapse;table-layout:fixed;\">"
+        f"{''.join(rows)}"
+        "</table>"
     )
 
 
@@ -566,8 +641,8 @@ def _render_digest_html(
             f"{message_html}"
             "</div>"
         )
-    body_blocks.append(_render_item_list(movies, "Top Movies"))
-    body_blocks.append(_render_item_list(shows, "Top Shows"))
+    body_blocks.append(_render_item_grid(movies, "Top Movies"))
+    body_blocks.append(_render_item_grid(shows, "Top Shows"))
     body_blocks.append(
         (
             f"<p style=\"margin:28px 0 0 0;\">"
@@ -646,13 +721,22 @@ def _build_preview_payload(
     recipient_user: dict[str, Any],
     message_html: str | None,
     is_test: bool,
+    poster_mode: str = "proxy",
 ) -> dict[str, Any]:
     preference_row = _ensure_preference_row(conn, recipient_user["user_id"])
     digest_settings = _get_digest_settings()
     subject = _build_subject(frequency=digest_settings["frequency"], is_test=is_test)
     sanitized_message_html = sanitize_rich_html(message_html) if message_html is not None else get_digest_content()["message_html"]
-    movies = fetch_top_movie_recommendations(conn, rendered_for_user["username"], digest_settings["top_movies"])
-    shows = fetch_top_show_recommendations(conn, rendered_for_user["username"], digest_settings["top_shows"])
+    movies = [dict(item) for item in fetch_top_movie_recommendations(conn, rendered_for_user["username"], digest_settings["top_movies"])]
+    shows = [dict(item) for item in fetch_top_show_recommendations(conn, rendered_for_user["username"], digest_settings["top_shows"])]
+    inline_images: list[dict[str, Any]] = []
+
+    if poster_mode == "cid":
+        inline_images.extend(_decorate_items_with_inline_posters(movies))
+        inline_images.extend(_decorate_items_with_inline_posters(shows))
+    else:
+        _decorate_items_with_proxy_posters(movies)
+        _decorate_items_with_proxy_posters(shows)
 
     html = _render_digest_html(
         recipient_user=recipient_user,
@@ -693,6 +777,7 @@ def _build_preview_payload(
             "email": recipient_user.get("plex_email"),
         },
         "counts": {"movies": len(movies), "shows": len(shows)},
+        "inline_images": inline_images,
     }
 
 
@@ -713,7 +798,32 @@ def generate_digest_preview(sample_username: str, *, message_html: str | None = 
         conn.close()
 
 
-def _send_email(smtp_settings: dict[str, Any], *, recipient_email: str, subject: str, html_body: str, text_body: str) -> None:
+def _decode_smtp_error(error: Any) -> str:
+    if isinstance(error, bytes):
+        return error.decode("utf-8", errors="replace")
+    return str(error or "").strip()
+
+
+def _describe_smtp_auth_error(exc: smtplib.SMTPAuthenticationError) -> str:
+    smtp_error = _decode_smtp_error(getattr(exc, "smtp_error", ""))
+    guidance = (
+        "SMTP authentication failed. Gmail and Google Workspace accounts usually require an App Password, "
+        "SMTP relay, or OAuth. A normal Google account password will be rejected."
+    )
+    if smtp_error:
+        return f"{guidance} Upstream response: {smtp_error}"
+    return guidance
+
+
+def _send_email(
+    smtp_settings: dict[str, Any],
+    *,
+    recipient_email: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    inline_images: list[dict[str, Any]] | None = None,
+) -> None:
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = f"{smtp_settings['from_name']} <{smtp_settings['from_email']}>"
@@ -722,13 +832,28 @@ def _send_email(smtp_settings: dict[str, Any], *, recipient_email: str, subject:
         message["Reply-To"] = smtp_settings["reply_to"]
     message.set_content(text_body)
     message.add_alternative(html_body, subtype="html")
+    html_part = message.get_payload()[-1]
+    for inline_image in inline_images or []:
+        content_type = (inline_image.get("content_type") or "image/jpeg").split("/", 1)
+        maintype = content_type[0] if len(content_type) == 2 else "image"
+        subtype = content_type[1] if len(content_type) == 2 else "jpeg"
+        html_part.add_related(
+            inline_image["content"],
+            maintype=maintype,
+            subtype=subtype,
+            cid=f"<{inline_image['cid']}>",
+            filename=inline_image.get("filename"),
+        )
 
     encryption = smtp_settings["encryption"]
     timeout = 30
     if encryption == "ssl_tls":
         with smtplib.SMTP_SSL(smtp_settings["server"], smtp_settings["port"], context=ssl.create_default_context(), timeout=timeout) as server:
             if smtp_settings.get("username"):
-                server.login(smtp_settings["username"], smtp_settings.get("password") or "")
+                try:
+                    server.login(smtp_settings["username"], smtp_settings.get("password") or "")
+                except smtplib.SMTPAuthenticationError as exc:
+                    raise DigestConfigError(_describe_smtp_auth_error(exc)) from exc
             server.send_message(message)
         return
 
@@ -736,7 +861,10 @@ def _send_email(smtp_settings: dict[str, Any], *, recipient_email: str, subject:
         if encryption == "starttls":
             server.starttls(context=ssl.create_default_context())
         if smtp_settings.get("username"):
-            server.login(smtp_settings["username"], smtp_settings.get("password") or "")
+            try:
+                server.login(smtp_settings["username"], smtp_settings.get("password") or "")
+            except smtplib.SMTPAuthenticationError as exc:
+                raise DigestConfigError(_describe_smtp_auth_error(exc)) from exc
         server.send_message(message)
 
 
@@ -935,6 +1063,7 @@ def send_test_digest(
                 recipient_user=admin_user,
                 message_html=message_html,
                 is_test=True,
+                poster_mode="cid",
             )
             try:
                 _send_email(
@@ -943,6 +1072,7 @@ def send_test_digest(
                     subject=preview["subject"],
                     html_body=preview["html"],
                     text_body=preview["text"],
+                    inline_images=preview.get("inline_images"),
                 )
                 _record_delivery(
                     conn,
@@ -1062,6 +1192,7 @@ def run_scheduled_digest(*, force: bool = False, triggered_by: str | None = None
                 recipient_user=recipient,
                 message_html=saved_message_html,
                 is_test=False,
+                poster_mode="cid",
             )
             if preview["counts"]["movies"] == 0 and preview["counts"]["shows"] == 0 and not preview["message_html"]:
                 _record_delivery(
@@ -1082,6 +1213,7 @@ def run_scheduled_digest(*, force: bool = False, triggered_by: str | None = None
                     subject=preview["subject"],
                     html_body=preview["html"],
                     text_body=preview["text"],
+                    inline_images=preview.get("inline_images"),
                 )
                 _record_delivery(
                     conn,
