@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from api.routes.admin_routes import get_current_user, require_admin
@@ -16,6 +16,7 @@ from api.services.digest_service import (
     unsubscribe_by_token,
     update_user_email_preferences,
 )
+from api.services.poster_service import fetch_poster_image_for_rating_key
 
 router = APIRouter()
 
@@ -157,3 +158,27 @@ def unsubscribe_via_link(token: str):
         "email": target.get("plex_email"),
         "digest_enabled": bool(target.get("digest_enabled")),
     }
+
+
+@router.get("/digest/posters/{rating_key}")
+def get_public_digest_poster(rating_key: int, token: str):
+    target = get_unsubscribe_target(token)
+    if not target:
+        raise HTTPException(status_code=404, detail="Poster link is invalid or expired.")
+
+    try:
+        payload = fetch_poster_image_for_rating_key(rating_key)
+    except Exception as exc:
+        detail = str(exc)
+        if detail == "Poster proxy is not configured.":
+            raise HTTPException(status_code=500, detail=detail) from exc
+        raise HTTPException(status_code=502, detail=detail or "Unable to fetch poster from Tautulli.") from exc
+
+    if not payload:
+        raise HTTPException(status_code=404, detail="Poster not found.")
+
+    return Response(
+        content=payload["content"],
+        media_type=payload["content_type"],
+        headers={"Cache-Control": "private, max-age=3600"},
+    )

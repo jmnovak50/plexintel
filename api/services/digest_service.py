@@ -5,7 +5,6 @@ import smtplib
 import ssl
 from datetime import datetime, time as time_of_day, timedelta
 from email.message import EmailMessage
-from email.utils import make_msgid
 from html import escape
 from html.parser import HTMLParser
 from typing import Any
@@ -17,7 +16,7 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
-from api.services.poster_service import build_poster_url, fetch_poster_image_for_rating_key
+from api.services.poster_service import build_poster_url
 from api.services.user_sync_service import sync_users_from_tautulli
 
 
@@ -517,32 +516,20 @@ def _decorate_items_with_proxy_posters(items: list[dict[str, Any]]) -> None:
         item["poster_src"] = build_poster_url(item.get("rating_key"))
 
 
-def _decorate_items_with_inline_posters(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    inline_images: list[dict[str, Any]] = []
+def _decorate_items_with_public_posters(
+    items: list[dict[str, Any]],
+    *,
+    base_url: str,
+    unsubscribe_token: str,
+) -> None:
     for item in items:
         rating_key = item.get("rating_key")
         if rating_key is None:
             item["poster_src"] = None
             continue
-        try:
-            payload = fetch_poster_image_for_rating_key(rating_key, allow_unconfigured=True)
-        except Exception:
-            payload = None
-        if not payload:
-            item["poster_src"] = None
-            continue
-
-        cid = make_msgid()[1:-1]
-        item["poster_src"] = f"cid:{cid}"
-        inline_images.append(
-            {
-                "cid": cid,
-                "content": payload["content"],
-                "content_type": payload["content_type"],
-                "filename": f"poster-{rating_key}",
-            }
+        item["poster_src"] = (
+            f"{base_url.rstrip('/')}/api/digest/posters/{rating_key}?token={unsubscribe_token}"
         )
-    return inline_images
 
 
 def _render_item_card(item: dict[str, Any]) -> str:
@@ -729,11 +716,18 @@ def _build_preview_payload(
     sanitized_message_html = sanitize_rich_html(message_html) if message_html is not None else get_digest_content()["message_html"]
     movies = [dict(item) for item in fetch_top_movie_recommendations(conn, rendered_for_user["username"], digest_settings["top_movies"])]
     shows = [dict(item) for item in fetch_top_show_recommendations(conn, rendered_for_user["username"], digest_settings["top_shows"])]
-    inline_images: list[dict[str, Any]] = []
 
-    if poster_mode == "cid":
-        inline_images.extend(_decorate_items_with_inline_posters(movies))
-        inline_images.extend(_decorate_items_with_inline_posters(shows))
+    if poster_mode == "public":
+        _decorate_items_with_public_posters(
+            movies,
+            base_url=digest_settings["base_url"],
+            unsubscribe_token=preference_row["unsubscribe_token"],
+        )
+        _decorate_items_with_public_posters(
+            shows,
+            base_url=digest_settings["base_url"],
+            unsubscribe_token=preference_row["unsubscribe_token"],
+        )
     else:
         _decorate_items_with_proxy_posters(movies)
         _decorate_items_with_proxy_posters(shows)
@@ -777,7 +771,6 @@ def _build_preview_payload(
             "email": recipient_user.get("plex_email"),
         },
         "counts": {"movies": len(movies), "shows": len(shows)},
-        "inline_images": inline_images,
     }
 
 
@@ -815,6 +808,20 @@ def _describe_smtp_auth_error(exc: smtplib.SMTPAuthenticationError) -> str:
     return guidance
 
 
+def _describe_smtp_data_error(exc: smtplib.SMTPDataError) -> str:
+    smtp_error = _decode_smtp_error(getattr(exc, "smtp_error", ""))
+    if getattr(exc, "smtp_code", None) == 552:
+        guidance = (
+            "SMTP rejected the message because it exceeded the provider size limit. "
+            "Digest posters should be linked by URL now, so if this still happens, reduce digest content size "
+            "or confirm the public poster URLs are being used."
+        )
+        if smtp_error:
+            return f"{guidance} Upstream response: {smtp_error}"
+        return guidance
+    return smtp_error or "SMTP rejected the message body."
+
+
 def _send_email(
     smtp_settings: dict[str, Any],
     *,
@@ -822,7 +829,6 @@ def _send_email(
     subject: str,
     html_body: str,
     text_body: str,
-    inline_images: list[dict[str, Any]] | None = None,
 ) -> None:
     message = EmailMessage()
     message["Subject"] = subject
@@ -832,18 +838,6 @@ def _send_email(
         message["Reply-To"] = smtp_settings["reply_to"]
     message.set_content(text_body)
     message.add_alternative(html_body, subtype="html")
-    html_part = message.get_payload()[-1]
-    for inline_image in inline_images or []:
-        content_type = (inline_image.get("content_type") or "image/jpeg").split("/", 1)
-        maintype = content_type[0] if len(content_type) == 2 else "image"
-        subtype = content_type[1] if len(content_type) == 2 else "jpeg"
-        html_part.add_related(
-            inline_image["content"],
-            maintype=maintype,
-            subtype=subtype,
-            cid=f"<{inline_image['cid']}>",
-            filename=inline_image.get("filename"),
-        )
 
     encryption = smtp_settings["encryption"]
     timeout = 30
@@ -854,7 +848,10 @@ def _send_email(
                     server.login(smtp_settings["username"], smtp_settings.get("password") or "")
                 except smtplib.SMTPAuthenticationError as exc:
                     raise DigestConfigError(_describe_smtp_auth_error(exc)) from exc
-            server.send_message(message)
+            try:
+                server.send_message(message)
+            except smtplib.SMTPDataError as exc:
+                raise DigestConfigError(_describe_smtp_data_error(exc)) from exc
         return
 
     with smtplib.SMTP(smtp_settings["server"], smtp_settings["port"], timeout=timeout) as server:
@@ -865,7 +862,10 @@ def _send_email(
                 server.login(smtp_settings["username"], smtp_settings.get("password") or "")
             except smtplib.SMTPAuthenticationError as exc:
                 raise DigestConfigError(_describe_smtp_auth_error(exc)) from exc
-        server.send_message(message)
+        try:
+            server.send_message(message)
+        except smtplib.SMTPDataError as exc:
+            raise DigestConfigError(_describe_smtp_data_error(exc)) from exc
 
 
 def _record_run_start(
@@ -1063,7 +1063,7 @@ def send_test_digest(
                 recipient_user=admin_user,
                 message_html=message_html,
                 is_test=True,
-                poster_mode="cid",
+                poster_mode="public",
             )
             try:
                 _send_email(
@@ -1072,7 +1072,6 @@ def send_test_digest(
                     subject=preview["subject"],
                     html_body=preview["html"],
                     text_body=preview["text"],
-                    inline_images=preview.get("inline_images"),
                 )
                 _record_delivery(
                     conn,
@@ -1192,7 +1191,7 @@ def run_scheduled_digest(*, force: bool = False, triggered_by: str | None = None
                 recipient_user=recipient,
                 message_html=saved_message_html,
                 is_test=False,
-                poster_mode="cid",
+                poster_mode="public",
             )
             if preview["counts"]["movies"] == 0 and preview["counts"]["shows"] == 0 and not preview["message_html"]:
                 _record_delivery(
@@ -1213,7 +1212,6 @@ def run_scheduled_digest(*, force: bool = False, triggered_by: str | None = None
                     subject=preview["subject"],
                     html_body=preview["html"],
                     text_body=preview["text"],
-                    inline_images=preview.get("inline_images"),
                 )
                 _record_delivery(
                     conn,

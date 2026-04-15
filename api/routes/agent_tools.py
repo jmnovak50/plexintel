@@ -9,9 +9,11 @@ from api.services.agent_tool_service import (
     AgentUsersResponse,
     LibraryItem,
     LibrarySearchResponse,
+    RecentLibraryAdditionsResponse,
     WatchHistoryResponse,
     get_agent_library_item,
     get_agent_recommendations,
+    get_recent_library_additions,
     get_agent_watch_history,
     list_agent_users,
     search_agent_library,
@@ -87,6 +89,23 @@ def agent_search_library(
 @router.get("/items/{rating_key}", response_model=LibraryItem)
 def agent_get_item(rating_key: int):
     return get_agent_library_item(rating_key=rating_key)
+
+
+@router.get("/recent-additions", response_model=RecentLibraryAdditionsResponse)
+def agent_recent_library_additions(
+    media_type: Optional[str] = Query(
+        None,
+        description="Optional filter: movie, episode, series, etc.",
+    ),
+    days: Optional[int] = Query(
+        None,
+        ge=1,
+        le=3650,
+        description="Optional lookback window in days, e.g. 7 for the past week.",
+    ),
+    limit: int = Query(50, ge=1, le=200),
+):
+    return get_recent_library_additions(media_type=media_type, days=days, limit=limit)
 
 
 @router.post(

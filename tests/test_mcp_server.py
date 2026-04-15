@@ -18,6 +18,8 @@ from api.services.agent_tool_service import (
     AgentUsersResponse,
     LibraryItem,
     LibrarySearchResponse,
+    RecentLibraryAdditionsResponse,
+    RecentLibraryItem,
     WatchHistoryItem,
     WatchHistoryResponse,
 )
@@ -76,6 +78,10 @@ class MCPServerTests(unittest.TestCase):
                         )
                         search_result = await session.call_tool("search_library", {"q": "blade"})
                         item_result = await session.call_tool("get_library_item", {"rating_key": 42})
+                        recent_result = await session.call_tool(
+                            "get_recent_library_additions",
+                            {"media_type": "movie", "days": 7, "limit": 5},
+                        )
                         history_result = await session.call_tool(
                             "get_watch_history",
                             {"user": "jmnovak", "limit": 5},
@@ -88,6 +94,7 @@ class MCPServerTests(unittest.TestCase):
             "recommendations": recommendations_result,
             "search": search_result,
             "item": item_result,
+            "recent": recent_result,
             "history": history_result,
         }
 
@@ -124,6 +131,19 @@ class MCPServerTests(unittest.TestCase):
             title="Blade Runner 2049",
             media_type="movie",
             summary="Replicants.",
+        )
+        recent_payload = RecentLibraryAdditionsResponse(
+            media_type="movie",
+            days=7,
+            count=1,
+            items=[
+                RecentLibraryItem(
+                    rating_key=88,
+                    title="Black Bag",
+                    media_type="movie",
+                    year=2025,
+                )
+            ],
         )
         history_payload = WatchHistoryResponse(
             user="jmnovak",
@@ -170,10 +190,15 @@ class MCPServerTests(unittest.TestCase):
                         with patch.object(mcp_server, "get_agent_library_item", return_value=item_payload):
                             with patch.object(
                                 mcp_server,
-                                "get_agent_watch_history",
-                                return_value=history_payload,
+                                "get_recent_library_additions",
+                                return_value=recent_payload,
                             ):
-                                results = anyio.run(self._exercise_mcp_protocol)
+                                with patch.object(
+                                    mcp_server,
+                                    "get_agent_watch_history",
+                                    return_value=history_payload,
+                                ):
+                                    results = anyio.run(self._exercise_mcp_protocol)
 
         self.assertTrue(results["initialize"].serverInfo.name)
         tool_names = {tool.name for tool in results["tools"].tools}
@@ -184,6 +209,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_recommendations",
                 "search_library",
                 "get_library_item",
+                "get_recent_library_additions",
                 "get_watch_history",
             },
         )
@@ -191,6 +217,8 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(results["recommendations"].structuredContent["items"][0]["title"], "Arrival")
         self.assertEqual(results["search"].structuredContent["items"][0]["rating_key"], 42)
         self.assertEqual(results["item"].structuredContent["summary"], "Replicants.")
+        self.assertEqual(results["recent"].structuredContent["days"], 7)
+        self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
 
     def test_mcp_returns_404_when_disabled(self):

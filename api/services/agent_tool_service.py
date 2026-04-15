@@ -62,6 +62,32 @@ class LibrarySearchResponse(BaseModel):
     items: List[LibraryItem]
 
 
+class RecentLibraryItem(BaseModel):
+    rating_key: int
+    title: str
+    media_type: str
+
+    show_title: Optional[str] = None
+    summary: Optional[str] = None
+    season_number: Optional[int] = None
+    episode_number: Optional[int] = None
+    rating: Optional[float] = None
+    year: Optional[int] = None
+    duration: Optional[int] = None
+    genres: Optional[str] = None
+    actors: Optional[str] = None
+    directors: Optional[str] = None
+    added_at: Optional[datetime] = None
+    changed_at: Optional[datetime] = None
+
+
+class RecentLibraryAdditionsResponse(BaseModel):
+    media_type: Optional[str]
+    days: Optional[int]
+    count: int
+    items: List[RecentLibraryItem]
+
+
 class AgentUser(BaseModel):
     username: str
     friendly_name: Optional[str]
@@ -305,6 +331,85 @@ def get_agent_library_item(*, rating_key: int) -> LibraryItem:
         genres=row.get("genres"),
         actors=row.get("actors"),
         directors=row.get("directors"),
+    )
+
+
+def get_recent_library_additions(
+    *,
+    media_type: Optional[str] = None,
+    days: Optional[int] = None,
+    limit: int = 50,
+) -> RecentLibraryAdditionsResponse:
+    if days is not None and days < 1:
+        raise HTTPException(status_code=400, detail="days must be >= 1")
+
+    sql = """
+        SELECT
+            rating_key,
+            media_type,
+            show_title,
+            title,
+            summary,
+            season_number,
+            episode_number,
+            rating,
+            year,
+            duration,
+            genres,
+            actors,
+            directors,
+            added_at,
+            changed_at
+        FROM library_catalog_v
+        WHERE rating_key IS NOT NULL
+    """
+
+    params: list[object] = []
+
+    if media_type:
+        sql += " AND media_type ILIKE %s"
+        params.append(media_type)
+    if days is not None:
+        sql += " AND COALESCE(added_at, changed_at) >= NOW() - (%s * INTERVAL '1 day')"
+        params.append(days)
+
+    sql += """
+        ORDER BY COALESCE(added_at, changed_at) DESC NULLS LAST, rating_key DESC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    items = [
+        RecentLibraryItem(
+            rating_key=row["rating_key"],
+            title=row["title"],
+            media_type=row["media_type"],
+            show_title=row.get("show_title"),
+            summary=row.get("summary"),
+            season_number=row.get("season_number"),
+            episode_number=row.get("episode_number"),
+            rating=normalize_float(row.get("rating")),
+            year=row.get("year"),
+            duration=row.get("duration"),
+            genres=row.get("genres"),
+            actors=row.get("actors"),
+            directors=row.get("directors"),
+            added_at=row.get("added_at"),
+            changed_at=row.get("changed_at"),
+        )
+        for row in rows
+    ]
+
+    return RecentLibraryAdditionsResponse(
+        media_type=media_type,
+        days=days,
+        count=len(items),
+        items=items,
     )
 
 

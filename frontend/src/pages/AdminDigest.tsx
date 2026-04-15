@@ -190,7 +190,31 @@ export default function AdminDigest() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sampleUsername, loading]);
 
+  useEffect(() => {
+    normalizeEditorDirection();
+  }, [editorVersion]);
+
+  function normalizeEditorDirection() {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    editor.setAttribute("dir", "ltr");
+    editor.style.direction = "ltr";
+    editor.style.unicodeBidi = "normal";
+    editor.style.textAlign = "left";
+    editor.style.writingMode = "horizontal-tb";
+
+    editor.querySelectorAll<HTMLElement>("div, p, li, ul, ol, blockquote, span").forEach((node) => {
+      node.setAttribute("dir", "ltr");
+      node.style.direction = "ltr";
+      node.style.unicodeBidi = "normal";
+      node.style.textAlign = "left";
+      node.style.writingMode = "horizontal-tb";
+    });
+  }
+
   function syncEditorHtml() {
+    normalizeEditorDirection();
     const nextHtml = editorRef.current?.innerHTML ?? "";
     setEditorHtml(nextHtml);
     return nextHtml;
@@ -204,6 +228,7 @@ export default function AdminDigest() {
   function applyCommand(command: string, value?: string) {
     editorRef.current?.focus();
     document.execCommand(command, false, value);
+    normalizeEditorDirection();
     syncEditorHtml();
   }
 
@@ -449,10 +474,14 @@ export default function AdminDigest() {
               contentEditable
               dir="ltr"
               suppressContentEditableWarning
-              onInput={() => syncEditorHtml()}
+              onInput={() => {
+                normalizeEditorDirection();
+                syncEditorHtml();
+              }}
+              onFocus={() => normalizeEditorDirection()}
               dangerouslySetInnerHTML={{ __html: editorHtml }}
-              className="min-h-[300px] rounded-md border border-stone-300 bg-stone-50 px-4 py-3 text-sm leading-6 outline-none focus:border-sky-400 focus:bg-white"
-              style={{ direction: "ltr", unicodeBidi: "plaintext", textAlign: "left" }}
+              className="min-h-[300px] rounded-md border border-stone-300 bg-stone-50 px-4 py-3 text-left text-sm leading-6 outline-none focus:border-sky-400 focus:bg-white"
+              style={{ direction: "ltr", unicodeBidi: "normal", textAlign: "left", writingMode: "horizontal-tb" }}
             />
 
             <div className="flex flex-wrap items-center gap-3">
@@ -516,7 +545,8 @@ export default function AdminDigest() {
               SMTP server, port, username, password, encryption, From, and Reply-To are managed in
               <span className="font-medium"> Admin Settings </span>
               so the digest mailer matches Tautulli-style SMTP configuration. Gmail and Google Workspace usually
-              need an App Password or relay setup rather than a normal account password.
+              need an App Password or relay setup rather than a normal account password. Poster images in sent
+              digests load from the Public App Base URL rather than being attached to the email.
             </div>
           </div>
         </section>

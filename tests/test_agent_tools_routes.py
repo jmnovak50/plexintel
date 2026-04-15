@@ -14,6 +14,8 @@ from api.services.agent_tool_service import (
     AgentUsersResponse,
     LibraryItem,
     LibrarySearchResponse,
+    RecentLibraryAdditionsResponse,
+    RecentLibraryItem,
     WatchHistoryItem,
     WatchHistoryResponse,
 )
@@ -71,6 +73,29 @@ class AgentToolsRouteTests(unittest.TestCase):
         item_data = jsonable_encoder(item_response)
         self.assertEqual(search_data["items"][0]["year"], 2017)
         self.assertEqual(item_data["summary"], "Replicants.")
+
+    def test_recent_additions_route_preserves_payload_shape(self):
+        recent_payload = RecentLibraryAdditionsResponse(
+            media_type="movie",
+            days=7,
+            count=1,
+            items=[
+                RecentLibraryItem(
+                    rating_key=88,
+                    title="Black Bag",
+                    media_type="movie",
+                    year=2025,
+                )
+            ],
+        )
+
+        with patch.object(agent_tools, "get_recent_library_additions", return_value=recent_payload):
+            response = agent_tools.agent_recent_library_additions(media_type="movie", days=7, limit=10)
+
+        data = jsonable_encoder(response)
+        self.assertEqual(data["media_type"], "movie")
+        self.assertEqual(data["days"], 7)
+        self.assertEqual(data["items"][0]["title"], "Black Bag")
 
     def test_users_and_watch_history_routes_preserve_payload_shapes(self):
         users_payload = AgentUsersResponse(

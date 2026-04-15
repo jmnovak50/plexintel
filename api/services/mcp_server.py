@@ -19,9 +19,11 @@ from api.services.agent_tool_service import (
     AgentUsersResponse,
     LibraryItem,
     LibrarySearchResponse,
+    RecentLibraryAdditionsResponse,
     WatchHistoryResponse,
     get_agent_library_item,
     get_agent_recommendations,
+    get_recent_library_additions,
     get_agent_watch_history,
     list_agent_users,
     search_agent_library,
@@ -264,6 +266,22 @@ def _build_mcp_server() -> FastMCP:
     )
     def mcp_get_library_item(rating_key: int) -> LibraryItem:
         return get_agent_library_item(rating_key=rating_key)
+
+    @mcp.tool(
+        name="get_recent_library_additions",
+        description=(
+            "Return recently added PlexIntel library items across the whole library. "
+            "Use this for questions like 'what was added in the last 7 days?' "
+            "or 'show me recent movies or TV shows'. This does not require a user."
+        ),
+        structured_output=True,
+    )
+    def mcp_get_recent_library_additions(
+        media_type: Optional[str] = None,
+        days: Optional[int] = None,
+        limit: int = 50,
+    ) -> RecentLibraryAdditionsResponse:
+        return get_recent_library_additions(media_type=media_type, days=days, limit=limit)
 
     @mcp.tool(
         name="get_watch_history",

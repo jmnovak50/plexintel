@@ -62,6 +62,24 @@ class DigestServiceTests(unittest.TestCase):
         self.assertIn("Movie One", rendered)
         self.assertIn("Top Movies", rendered)
 
+    def test_public_poster_urls_use_base_url_and_token(self):
+        items = [
+            {"rating_key": 101},
+            {"rating_key": None},
+        ]
+
+        digest_service._decorate_items_with_public_posters(
+            items,
+            base_url="https://plexintel.example.com/",
+            unsubscribe_token="abc123",
+        )
+
+        self.assertEqual(
+            items[0]["poster_src"],
+            "https://plexintel.example.com/api/digest/posters/101?token=abc123",
+        )
+        self.assertIsNone(items[1]["poster_src"])
+
     def test_describe_smtp_auth_error_mentions_google_guidance(self):
         error = smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
 
@@ -69,6 +87,14 @@ class DigestServiceTests(unittest.TestCase):
 
         self.assertIn("App Password", message)
         self.assertIn("normal Google account password", message)
+
+    def test_describe_smtp_data_error_mentions_size_limit(self):
+        error = smtplib.SMTPDataError(552, b"5.3.4 Your message exceeded Google's message size limits")
+
+        message = digest_service._describe_smtp_data_error(error)
+
+        self.assertIn("exceeded the provider size limit", message)
+        self.assertIn("public poster URLs", message)
 
     def test_schedule_slot_uses_latest_daily_slot(self):
         now = datetime(2026, 4, 15, 8, 30, tzinfo=ZoneInfo("America/Chicago"))

@@ -134,6 +134,54 @@ class AgentToolServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    def test_get_recent_library_additions_maps_rows(self):
+        conn = FakeConnection(
+            fetch_rows=[
+                {
+                    "rating_key": 88,
+                    "media_type": "movie",
+                    "show_title": None,
+                    "title": "Black Bag",
+                    "summary": "Spy thriller.",
+                    "season_number": None,
+                    "episode_number": None,
+                    "rating": "7.4",
+                    "year": 2025,
+                    "duration": 123,
+                    "genres": "Thriller",
+                    "actors": "Cate Blanchett",
+                    "directors": "Steven Soderbergh",
+                    "added_at": datetime(2026, 4, 1, 10, 0, 0),
+                    "changed_at": datetime(2026, 4, 1, 12, 0, 0),
+                }
+            ]
+        )
+
+        with patch.object(agent_tool_service, "connect_db", return_value=conn):
+            response = agent_tool_service.get_recent_library_additions(
+                media_type="movie",
+                days=7,
+                limit=10,
+            )
+
+        self.assertEqual(response.media_type, "movie")
+        self.assertEqual(response.days, 7)
+        self.assertEqual(response.count, 1)
+        self.assertEqual(response.items[0].title, "Black Bag")
+        self.assertEqual(response.items[0].rating, 7.4)
+        executed_sql, executed_params = conn.cursor_obj.executed[0]
+        self.assertIn("FROM library_catalog_v", executed_sql)
+        self.assertIn("media_type ILIKE %s", executed_sql)
+        self.assertIn("COALESCE(added_at, changed_at) >= NOW()", executed_sql)
+        self.assertIn("COALESCE(added_at, changed_at) DESC", executed_sql)
+        self.assertEqual(executed_params, ["movie", 7, 10])
+
+    def test_get_recent_library_additions_rejects_invalid_days(self):
+        with self.assertRaises(HTTPException) as raised:
+            agent_tool_service.get_recent_library_additions(days=0)
+
+        self.assertEqual(raised.exception.status_code, 400)
+
     def test_list_agent_users_maps_rows(self):
         conn = FakeConnection(
             fetch_rows=[

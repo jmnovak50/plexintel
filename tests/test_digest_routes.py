@@ -118,6 +118,29 @@ class DigestRoutesTests(unittest.TestCase):
         self.assertEqual(unsubscribe_details["display_name"], "Member")
         self.assertFalse(unsubscribed["digest_enabled"])
 
+    def test_public_digest_poster_route_requires_valid_token(self):
+        with patch.object(digest_routes, "get_unsubscribe_target", return_value=None):
+            with self.assertRaises(HTTPException) as error:
+                digest_routes.get_public_digest_poster(101, token="bad-token")
+
+        self.assertEqual(error.exception.status_code, 404)
+
+    def test_public_digest_poster_route_returns_image_payload(self):
+        with patch.object(
+            digest_routes,
+            "get_unsubscribe_target",
+            return_value={"username": "member", "friendly_name": "Member", "plex_email": "member@example.com"},
+        ):
+            with patch.object(
+                digest_routes,
+                "fetch_poster_image_for_rating_key",
+                return_value={"content": b"image-bytes", "content_type": "image/jpeg"},
+            ):
+                response = digest_routes.get_public_digest_poster(101, token="good-token")
+
+        self.assertEqual(response.media_type, "image/jpeg")
+        self.assertEqual(response.body, b"image-bytes")
+
 
 if __name__ == "__main__":
     unittest.main()
