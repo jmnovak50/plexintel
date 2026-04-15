@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from dotenv import load_dotenv
@@ -33,6 +36,7 @@ SECTION_DEFINITIONS: tuple[dict[str, str], ...] = (
     {"key": "llm_embeddings", "label": "LLM & Embeddings"},
     {"key": "training_scoring", "label": "Training & Scoring"},
     {"key": "advanced_labeling", "label": "Advanced Labeling"},
+    {"key": "email_digests", "label": "Email & Digests"},
 )
 
 
@@ -509,6 +513,151 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=2,
         minimum=1,
     ),
+    _setting(
+        "smtp.server",
+        "email_digests",
+        "SMTP Server",
+        "string",
+        env_aliases=("SMTP_SERVER",),
+        description="Host for the SMTP server.",
+    ),
+    _setting(
+        "smtp.port",
+        "email_digests",
+        "SMTP Port",
+        "integer",
+        default=465,
+        env_aliases=("SMTP_PORT",),
+        description="Port for the SMTP server.",
+        minimum=1,
+        maximum=65535,
+    ),
+    _setting(
+        "smtp.username",
+        "email_digests",
+        "SMTP Username",
+        "string",
+        env_aliases=("SMTP_USERNAME",),
+        description="Username for the SMTP server.",
+    ),
+    _setting(
+        "smtp.password",
+        "email_digests",
+        "SMTP Password",
+        "string",
+        env_aliases=("SMTP_PASSWORD",),
+        secret=True,
+        description="Password for the SMTP server.",
+    ),
+    _setting(
+        "smtp.encryption",
+        "email_digests",
+        "Encryption",
+        "string",
+        default="ssl_tls",
+        env_aliases=("SMTP_ENCRYPTION",),
+        description="Send emails encrypted using SSL/TLS or TLS/STARTTLS.",
+        choices=("none", "starttls", "ssl_tls"),
+    ),
+    _setting(
+        "smtp.from_name",
+        "email_digests",
+        "From Name",
+        "string",
+        default="PlexIntel",
+        env_aliases=("SMTP_FROM_NAME",),
+        description="Display name in the From header.",
+    ),
+    _setting(
+        "smtp.from_email",
+        "email_digests",
+        "From Email",
+        "string",
+        env_aliases=("SMTP_FROM_EMAIL",),
+        description="Email address used in the From header.",
+    ),
+    _setting(
+        "smtp.reply_to",
+        "email_digests",
+        "Reply-To",
+        "string",
+        env_aliases=("SMTP_REPLY_TO",),
+        description="Optional Reply-To email address.",
+    ),
+    _setting(
+        "digest.enabled",
+        "email_digests",
+        "Enable Digests",
+        "boolean",
+        default=False,
+        env_aliases=("DIGEST_ENABLED",),
+        description="Send recommendation digest emails on the configured schedule.",
+    ),
+    _setting(
+        "digest.frequency",
+        "email_digests",
+        "Digest Frequency",
+        "string",
+        default="weekly",
+        env_aliases=("DIGEST_FREQUENCY",),
+        choices=("daily", "weekly"),
+    ),
+    _setting(
+        "digest.weekly_day",
+        "email_digests",
+        "Weekly Send Day",
+        "string",
+        default="monday",
+        env_aliases=("DIGEST_WEEKLY_DAY",),
+        choices=("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"),
+    ),
+    _setting(
+        "digest.send_time",
+        "email_digests",
+        "Send Time",
+        "string",
+        default="09:00",
+        env_aliases=("DIGEST_SEND_TIME",),
+        description="Local send time in 24-hour HH:MM format.",
+    ),
+    _setting(
+        "digest.timezone",
+        "email_digests",
+        "Timezone",
+        "string",
+        default="America/Chicago",
+        env_aliases=("DIGEST_TIMEZONE",),
+        description="IANA timezone used to calculate the send schedule.",
+    ),
+    _setting(
+        "digest.top_movies",
+        "email_digests",
+        "Top Movies",
+        "integer",
+        default=25,
+        env_aliases=("DIGEST_TOP_MOVIES",),
+        description="How many movie recommendations to include per user.",
+        minimum=0,
+    ),
+    _setting(
+        "digest.top_shows",
+        "email_digests",
+        "Top Shows",
+        "integer",
+        default=10,
+        env_aliases=("DIGEST_TOP_SHOWS",),
+        description="How many show recommendations to include per user.",
+        minimum=0,
+    ),
+    _setting(
+        "digest.base_url",
+        "email_digests",
+        "Digest Base URL",
+        "string",
+        default="http://localhost:8489",
+        env_aliases=("DIGEST_BASE_URL",),
+        description="Public PlexIntel URL used for links in digest emails.",
+    ),
 )
 
 SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFINITIONS}
@@ -554,6 +703,38 @@ def _normalize_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def _normalize_email(value: str) -> str:
+    display_name, email_address = parseaddr(value)
+    normalized = (email_address or "").strip()
+    if display_name:
+        raise SettingsValidationError("must be a plain email address")
+    if not normalized or "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
+        raise SettingsValidationError("must be a valid email address")
+    local_part, _, domain = normalized.rpartition("@")
+    if "." not in domain or not local_part or not domain:
+        raise SettingsValidationError("must be a valid email address")
+    return normalized
+
+
+def _normalize_time_of_day(value: str) -> str:
+    cleaned = value.strip()
+    if not re.fullmatch(r"\d{2}:\d{2}", cleaned):
+        raise SettingsValidationError("must use HH:MM 24-hour time")
+    hours, minutes = cleaned.split(":")
+    if int(hours) > 23 or int(minutes) > 59:
+        raise SettingsValidationError("must use HH:MM 24-hour time")
+    return cleaned
+
+
+def _normalize_timezone(value: str) -> str:
+    cleaned = value.strip()
+    try:
+        ZoneInfo(cleaned)
+    except ZoneInfoNotFoundError as exc:
+        raise SettingsValidationError("must be a valid IANA timezone") from exc
+    return cleaned
+
+
 def _parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -578,8 +759,15 @@ def parse_value(definition: SettingDefinition, value: Any) -> Any:
             "tautulli.base_url",
             "ollama.host",
             "plex.redirect_uri",
+            "digest.base_url",
         }:
             parsed_value = _normalize_url(parsed_value)
+        elif definition.key in {"smtp.from_email", "smtp.reply_to"}:
+            parsed_value = _normalize_email(parsed_value)
+        elif definition.key == "digest.send_time":
+            parsed_value = _normalize_time_of_day(parsed_value)
+        elif definition.key == "digest.timezone":
+            parsed_value = _normalize_timezone(parsed_value)
     elif definition.value_type == "integer":
         cleaned = _strip_inline_annotation(value)
         if cleaned == "":

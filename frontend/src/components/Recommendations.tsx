@@ -80,6 +80,12 @@ interface UndoState {
   action: FeedbackAction;
 }
 
+interface EmailPreferencesResponse {
+  email: string | null;
+  has_email: boolean;
+  digest_enabled: boolean;
+}
+
 const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; className: string }> = {
   movie: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
   movies: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
@@ -758,6 +764,9 @@ export default function Recommendations() {
   const [pageMessage, setPageMessage] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<SortState[]>([]);
   const [undoState, setUndoState] = useState<UndoState | null>(null);
+  const [emailPreferences, setEmailPreferences] = useState<EmailPreferencesResponse | null>(null);
+  const [emailPreferencesBusy, setEmailPreferencesBusy] = useState(false);
+  const [emailPreferencesError, setEmailPreferencesError] = useState<string | null>(null);
 
   const applyRecommendationsData = (data: RecommendationsResponse) => {
     const normalized = normalizeRecommendationsResponse(data);
@@ -817,6 +826,54 @@ export default function Recommendations() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    fetch('/api/me/email-preferences', { credentials: 'include' })
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(await extractErrorMessage(res, `Failed to load email preferences (${res.status})`));
+        }
+        return res.json() as Promise<EmailPreferencesResponse>;
+      })
+      .then((data) => {
+        if (!mounted) return;
+        setEmailPreferences(data);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setEmailPreferencesError(error instanceof Error ? error.message : 'Failed to load email preferences.');
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const updateEmailPreference = async (enabled: boolean) => {
+    if (!emailPreferences) return;
+    setEmailPreferencesBusy(true);
+    setEmailPreferencesError(null);
+    try {
+      const res = await fetch('/api/me/email-preferences', {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ digest_enabled: enabled }),
+      });
+      if (!res.ok) {
+        throw new Error(await extractErrorMessage(res, `Failed to update email preferences (${res.status})`));
+      }
+      const data = await res.json() as EmailPreferencesResponse;
+      setEmailPreferences(data);
+      setPageMessage(enabled ? 'Recommendation emails enabled.' : 'Recommendation emails disabled.');
+    } catch (error) {
+      setEmailPreferencesError(error instanceof Error ? error.message : 'Failed to update email preferences.');
+    } finally {
+      setEmailPreferencesBusy(false);
+    }
+  };
 
   const sendFeedback = async (rec: Recommendation, action: FeedbackAction) => {
     if (!plexUser) {
@@ -1068,6 +1125,33 @@ export default function Recommendations() {
           </label>
         </div>
       </div>
+
+      {emailPreferences && (
+        <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-slate-700">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="font-medium text-slate-900">Recommendation emails</p>
+              <p className="mt-1 text-slate-600">
+                {emailPreferences.has_email
+                  ? `Scheduled digests will be sent to ${emailPreferences.email}.`
+                  : 'No email address is currently available for this account.'}
+              </p>
+              {emailPreferencesError && (
+                <p className="mt-2 text-xs text-red-600">{emailPreferencesError}</p>
+              )}
+            </div>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-800">
+              <input
+                type="checkbox"
+                checked={emailPreferences.digest_enabled}
+                disabled={emailPreferencesBusy || !emailPreferences.has_email}
+                onChange={(event) => void updateEmailPreference(event.target.checked)}
+              />
+              <span>{emailPreferences.digest_enabled ? 'Emails enabled' : 'Emails disabled'}</span>
+            </label>
+          </div>
+        </div>
+      )}
 
       {undoState && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">

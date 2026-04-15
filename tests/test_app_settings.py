@@ -155,6 +155,29 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(bool_insert[1], ("embeddings.enable_media", "false", app_settings.ADMIN_SOURCE, "admin"))
         self.assertEqual(conn.commit_count, 1)
 
+    def test_digest_setting_validation(self):
+        self.assertEqual(
+            app_settings.parse_value(app_settings.get_setting_definition("digest.send_time"), "09:45"),
+            "09:45",
+        )
+        self.assertEqual(
+            app_settings.parse_value(app_settings.get_setting_definition("digest.timezone"), "America/Chicago"),
+            "America/Chicago",
+        )
+        self.assertEqual(
+            app_settings.parse_value(app_settings.get_setting_definition("smtp.from_email"), "alerts@example.com"),
+            "alerts@example.com",
+        )
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(app_settings.get_setting_definition("digest.send_time"), "25:00")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(app_settings.get_setting_definition("digest.timezone"), "Mars/Olympus")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(app_settings.get_setting_definition("smtp.from_email"), "Example <alerts@example.com>")
+
     def test_consumer_defaults_and_overrides(self):
         settings_map = {
             "labeling.provider": "ollama",

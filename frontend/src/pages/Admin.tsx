@@ -219,6 +219,12 @@ export default function Admin() {
         </div>
         <div className="flex items-center gap-3">
           <Link
+            to="/admin/digest"
+            className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 hover:bg-amber-100"
+          >
+            Digest Studio
+          </Link>
+          <Link
             to="/admin/settings"
             className="inline-flex items-center rounded-md border border-slate-300 bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
           >

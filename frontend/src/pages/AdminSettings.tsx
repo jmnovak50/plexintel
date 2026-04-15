@@ -73,6 +73,21 @@ function sourceLabel(source: string) {
   }
 }
 
+function choiceLabel(field: SettingField, choice: string) {
+  if (field.key === "smtp.encryption") {
+    if (choice === "none") return "None";
+    if (choice === "starttls") return "TLS/STARTTLS (Typically port 587)";
+    if (choice === "ssl_tls") return "SSL/TLS (Typically port 465)";
+  }
+  if (field.key === "digest.frequency") {
+    return choice === "daily" ? "Daily" : "Weekly";
+  }
+  if (field.key === "digest.weekly_day") {
+    return `${choice.charAt(0).toUpperCase()}${choice.slice(1)}`;
+  }
+  return choice;
+}
+
 export default function AdminSettings() {
   const navigate = useNavigate();
   const [me, setMe] = useState<AdminMe | null>(null);
@@ -283,6 +298,12 @@ export default function AdminSettings() {
               </div>
               <div className="flex items-center gap-3">
                 <Link
+                  to="/admin/digest"
+                  className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800 hover:bg-amber-100"
+                >
+                  Digest Studio
+                </Link>
+                <Link
                   to="/admin"
                   className="inline-flex items-center rounded-full border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
                 >
@@ -399,7 +420,7 @@ export default function AdminSettings() {
                             >
                               {field.choices.map((choice) => (
                                 <option key={choice} value={choice}>
-                                  {choice}
+                                  {choiceLabel(field, choice)}
                                 </option>
                               ))}
                             </select>

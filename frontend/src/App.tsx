@@ -4,6 +4,8 @@ import Welcome from "./pages/Welcome";
 import PostLogin from "./pages/PostLogin";
 import Admin from "./pages/Admin";
 import AdminSettings from "./pages/AdminSettings";
+import AdminDigest from "./pages/AdminDigest";
+import DigestUnsubscribe from "./pages/DigestUnsubscribe";
 import Recommendations from "./components/Recommendations";
 
 function App() {
@@ -16,6 +18,8 @@ function App() {
         <Route path="/recs" element={<Recommendations />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/admin/settings" element={<AdminSettings />} />
+        <Route path="/admin/digest" element={<AdminDigest />} />
+        <Route path="/digest/unsubscribe/:token" element={<DigestUnsubscribe />} />
       </Routes>
     </BrowserRouter>
   );

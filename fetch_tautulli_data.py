@@ -13,6 +13,10 @@ from ollama_embeddings import embed_texts
 from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
 from api.services.app_settings import get_setting_value
+from api.services.user_sync_service import (
+    fetch_tautulli_users as fetch_tautulli_users_for_sync,
+    sync_users_from_tautulli as sync_users_from_tautulli_for_contacts,
+)
 
 # ✅ Load environment variables
 load_dotenv()
@@ -85,82 +89,17 @@ def fetch_tautulli_data(endpoint, params=None):
 # 👥 ---------- User sync helpers (Tautulli → users table) ----------
 
 def fetch_tautulli_users():
-    """
-    Call Tautulli's get_users command and return the list of users.
-    Uses the existing fetch_tautulli_data() helper.
-    """
-    data = fetch_tautulli_data("get_users")
-
-    # Tautulli typically returns {"users": [ ... ]} inside data,
-    # but some installs return the list directly.
-    if isinstance(data, list):
-        users = data
-    elif isinstance(data, dict):
-        users = data.get("users")
-        if users is None and isinstance(data.get("data"), list):
-            users = data["data"]
-    else:
-        print(f"⚠️ Unexpected payload type from get_users: {type(data)}")
-        return []
-
-    if not isinstance(users, list):
-        print(f"⚠️ Unexpected payload from get_users: {data}")
-        return []
-
+    users = fetch_tautulli_users_for_sync()
     print(f"👥 Retrieved {len(users)} users from Tautulli.")
     return users
 
 
 def sync_users_from_tautulli(conn, cursor):
-    """
-    Ensure every Tautulli user exists in our local `users` table.
-
-    This version is conservative and only assumes a `username` column exists
-    in the `users` table. It:
-      - Pulls all users from Tautulli
-      - Inserts missing usernames
-      - Leaves existing rows alone
-
-    If you later add more columns (friendly_name, email, tautulli_user_id, etc.)
-    we can expand this function.
-    """
-    users = fetch_tautulli_users()
-    if not users:
-        print("⚠️ No users returned from Tautulli get_users; skipping user sync.")
-        return
-
-    print("👥 Syncing Tautulli users into the `users` table...")
-
-    inserted = 0
-    for u in users:
-        if not isinstance(u, dict):
-            print(f"⚠️ Skipping unexpected user entry: {u}")
-            continue
-
-        # Prefer username; fall back to friendly_name if needed
-        username = u.get("username") or u.get("friendly_name")
-        if username:
-            username = str(username).strip()
-        if not username:
-            continue
-
-        # Check if this user already exists
-        cursor.execute("SELECT 1 FROM users WHERE username = %s", (username,))
-        exists = cursor.fetchone()
-        if exists:
-            continue
-
-        # Insert new user row
-        cursor.execute(
-            """
-            INSERT INTO users (username)
-            VALUES (%s)
-            """,
-            (username,),
-        )
-        inserted += 1
-
-    print(f"✅ User sync complete. Inserted {inserted} new user(s).")
+    result = sync_users_from_tautulli_for_contacts(conn=conn, cursor=cursor)
+    print(
+        "✅ User sync complete. "
+        f"Inserted {result['inserted']} new user(s), updated {result['updated']} existing user(s)."
+    )
 
 
 # ✅ Connect to PostgreSQL Database

@@ -30,6 +30,7 @@ ALLOWED_SCRIPTS = {
     "fetch_tautulli_data.py",
     "label_embeddings.py",
     "run_daily_pipeline.sh",
+    "run_email_digest.py",
 }
 
 class ScriptRequest(BaseModel):
@@ -68,7 +69,8 @@ def _load_user_record(username: str) -> Optional[dict]:
                 SELECT
                     COALESCE(ufv.user_id, u.user_id) AS user_id,
                     u.username,
-                    ufv.friendly_name,
+                    COALESCE(NULLIF(BTRIM(u.friendly_name), ''), ufv.friendly_name) AS friendly_name,
+                    u.plex_email,
                     u.is_admin,
                     COALESCE(ufv.created_at, u.created_at) AS created_at,
                     COALESCE(ufv.last_login, u.last_login) AS last_login,
@@ -128,6 +130,7 @@ def admin_me(user=Depends(get_current_user)):
         "username": user["username"],
         "friendly_name": user.get("friendly_name"),
         "display_name": _build_user_display_name(user.get("username"), user.get("friendly_name")),
+        "plex_email": user.get("plex_email"),
         "is_admin": bool(user["is_admin"]),
         "created_at": user.get("created_at"),
         "last_login": user.get("last_login"),
@@ -144,7 +147,8 @@ def admin_list_users(user=Depends(require_admin)):
                 SELECT
                     uv.user_id,
                     uv.username,
-                    uv.friendly_name,
+                    COALESCE(NULLIF(BTRIM(u.friendly_name), ''), uv.friendly_name) AS friendly_name,
+                    u.plex_email,
                     COALESCE(u.is_admin, FALSE) AS is_admin,
                     uv.created_at,
                     uv.last_login,

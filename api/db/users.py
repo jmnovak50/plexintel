@@ -5,7 +5,8 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 
-def get_or_create_user(username: str, email: str = None, token: str = None):
+
+def get_or_create_user(username: str, email: str = None, token: str = None, friendly_name: str = None):
     conn = connect_db(cursor_factory=RealDictCursor)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -18,11 +19,13 @@ def get_or_create_user(username: str, email: str = None, token: str = None):
             """
             UPDATE users
             SET plex_email = %s,
+                friendly_name = COALESCE(%s, friendly_name),
                 plex_token = %s,
-                last_login = %s
+                last_login = %s,
+                modified_at = %s
             WHERE user_id = %s
             """,
-            (email, token, datetime.utcnow(), user_id)
+            (email, friendly_name, token, datetime.utcnow(), datetime.utcnow(), user_id)
         )
         conn.commit()
         cursor.close()
@@ -31,11 +34,11 @@ def get_or_create_user(username: str, email: str = None, token: str = None):
 
     cursor.execute(
         """
-        INSERT INTO users (username, plex_email, plex_token, created_at, last_login)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO users (username, plex_email, friendly_name, plex_token, created_at, last_login, modified_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING user_id
         """,
-        (username, email, token, datetime.utcnow(), datetime.utcnow())
+        (username, email, friendly_name, token, datetime.utcnow(), datetime.utcnow(), datetime.utcnow())
     )
     user_id = cursor.fetchone()["user_id"]
     conn.commit()
