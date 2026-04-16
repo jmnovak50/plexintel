@@ -88,6 +88,12 @@ class HtmlSanitizer(HTMLParser):
                 continue
             rendered_attrs.append(f' {attr_name}="{escape(value, quote=True)}"')
 
+        if normalized_tag == "img":
+            rendered_attrs.append(
+                ' style="display:block;max-width:100%;width:auto;height:auto;margin:12px auto;'
+                'border:0;outline:none;text-decoration:none;border-radius:8px;"'
+            )
+
         self._parts.append(f"<{normalized_tag}{''.join(rendered_attrs)}>")
 
     def handle_endtag(self, tag: str) -> None:
@@ -573,20 +579,13 @@ def _decorate_items_with_inline_posters(items: list[dict[str, Any]]) -> list[dic
     return inline_images
 
 
-def _decorate_items_with_public_posters(
-    items: list[dict[str, Any]],
-    *,
-    base_url: str,
-    unsubscribe_token: str,
-) -> None:
+def _decorate_items_with_preview_posters(items: list[dict[str, Any]], *, unsubscribe_token: str) -> None:
     for item in items:
         rating_key = item.get("rating_key")
         if rating_key is None:
             item["poster_src"] = None
             continue
-        item["poster_src"] = (
-            f"{base_url.rstrip('/')}/api/digest/posters/{rating_key}?token={unsubscribe_token}"
-        )
+        item["poster_src"] = f"/api/digest/posters/{rating_key}?token={unsubscribe_token}"
 
 
 def _render_item_card(item: dict[str, Any]) -> str:
@@ -778,20 +777,9 @@ def _build_preview_payload(
     if poster_mode == "cid":
         inline_images.extend(_decorate_items_with_inline_posters(movies))
         inline_images.extend(_decorate_items_with_inline_posters(shows))
-    elif poster_mode == "public":
-        _decorate_items_with_public_posters(
-            movies,
-            base_url=digest_settings["base_url"],
-            unsubscribe_token=preference_row["unsubscribe_token"],
-        )
-        _decorate_items_with_public_posters(
-            shows,
-            base_url=digest_settings["base_url"],
-            unsubscribe_token=preference_row["unsubscribe_token"],
-        )
     else:
-        _decorate_items_with_proxy_posters(movies)
-        _decorate_items_with_proxy_posters(shows)
+        _decorate_items_with_preview_posters(movies, unsubscribe_token=preference_row["unsubscribe_token"])
+        _decorate_items_with_preview_posters(shows, unsubscribe_token=preference_row["unsubscribe_token"])
 
     html = _render_digest_html(
         recipient_user=recipient_user,
@@ -848,6 +836,7 @@ def generate_digest_preview(sample_username: str, *, message_html: str | None = 
             recipient_user=rendered_for_user,
             message_html=message_html,
             is_test=False,
+            poster_mode="preview",
         )
     finally:
         conn.close()

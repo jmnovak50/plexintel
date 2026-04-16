@@ -38,6 +38,7 @@ class DigestServiceTests(unittest.TestCase):
         self.assertIn('href="https://example.com"', sanitized)
         self.assertNotIn("data:image", sanitized)
         self.assertIn('src="https://cdn.example.com/poster.png"', sanitized)
+        self.assertIn('style="display:block;max-width:100%;width:auto;height:auto;', sanitized)
 
     def test_html_to_plain_text_preserves_lists(self):
         rendered = digest_service.html_to_plain_text("<p>Intro</p><ul><li>One</li><li>Two</li></ul>")
@@ -72,21 +73,20 @@ class DigestServiceTests(unittest.TestCase):
         self.assertIn("Movie One", rendered)
         self.assertIn("Top Movies", rendered)
 
-    def test_public_poster_urls_use_base_url_and_token(self):
+    def test_preview_poster_urls_use_digest_token_route(self):
         items = [
             {"rating_key": 101},
             {"rating_key": None},
         ]
 
-        digest_service._decorate_items_with_public_posters(
+        digest_service._decorate_items_with_preview_posters(
             items,
-            base_url="https://plexintel.example.com/",
             unsubscribe_token="abc123",
         )
 
         self.assertEqual(
             items[0]["poster_src"],
-            "https://plexintel.example.com/api/digest/posters/101?token=abc123",
+            "/api/digest/posters/101?token=abc123",
         )
         self.assertIsNone(items[1]["poster_src"])
 

@@ -98,6 +98,7 @@ function runStatusClass(status: string) {
 export default function AdminDigest() {
   const navigate = useNavigate();
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const editorDraftRef = useRef("");
   const [me, setMe] = useState<AdminMe | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -197,6 +198,14 @@ export default function AdminDigest() {
     normalizeEditorDirection();
   }, [editorVersion]);
 
+  useEffect(() => {
+    if (!preview?.html) return;
+    const timers = [100, 350, 900].map((delay) => window.setTimeout(() => resizePreviewFrame(), delay));
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [preview?.html]);
+
   function normalizeEditorDirection() {
     const editor = editorRef.current;
     if (!editor) return;
@@ -234,6 +243,18 @@ export default function AdminDigest() {
     document.execCommand(command, false, value);
     normalizeEditorDirection();
     syncEditorHtml();
+  }
+
+  function resizePreviewFrame() {
+    const frame = previewFrameRef.current;
+    const doc = frame?.contentDocument;
+    if (!frame || !doc) return;
+    const nextHeight = Math.max(
+      doc.documentElement?.scrollHeight || 0,
+      doc.body?.scrollHeight || 0,
+      720
+    );
+    frame.style.height = `${nextHeight}px`;
   }
 
   async function loadHistory() {
@@ -573,9 +594,13 @@ export default function AdminDigest() {
             </div>
             <div className="mt-5 rounded-md border border-stone-200 bg-stone-50 p-4">
               {preview ? (
-                <div
-                  className="mx-auto max-w-3xl overflow-auto rounded-md bg-white"
-                  dangerouslySetInnerHTML={{ __html: preview.html }}
+                <iframe
+                  ref={previewFrameRef}
+                  title="Digest email preview"
+                  srcDoc={preview.html}
+                  onLoad={() => resizePreviewFrame()}
+                  className="mx-auto block w-full max-w-3xl rounded-md border-0 bg-white"
+                  style={{ minHeight: "720px" }}
                 />
               ) : (
                 <p className="text-sm text-slate-500">Choose a sample user and refresh the preview.</p>
