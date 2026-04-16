@@ -94,7 +94,7 @@ class DigestServiceTests(unittest.TestCase):
         message = digest_service._describe_smtp_data_error(error)
 
         self.assertIn("exceeded the provider size limit", message)
-        self.assertIn("public poster URLs", message)
+        self.assertIn("resized before sending", message)
 
     def test_schedule_slot_uses_latest_daily_slot(self):
         now = datetime(2026, 4, 15, 8, 30, tzinfo=ZoneInfo("America/Chicago"))

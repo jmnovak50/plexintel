@@ -98,10 +98,11 @@ function runStatusClass(status: string) {
 export default function AdminDigest() {
   const navigate = useNavigate();
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const editorDraftRef = useRef("");
   const [me, setMe] = useState<AdminMe | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [sampleUsername, setSampleUsername] = useState("");
-  const [editorHtml, setEditorHtml] = useState("");
+  const [editorSeedHtml, setEditorSeedHtml] = useState("");
   const [editorVersion, setEditorVersion] = useState(0);
   const [preview, setPreview] = useState<DigestPreviewResponse | null>(null);
   const [runs, setRuns] = useState<DigestRun[]>([]);
@@ -159,10 +160,12 @@ export default function AdminDigest() {
         }
 
         const nextUsers: AdminUser[] = usersData.users ?? [];
+        const nextHtml = contentData.message_html || "";
         setMe(meData);
         setUsers(nextUsers);
         setSampleUsername(nextUsers[0]?.username || meData.username);
-        setEditorHtml(contentData.message_html || "");
+        editorDraftRef.current = nextHtml;
+        setEditorSeedHtml(nextHtml);
         setEditorVersion((value) => value + 1);
         setContentMeta({
           updated_at: contentData.updated_at,
@@ -186,9 +189,9 @@ export default function AdminDigest() {
 
   useEffect(() => {
     if (!sampleUsername || loading) return;
-    void refreshPreview(sampleUsername, editorHtml);
+    void refreshPreview(sampleUsername, editorDraftRef.current || editorSeedHtml);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sampleUsername, loading]);
+  }, [sampleUsername, loading, editorSeedHtml]);
 
   useEffect(() => {
     normalizeEditorDirection();
@@ -216,12 +219,13 @@ export default function AdminDigest() {
   function syncEditorHtml() {
     normalizeEditorDirection();
     const nextHtml = editorRef.current?.innerHTML ?? "";
-    setEditorHtml(nextHtml);
+    editorDraftRef.current = nextHtml;
     return nextHtml;
   }
 
   function resetEditorHtml(nextHtml: string) {
-    setEditorHtml(nextHtml);
+    editorDraftRef.current = nextHtml;
+    setEditorSeedHtml(nextHtml);
     setEditorVersion((value) => value + 1);
   }
 
@@ -242,7 +246,7 @@ export default function AdminDigest() {
     setDeliveries(data.deliveries ?? []);
   }
 
-  async function refreshPreview(nextSampleUsername = sampleUsername, nextHtml = editorHtml) {
+  async function refreshPreview(nextSampleUsername = sampleUsername, nextHtml = editorDraftRef.current || editorSeedHtml) {
     if (!nextSampleUsername) return;
     setPreviewing(true);
     setError(null);
@@ -479,7 +483,7 @@ export default function AdminDigest() {
                 syncEditorHtml();
               }}
               onFocus={() => normalizeEditorDirection()}
-              dangerouslySetInnerHTML={{ __html: editorHtml }}
+              dangerouslySetInnerHTML={{ __html: editorSeedHtml }}
               className="min-h-[300px] rounded-md border border-stone-300 bg-stone-50 px-4 py-3 text-left text-sm leading-6 outline-none focus:border-sky-400 focus:bg-white"
               style={{ direction: "ltr", unicodeBidi: "normal", textAlign: "left", writingMode: "horizontal-tb" }}
             />
@@ -546,7 +550,8 @@ export default function AdminDigest() {
               <span className="font-medium"> Admin Settings </span>
               so the digest mailer matches Tautulli-style SMTP configuration. Gmail and Google Workspace usually
               need an App Password or relay setup rather than a normal account password. Poster images in sent
-              digests load from the Public App Base URL rather than being attached to the email.
+              digests are embedded as resized thumbnails so they render in email clients without blowing up the
+              message size.
             </div>
           </div>
         </section>
