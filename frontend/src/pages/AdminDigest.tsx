@@ -514,6 +514,11 @@ export default function AdminDigest() {
               <p className="mt-1 text-sm text-slate-500">
                 Choose a sample user, then preview the exact digest layout or send a test email.
               </p>
+              <p className="mt-2 text-sm text-slate-500">
+                <span className="font-medium text-slate-700">Send Test to Me</span> uses the selected sample user.
+                <span className="font-medium text-slate-700"> Send Test to All Admins</span> now renders each admin&apos;s
+                own recommendation data, matching a scheduled run.
+              </p>
             </div>
 
             <div className="space-y-2">

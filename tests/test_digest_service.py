@@ -10,6 +10,16 @@ from api.services import digest_service
 
 
 class DigestServiceTests(unittest.TestCase):
+    @staticmethod
+    def _user(username: str, *, is_admin: bool = False) -> dict:
+        return {
+            "user_id": abs(hash(username)) % 10_000 + 1,
+            "username": username,
+            "friendly_name": username.title(),
+            "plex_email": f"{username}@example.com",
+            "is_admin": is_admin,
+        }
+
     def test_sanitize_rich_html_strips_unsafe_tags_and_urls(self):
         raw_html = """
             <p>Hello <strong>there</strong></p>
@@ -134,6 +144,126 @@ class DigestServiceTests(unittest.TestCase):
             result = digest_service.run_scheduled_digest(force=False, triggered_by="test")
 
         self.assertEqual(result, {"status": "disabled"})
+
+    def test_test_send_all_admins_renders_each_admins_own_digest(self):
+        sample_user = self._user("sample-user")
+        admin_one = self._user("admin-one", is_admin=True)
+        admin_two = self._user("admin-two", is_admin=True)
+        rendered_pairs: list[tuple[str, str]] = []
+
+        class FakeConn:
+            def close(self):
+                return None
+
+        def fake_fetch_digest_user(_conn, *, username=None, user_id=None):
+            if username == "sample-user":
+                return sample_user
+            if username == "trigger-admin":
+                return self._user("trigger-admin", is_admin=True)
+            return None
+
+        def fake_build_preview_payload(
+            _conn,
+            *,
+            rendered_for_user,
+            recipient_user,
+            message_html,
+            is_test,
+            poster_mode,
+        ):
+            rendered_pairs.append((recipient_user["username"], rendered_for_user["username"]))
+            return {
+                "subject": "subject",
+                "html": "<p>html</p>",
+                "text": "text",
+                "inline_images": [],
+                "counts": {"movies": 1, "shows": 1},
+                "message_html": message_html or "",
+            }
+
+        with patch.object(
+            digest_service,
+            "_get_digest_settings",
+            return_value={"frequency": "weekly"},
+        ):
+            with patch.object(digest_service, "_get_smtp_settings", return_value={"from_name": "PlexIntel"}):
+                with patch.object(digest_service, "connect_db", return_value=FakeConn()):
+                    with patch.object(digest_service, "sync_users_from_tautulli", return_value=None):
+                        with patch.object(digest_service, "_fetch_digest_user", side_effect=fake_fetch_digest_user):
+                            with patch.object(digest_service, "_list_admin_users", return_value=[admin_one, admin_two]):
+                                with patch.object(digest_service, "_build_subject", return_value="[TEST] PlexIntel Weekly Picks"):
+                                    with patch.object(digest_service, "_record_run_start", return_value=7):
+                                        with patch.object(digest_service, "_build_preview_payload", side_effect=fake_build_preview_payload):
+                                            with patch.object(digest_service, "_send_email", return_value=None):
+                                                with patch.object(digest_service, "_record_delivery", return_value=None):
+                                                    with patch.object(digest_service, "_finalize_run", return_value=None):
+                                                        result = digest_service.send_test_digest(
+                                                            target="all_admins",
+                                                            sample_username="sample-user",
+                                                            triggered_by="trigger-admin",
+                                                        )
+
+        self.assertEqual(rendered_pairs, [("admin-one", "admin-one"), ("admin-two", "admin-two")])
+        self.assertEqual(result["rendering_mode"], "per_admin_recipient")
+
+    def test_scheduled_digest_renders_each_recipient_for_themselves(self):
+        recipient_one = self._user("member-one")
+        recipient_two = self._user("member-two")
+        rendered_pairs: list[tuple[str, str]] = []
+
+        class FakeConn:
+            def close(self):
+                return None
+
+        def fake_build_preview_payload(
+            _conn,
+            *,
+            rendered_for_user,
+            recipient_user,
+            message_html,
+            is_test,
+            poster_mode,
+        ):
+            rendered_pairs.append((recipient_user["username"], rendered_for_user["username"]))
+            return {
+                "subject": "subject",
+                "html": "<p>html</p>",
+                "text": "text",
+                "inline_images": [],
+                "counts": {"movies": 1, "shows": 1},
+                "message_html": message_html or "",
+            }
+
+        with patch.object(
+            digest_service,
+            "_get_digest_settings",
+            return_value={
+                "enabled": True,
+                "frequency": "weekly",
+                "weekly_day": "monday",
+                "send_time": "09:00",
+                "timezone": "America/Chicago",
+                "top_movies": 25,
+                "top_shows": 10,
+                "base_url": "http://localhost:8489",
+            },
+        ):
+            with patch.object(digest_service, "_get_smtp_settings", return_value={"from_name": "PlexIntel"}):
+                with patch.object(digest_service, "_get_schedule_slot", return_value={"schedule_key": "weekly:test", "due": True}):
+                    with patch.object(digest_service, "connect_db", return_value=FakeConn()):
+                        with patch.object(digest_service, "sync_users_from_tautulli", return_value=None):
+                            with patch.object(digest_service, "_build_subject", return_value="PlexIntel Weekly Picks"):
+                                with patch.object(digest_service, "_record_run_start", return_value=9):
+                                    with patch.object(digest_service, "_list_digest_recipients", return_value=[recipient_one, recipient_two]):
+                                        with patch.object(digest_service, "get_digest_content", return_value={"message_html": ""}):
+                                            with patch.object(digest_service, "_build_preview_payload", side_effect=fake_build_preview_payload):
+                                                with patch.object(digest_service, "_send_email", return_value=None):
+                                                    with patch.object(digest_service, "_record_delivery", return_value=None):
+                                                        with patch.object(digest_service, "_finalize_run", return_value=None):
+                                                            result = digest_service.run_scheduled_digest(force=False, triggered_by="system")
+
+        self.assertEqual(rendered_pairs, [("member-one", "member-one"), ("member-two", "member-two")])
+        self.assertEqual(result["status"], "completed")
 
 
 if __name__ == "__main__":

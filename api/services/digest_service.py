@@ -1132,9 +1132,10 @@ def send_test_digest(
         success_count = 0
         failure_count = 0
         for admin_user in with_email:
+            rendered_for_user = sample_user if target == "self" else admin_user
             preview = _build_preview_payload(
                 conn,
-                rendered_for_user=sample_user,
+                rendered_for_user=rendered_for_user,
                 recipient_user=admin_user,
                 message_html=message_html,
                 is_test=True,
@@ -1155,7 +1156,7 @@ def send_test_digest(
                     delivery_type="test",
                     recipient_username=admin_user["username"],
                     recipient_email=admin_user["plex_email"],
-                    rendered_for_username=sample_username,
+                    rendered_for_username=rendered_for_user["username"],
                     status="sent",
                 )
                 success_count += 1
@@ -1166,7 +1167,7 @@ def send_test_digest(
                     delivery_type="test",
                     recipient_username=admin_user["username"],
                     recipient_email=admin_user["plex_email"],
-                    rendered_for_username=sample_username,
+                    rendered_for_username=rendered_for_user["username"],
                     status="failed",
                     error_message=str(exc),
                 )
@@ -1191,6 +1192,7 @@ def send_test_digest(
             "delivery_type": "test",
             "target": target,
             "sample_username": sample_username,
+            "rendering_mode": "sample_user" if target == "self" else "per_admin_recipient",
             "subject": subject,
             "recipient_count": recipient_count,
             "success_count": success_count,
