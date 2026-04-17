@@ -595,20 +595,20 @@ def _render_item_card(item: dict[str, Any]) -> str:
     poster_src = item.get("poster_src")
     if poster_src:
         poster_html = (
-            f"<img src=\"{escape(poster_src, quote=True)}\" alt=\"{title} poster\" width=\"100%\" "
-            "style=\"display:block;width:100%;height:auto;aspect-ratio:2 / 3;object-fit:cover;background:#e2e8f0;"
-            "border-radius:8px 8px 0 0;\" />"
+            f"<img src=\"{escape(poster_src, quote=True)}\" alt=\"{title} poster\" width=\"84\" "
+            "style=\"display:block;width:84px;max-width:25%;height:auto;aspect-ratio:2 / 3;object-fit:cover;"
+            "background:#e2e8f0;border-radius:6px;margin:0 auto;\" />"
         )
     else:
         poster_html = (
-            "<div style=\"height:168px;background:#e2e8f0;border-radius:8px 8px 0 0;color:#64748b;"
-            "font-size:12px;line-height:168px;text-align:center;\">Poster unavailable</div>"
+            "<div style=\"width:84px;height:126px;background:#e2e8f0;border-radius:6px;color:#64748b;"
+            "font-size:11px;line-height:126px;text-align:center;margin:0 auto;\">Poster unavailable</div>"
         )
 
     return (
         "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
         "style=\"border:1px solid #e2e8f0;border-radius:8px;background:#ffffff;\">"
-        "<tr><td style=\"padding:0;\">"
+        "<tr><td style=\"padding:12px 12px 0 12px;text-align:center;\">"
         f"{poster_html}"
         "</td></tr>"
         "<tr><td style=\"padding:12px;vertical-align:top;\">"

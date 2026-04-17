@@ -72,6 +72,8 @@ class DigestServiceTests(unittest.TestCase):
         self.assertIn("/api/posters/101", rendered)
         self.assertIn("Movie One", rendered)
         self.assertIn("Top Movies", rendered)
+        self.assertIn('width="84"', rendered)
+        self.assertIn("max-width:25%", rendered)
 
     def test_preview_poster_urls_use_digest_token_route(self):
         items = [
