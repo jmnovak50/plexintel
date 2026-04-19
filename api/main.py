@@ -28,6 +28,7 @@ from api.routes import digest_routes
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
 from api.services.plex_service import get_plex_user_info
+from api.services.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
 from api.services.mcp_server import mcp_mount_app, mcp_runtime
 
 
@@ -36,7 +37,11 @@ async def lifespan(_app: FastAPI):
     ensure_app_schema()
     print("🚀 Backend started with session middleware active.")
     async with mcp_runtime.lifespan():
-        yield
+        start_digest_scheduler()
+        try:
+            yield
+        finally:
+            await stop_digest_scheduler()
 
 
 app = FastAPI(lifespan=lifespan)
