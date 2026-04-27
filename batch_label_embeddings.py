@@ -23,6 +23,31 @@ from gpt_utils import (
     resolve_label_backend,
 )
 
+CSV_FIELDNAMES = [
+    "dimension",
+    "mode",
+    "summary",
+    "prompt_text",
+    "label_provider",
+    "label_model",
+    "label",
+    "gpt_label",
+    "label_explanation",
+    "label_evidence_1",
+    "label_evidence_2",
+    "label_evidence_3",
+    "valid_positive_count",
+    "valid_negative_count",
+    "flagged_item_count",
+    "skipped_reason",
+    "usage_count",
+    "sum_abs_shap",
+    "avg_abs_shap",
+    "combined_score",
+    "user_count",
+    "stats_source",
+]
+
 
 def connect_db():
     conn = connect_bootstrap_db()
@@ -107,7 +132,7 @@ def get_ranked_dimension_stats(cur):
     return stats
 
 
-def get_top_unlabeled_dimensions(cur, limit=25, dim_type="media"):
+def get_top_dimensions(cur, limit=25, dim_type="media", include_labeled=False):
     cur.execute("SELECT dimension FROM embedding_labels")
     labeled = {row[0] for row in cur.fetchall()}
     dim_min, dim_max = _get_dimension_range(dim_type)
@@ -115,9 +140,14 @@ def get_top_unlabeled_dimensions(cur, limit=25, dim_type="media"):
     ranked_stats = get_ranked_dimension_stats(cur)
     filtered = [
         stat for stat in ranked_stats
-        if stat["dimension"] not in labeled and dim_min <= stat["dimension"] < dim_max
+        if (include_labeled or stat["dimension"] not in labeled)
+        and dim_min <= stat["dimension"] < dim_max
     ]
     return filtered[:limit]
+
+
+def get_top_unlabeled_dimensions(cur, limit=25, dim_type="media"):
+    return get_top_dimensions(cur, limit=limit, dim_type=dim_type, include_labeled=False)
 
 
 def _fetch_dimension_samples(dimension: int):
@@ -156,6 +186,12 @@ def main():
     parser.add_argument("--save_label", action="store_true")
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--dim_type", choices=["media", "user", "all"], default="all")
+    parser.add_argument(
+        "--refresh_existing",
+        "--include_labeled",
+        action="store_true",
+        help="Process top SHAP dimensions even when they already have saved labels",
+    )
     args = parser.parse_args()
 
     csv_rows = []
@@ -168,7 +204,16 @@ def main():
 
     conn = connect_db()
     cur = conn.cursor()
-    top_dims = get_top_unlabeled_dimensions(cur, args.limit, args.dim_type)
+    top_dims = get_top_dimensions(
+        cur,
+        limit=args.limit,
+        dim_type=args.dim_type,
+        include_labeled=args.refresh_existing,
+    )
+
+    if not top_dims:
+        scope = "all dimensions" if args.refresh_existing else "unlabeled dimensions"
+        print(f"ℹ️ No {scope} selected for labeling.", flush=True)
 
     for dim_stats in top_dims:
         dimension = dim_stats["dimension"]
@@ -248,34 +293,11 @@ def main():
             )
         conn.commit()
 
-    if args.export_csv and csv_rows:
+    if args.export_csv:
         with open(args.export_csv, "w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=[
-                    "dimension",
-                    "mode",
-                    "summary",
-                    "prompt_text",
-                    "label_provider",
-                    "label_model",
-                    "label",
-                    "gpt_label",
-                    "label_explanation",
-                    "label_evidence_1",
-                    "label_evidence_2",
-                    "label_evidence_3",
-                    "valid_positive_count",
-                    "valid_negative_count",
-                    "flagged_item_count",
-                    "skipped_reason",
-                    "usage_count",
-                    "sum_abs_shap",
-                    "avg_abs_shap",
-                    "combined_score",
-                    "user_count",
-                    "stats_source",
-                ],
+                fieldnames=CSV_FIELDNAMES,
             )
             writer.writeheader()
             writer.writerows(csv_rows)
