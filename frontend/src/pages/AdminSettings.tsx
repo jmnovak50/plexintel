@@ -85,6 +85,12 @@ function choiceLabel(field: SettingField, choice: string) {
   if (field.key === "digest.weekly_day") {
     return `${choice.charAt(0).toUpperCase()}${choice.slice(1)}`;
   }
+  if (field.key === "pipeline.frequency") {
+    return choice === "daily" ? "Daily" : "Weekly";
+  }
+  if (field.key === "pipeline.weekly_day") {
+    return `${choice.charAt(0).toUpperCase()}${choice.slice(1)}`;
+  }
   return choice;
 }
 
@@ -298,6 +304,12 @@ export default function AdminSettings() {
               </div>
               <div className="flex items-center gap-3">
                 <Link
+                  to="/admin/pipeline"
+                  className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-4 py-2 text-sm text-sky-900 hover:bg-sky-100"
+                >
+                  Pipeline runs
+                </Link>
+                <Link
                   to="/admin/digest"
                   className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800 hover:bg-amber-100"
                 >
@@ -350,6 +362,18 @@ export default function AdminSettings() {
                         Gmail and Google Workspace SMTP usually will not accept a normal Google account password.
                         Use an App Password with <span className="font-medium">smtp.gmail.com</span>, or a Workspace
                         SMTP relay / OAuth setup instead.
+                      </div>
+                    )}
+                    {section.key === "pipeline" && (
+                      <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
+                        When the in-app scheduler is enabled, disable overlapping cron jobs that execute{" "}
+                        <code className="rounded bg-white px-1">run_daily_pipeline.sh</code>. View history and manual
+                        runs on the{" "}
+                        <Link to="/admin/pipeline" className="font-medium text-sky-800 underline">
+                          Pipeline runs
+                        </Link>{" "}
+                        page. Optional env: <code className="rounded bg-white px-1">PIPELINE_SCHEDULER_ENABLED</code>,{" "}
+                        <code className="rounded bg-white px-1">PIPELINE_SCHEDULER_INTERVAL_SECONDS</code>.
                       </div>
                     )}
                     {testMessages[section.key] && (

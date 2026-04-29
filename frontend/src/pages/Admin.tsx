@@ -219,6 +219,12 @@ export default function Admin() {
         </div>
         <div className="flex items-center gap-3">
           <Link
+            to="/admin/pipeline"
+            className="inline-flex items-center rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-900 hover:bg-sky-100"
+          >
+            Pipeline runs
+          </Link>
+          <Link
             to="/admin/digest"
             className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 hover:bg-amber-100"
           >

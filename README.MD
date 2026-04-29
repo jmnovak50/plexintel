@@ -79,16 +79,13 @@ Start the app, sign in as an admin user, then open `/admin/settings` to configur
 
 ⚙️ Nightly Pipeline
 
-Create a bash script like run_daily_pipeline.sh:
+The repo includes `run_daily_pipeline.sh`, which runs the full sequence (Tautulli sync, embeddings, training data, train, score, batch labeling). You can either:
 
-#!/bin/bash
-python fetch_tautulli_data.py --mode incremental
-python build_user_embeddings.py
-python build_training_data.py
-python train_model.py
-python score_model.py
+**Option A — In-app scheduler (recommended when the API is always running)**
+In **Admin → Settings → Nightly pipeline**, enable the scheduler and set frequency, day (for weekly), local run time, and timezone. The FastAPI process runs a background poll (default every 60s; override with `PIPELINE_SCHEDULER_INTERVAL_SECONDS`). Disable with `PIPELINE_SCHEDULER_ENABLED=false`. When this is enabled, **do not** also cron the same shell script, or you may double-run the pipeline. Monitor runs under **Admin → Pipeline runs** (`/admin/pipeline`).
 
-Schedule it with cron to run daily.
+**Option B — Cron**
+Schedule `run_daily_pipeline.sh` (or the individual Python steps) with cron on the host. If you use cron, leave the in-app pipeline scheduler **disabled** in admin settings.
 
 📦 Prerequisites
 

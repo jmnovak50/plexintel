@@ -382,6 +382,12 @@ export default function AdminDigest() {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <Link
+              to="/admin/pipeline"
+              className="inline-flex items-center rounded-md border border-sky-300 bg-sky-50 px-4 py-2 text-sm text-sky-900 hover:bg-sky-100"
+            >
+              Pipeline runs
+            </Link>
+            <Link
               to="/admin/settings"
               className="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
             >

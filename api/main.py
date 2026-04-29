@@ -25,10 +25,12 @@ from api.routes import plex_oauth_routes
 from api.routes import poster_routes
 from api.routes import rag_routes
 from api.routes import digest_routes
+from api.routes import pipeline_admin_routes
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
 from api.services.plex_service import get_plex_user_info
 from api.services.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
+from api.services.pipeline_scheduler import start_pipeline_scheduler, stop_pipeline_scheduler
 from api.services.mcp_server import mcp_mount_app, mcp_runtime
 
 
@@ -38,9 +40,11 @@ async def lifespan(_app: FastAPI):
     print("🚀 Backend started with session middleware active.")
     async with mcp_runtime.lifespan():
         start_digest_scheduler()
+        start_pipeline_scheduler()
         try:
             yield
         finally:
+            await stop_pipeline_scheduler()
             await stop_digest_scheduler()
 
 
@@ -118,6 +122,7 @@ app.include_router(rag_routes.router, prefix="/api")
 app.include_router(poster_routes.router, prefix="/api")
 app.include_router(library_catalog.router, prefix="/api/library", tags=["library"])
 app.include_router(digest_routes.router, prefix="/api", tags=["digests"])
+app.include_router(pipeline_admin_routes.router, prefix="/api", tags=["pipeline"])
 app.include_router(agent_tools.router, prefix="/api/agent", tags=["agent-tools"])
 app.mount("/mcp", mcp_mount_app, name="mcp")
 

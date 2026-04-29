@@ -722,6 +722,12 @@ CREATE TABLE IF NOT EXISTS public.training_data (
     media_duration integer,
     engagement_ratio double precision,
     watch_sim double precision,
+    label_source text,
+    feedback_value text,
+    engagement_type text,
+    watch_count integer,
+    max_single_session_seconds integer,
+    total_played_seconds integer,
     release_year integer,
     season_number integer,
     episode_number integer

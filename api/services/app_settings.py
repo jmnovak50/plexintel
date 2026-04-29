@@ -37,6 +37,7 @@ SECTION_DEFINITIONS: tuple[dict[str, str], ...] = (
     {"key": "training_scoring", "label": "Training & Scoring"},
     {"key": "advanced_labeling", "label": "Advanced Labeling"},
     {"key": "email_digests", "label": "Email & Digests"},
+    {"key": "pipeline", "label": "Nightly pipeline"},
 )
 
 
@@ -658,6 +659,51 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("DIGEST_BASE_URL",),
         description="Public PlexIntel URL used for links in digest emails.",
     ),
+    _setting(
+        "pipeline.enabled",
+        "pipeline",
+        "Enable in-app pipeline scheduler",
+        "boolean",
+        default=False,
+        env_aliases=("PIPELINE_ENABLED",),
+        description="When enabled, the app runs the training pipeline on the schedule below. Disable overlapping cron jobs that run run_daily_pipeline.sh.",
+    ),
+    _setting(
+        "pipeline.frequency",
+        "pipeline",
+        "Pipeline frequency",
+        "string",
+        default="daily",
+        env_aliases=("PIPELINE_FREQUENCY",),
+        choices=("daily", "weekly"),
+    ),
+    _setting(
+        "pipeline.weekly_day",
+        "pipeline",
+        "Weekly run day",
+        "string",
+        default="sunday",
+        env_aliases=("PIPELINE_WEEKLY_DAY",),
+        choices=("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"),
+    ),
+    _setting(
+        "pipeline.run_time",
+        "pipeline",
+        "Run time",
+        "string",
+        default="03:00",
+        env_aliases=("PIPELINE_RUN_TIME",),
+        description="Local start time in 24-hour HH:MM format.",
+    ),
+    _setting(
+        "pipeline.timezone",
+        "pipeline",
+        "Timezone",
+        "string",
+        default="America/Chicago",
+        env_aliases=("PIPELINE_TIMEZONE",),
+        description="IANA timezone used for the pipeline schedule.",
+    ),
 )
 
 SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFINITIONS}
@@ -764,9 +810,9 @@ def parse_value(definition: SettingDefinition, value: Any) -> Any:
             parsed_value = _normalize_url(parsed_value)
         elif definition.key in {"smtp.from_email", "smtp.reply_to"}:
             parsed_value = _normalize_email(parsed_value)
-        elif definition.key == "digest.send_time":
+        elif definition.key in {"digest.send_time", "pipeline.run_time"}:
             parsed_value = _normalize_time_of_day(parsed_value)
-        elif definition.key == "digest.timezone":
+        elif definition.key in {"digest.timezone", "pipeline.timezone"}:
             parsed_value = _normalize_timezone(parsed_value)
     elif definition.value_type == "integer":
         cleaned = _strip_inline_annotation(value)
