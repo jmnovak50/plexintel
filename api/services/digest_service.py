@@ -379,6 +379,7 @@ def _get_digest_settings() -> dict[str, Any]:
         "top_movies": int(get_setting_value("digest.top_movies", default=25) or 0),
         "top_shows": int(get_setting_value("digest.top_shows", default=10) or 0),
         "base_url": get_setting_value("digest.base_url", default="http://localhost:8489"),
+        "display_threshold": float(get_setting_value("recommendations.display_threshold", default=0.70)),
     }
 
 
@@ -450,9 +451,15 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
     """
 
 
-def fetch_top_movie_recommendations(conn, username: str, limit: int) -> list[dict[str, Any]]:
+def fetch_top_movie_recommendations(
+    conn,
+    username: str,
+    limit: int,
+    min_probability: float | None = None,
+) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
+    display_threshold = 0.70 if min_probability is None else min_probability
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
@@ -476,6 +483,7 @@ def fetch_top_movie_recommendations(conn, username: str, limit: int) -> list[dic
             LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
             WHERE recs.username = %s
               AND recs.media_type = 'movie'
+              AND recs.predicted_probability >= %s
               AND CASE
                     WHEN lf.feedback = 'interested' THEN TRUE
                     ELSE COALESCE(lf.suppress, FALSE)
@@ -483,14 +491,20 @@ def fetch_top_movie_recommendations(conn, username: str, limit: int) -> list[dic
             ORDER BY recs.predicted_probability DESC
             LIMIT %s
             """,
-            (username, username, limit),
+            (username, username, display_threshold, limit),
         )
         return cur.fetchall()
 
 
-def fetch_top_show_recommendations(conn, username: str, limit: int) -> list[dict[str, Any]]:
+def fetch_top_show_recommendations(
+    conn,
+    username: str,
+    limit: int,
+    min_probability: float | None = None,
+) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
+    display_threshold = 0.70 if min_probability is None else min_probability
     sql = _feedback_rollup_cte("show_rating_key", "group_rating_key") + """
         SELECT
             sr.show_rating_key AS rating_key,
@@ -501,12 +515,13 @@ def fetch_top_show_recommendations(conn, username: str, limit: int) -> list[dict
         FROM public.show_rollups_v sr
         LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
         WHERE sr.username = %s
+          AND sr.rollup_score >= %s
           AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
         ORDER BY sr.rollup_score DESC
         LIMIT %s
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, (username, username, limit))
+        cur.execute(sql, (username, username, display_threshold, limit))
         return cur.fetchall()
 
 
@@ -770,8 +785,24 @@ def _build_preview_payload(
     digest_settings = _get_digest_settings()
     subject = _build_subject(frequency=digest_settings["frequency"], is_test=is_test)
     sanitized_message_html = sanitize_rich_html(message_html) if message_html is not None else get_digest_content()["message_html"]
-    movies = [dict(item) for item in fetch_top_movie_recommendations(conn, rendered_for_user["username"], digest_settings["top_movies"])]
-    shows = [dict(item) for item in fetch_top_show_recommendations(conn, rendered_for_user["username"], digest_settings["top_shows"])]
+    movies = [
+        dict(item)
+        for item in fetch_top_movie_recommendations(
+            conn,
+            rendered_for_user["username"],
+            digest_settings["top_movies"],
+            digest_settings["display_threshold"],
+        )
+    ]
+    shows = [
+        dict(item)
+        for item in fetch_top_show_recommendations(
+            conn,
+            rendered_for_user["username"],
+            digest_settings["top_shows"],
+            digest_settings["display_threshold"],
+        )
+    ]
     inline_images: list[dict[str, Any]] = []
 
     if poster_mode == "cid":

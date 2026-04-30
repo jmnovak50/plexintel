@@ -75,7 +75,10 @@ def preprocess(df, top_k=20):
 
     y = df['label'].astype(int).values
 
-    sample_weight = df['sample_weight'].fillna(1.0).astype(float).values
+    if 'sample_weight' in df.columns:
+        sample_weight = df['sample_weight'].fillna(1.0).astype(float).values
+    else:
+        sample_weight = np.ones(len(df), dtype=np.float32)
 
     embedding_dim = len(df['embedding'].iloc[0])
     feature_names = [f"emb_{i}" for i in range(embedding_dim)]  # ✅ Auto-detect
@@ -90,12 +93,10 @@ def preprocess(df, top_k=20):
 
 import xgboost as xgb
 from xgboost import plot_importance
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score, recall_score
 import matplotlib.pyplot as plt
 import joblib
 from sklearn.model_selection import train_test_split
-
-from collections import Counter
 
 def train_and_evaluate(X, y, sample_weight):
     from sklearn.model_selection import train_test_split
@@ -104,16 +105,10 @@ def train_and_evaluate(X, y, sample_weight):
         X, y, np.arange(len(y)), test_size=0.2, stratify=y, random_state=42
     )
 
-    class_counts = Counter(y)
-    neg = class_counts[0]
-    pos = class_counts[1]
-    scale_pos_weight = neg / pos  # float
-    print(f"📊 Using scale_pos_weight = {scale_pos_weight:.2f}")
-
     model = xgb.XGBClassifier(
         objective='binary:logistic',
         eval_metric='aucpr',
-        scale_pos_weight=1.0,  # ✅ Fix: let XGBoost balance by class frequency
+        scale_pos_weight=1.0,
         n_estimators=100,
         max_depth=6,
         learning_rate=0.1,
@@ -121,19 +116,79 @@ def train_and_evaluate(X, y, sample_weight):
         random_state=42
     )
 
-    # Slice just the training weights
-    sample_weight_train = sample_weight[train_idx]
+    neg_count = (y_train == 0).sum()
+    pos_count = (y_train == 1).sum()
 
-    model.fit(X_train, y_train, sample_weight=sample_weight_train)
+    if neg_count > 0 and pos_count > 0:
+        class_sample_weights = np.where(
+            y_train == 0,
+            pos_count / neg_count,
+            1.0
+        )
+        sample_weights = sample_weight[train_idx] * class_sample_weights
+        print(
+            "📊 Class-balanced sample weights: "
+            f"neg={neg_count}, pos={pos_count}, neg_weight={pos_count / neg_count:.2f}"
+        )
+    else:
+        sample_weights = None
+        print("⚠️ Skipping class-balanced sample weights because one class is missing from the train split.")
+
+    model.fit(X_train, y_train, sample_weight=sample_weights)
 
     y_prob = model.predict_proba(X_test)[:, 1]
-    y_pred = (y_prob >= 0.45).astype(int)
-    print(classification_report(y_test, y_pred))
+    threshold_metrics = []
+    for threshold in np.arange(0.50, 0.701, 0.05):
+        y_pred_at_threshold = (y_prob >= threshold).astype(int)
+        class_0_recall = recall_score(y_test, y_pred_at_threshold, pos_label=0, zero_division=0)
+        class_0_f1 = f1_score(y_test, y_pred_at_threshold, pos_label=0, zero_division=0)
+        macro_f1 = f1_score(y_test, y_pred_at_threshold, average="macro", zero_division=0)
+        threshold_metrics.append((threshold, class_0_recall, class_0_f1, macro_f1))
 
+    print("📊 Threshold comparison:")
+    print("threshold | class_0_recall | class_0_f1 | macro_f1")
+    for threshold, class_0_recall, class_0_f1, macro_f1 in threshold_metrics:
+        print(f"{threshold:.2f}      | {class_0_recall:.3f}          | {class_0_f1:.3f}      | {macro_f1:.3f}")
+
+    recommended_threshold, recommended_class_0_recall, recommended_class_0_f1, recommended_macro_f1 = max(
+        threshold_metrics,
+        key=lambda m: (m[2], m[3])
+    )
+    macro_threshold, macro_class_0_recall, macro_class_0_f1, macro_macro_f1 = max(
+        threshold_metrics,
+        key=lambda m: (m[3], m[2])
+    )
+
+    print(
+        "🎯 Recommended operating threshold by class_0_f1, then macro_f1: "
+        f"{recommended_threshold:.2f} "
+        f"(class_0_recall={recommended_class_0_recall:.3f}, "
+        f"class_0_f1={recommended_class_0_f1:.3f}, macro_f1={recommended_macro_f1:.3f})"
+    )
+    print(
+        "📌 Best threshold by macro_f1, then class_0_f1: "
+        f"{macro_threshold:.2f} "
+        f"(class_0_recall={macro_class_0_recall:.3f}, "
+        f"class_0_f1={macro_class_0_f1:.3f}, macro_f1={macro_macro_f1:.3f})"
+    )
+    print(
+        "📝 Recommendation note: validation currently suggests a display threshold "
+        "around 0.65-0.70 may be better than the default 0.50 for recommendation display. "
+        "score_model.py is unchanged."
+    )
+
+    for threshold, _class_0_recall, _class_0_f1, _macro_f1 in threshold_metrics:
+        y_pred_at_threshold = (y_prob >= threshold).astype(int)
+        print(f"\n📋 Classification report at threshold {threshold:.2f}")
+        print(classification_report(y_test, y_pred_at_threshold, zero_division=0))
+        print(f"🧮 Confusion matrix at threshold {threshold:.2f}")
+        print(confusion_matrix(y_test, y_pred_at_threshold))
+
+    y_pred = (y_prob >= recommended_threshold).astype(int)
     cm = confusion_matrix(y_test, y_pred)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm)
     disp.plot()
-    plt.title("XGBoost Confusion Matrix")
+    plt.title(f"XGBoost Confusion Matrix (threshold {recommended_threshold:.2f})")
     plt.show()
 
     model.get_booster().feature_names = feature_names

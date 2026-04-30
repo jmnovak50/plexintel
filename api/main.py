@@ -29,6 +29,7 @@ from api.routes import pipeline_admin_routes
 from api.routes.recommendation_routes import router as rec_router
 from api.routes.public_recommendation_routes import router as public_router
 from api.services.plex_service import get_plex_user_info
+from api.services.app_settings import get_setting_value
 from api.services.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
 from api.services.pipeline_scheduler import start_pipeline_scheduler, stop_pipeline_scheduler
 from api.services.mcp_server import mcp_mount_app, mcp_runtime
@@ -136,8 +137,16 @@ async def admin_entry(request: Request):
 
 # ✅ Define route BEFORE mounting static
 @app.get("/api/recs")
-async def get_recommendations(username: str = Query(...)):
+async def get_recommendations(
+    username: str = Query(...),
+    min_probability: float | None = Query(None, ge=0.0, le=1.0),
+):
     try:
+        display_threshold = (
+            float(get_setting_value("recommendations.display_threshold", default=0.70))
+            if min_probability is None
+            else min_probability
+        )
         conn = connect_db()
         cur = conn.cursor()
 
@@ -146,9 +155,10 @@ async def get_recommendations(username: str = Query(...)):
                    season_number, episode_number, year, genres, predicted_probability, semantic_themes
             FROM expanded_recs_w_label_v
             WHERE username = %s
+              AND predicted_probability >= %s
             ORDER BY predicted_probability DESC
         """
-        cur.execute(query, (username,))
+        cur.execute(query, (username, display_threshold))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         results = [dict(zip(columns, row)) for row in rows]

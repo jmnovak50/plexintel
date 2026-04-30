@@ -49,6 +49,10 @@ OPTIONAL_TRAINING_COLUMNS = [
     "total_played_seconds",
 ]
 
+WATCH_ENGAGED_THRESHOLD = 0.60
+WATCH_ABANDONED_MAX_RATIO = 0.35
+WATCH_MIN_SECONDS = 120
+
 
 def connect():
     conn = connect_db()
@@ -111,6 +115,13 @@ def build_insert_sql(existing_columns):
         VALUES ({", ".join(placeholders)})
     """
     return insert_sql, insert_columns
+
+
+def skipped_watch_row(engagement_type):
+    return {
+        "include_training": False,
+        "engagement_type": engagement_type,
+    }
 
 
 def build_user_watch_vectors(conn):
@@ -179,6 +190,7 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
         label, sample_weight, engagement_ratio, label_source = feedback_config
 
         return {
+            "include_training": True,
             "username": username,
             "rating_key": rating_key,
             "label": label,
@@ -202,53 +214,36 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
             "total_played_seconds": 0,
         }
 
-    media_duration = row["media_duration"]
-    played_duration = row["total_played_seconds"]
-    if not media_duration:
-        return None
-
     media_duration_seconds = row.get("media_duration_seconds")
-    if not media_duration_seconds:
-        return None
+    if not media_duration_seconds or float(media_duration_seconds) <= 0:
+        return skipped_watch_row("invalid_duration")
 
+    played_duration = int(row.get("total_played_seconds") or 0)
     engagement_ratio = float(row["total_engagement_ratio"])
     max_single_session_seconds = int(row.get("max_single_session_seconds") or 0)
-    max_session_engagement_ratio = float(row.get("max_session_engagement_ratio") or 0.0)
     watch_count = int(row.get("watch_count") or 0)
 
     label_source = "watch_history"
     feedback_value = feedback
-    engagement_type = None
 
-    if ENABLE_FEEDBACK and feedback in ["watched_like", "watched_dislike"]:
-        if feedback == "watched_dislike":
-            label = 0
-            sample_weight = NEGATIVE_SAMPLE_WEIGHT
-            label_source = "explicit_watched_dislike"
-            engagement_type = label_source
-        else:
-            label = 1
-            sample_weight = WATCHED_LIKE_SAMPLE_WEIGHT
-            label_source = "explicit_watched_like"
-            engagement_type = label_source
+    # Label the user's aggregate behavior for this item. Completed-over-time
+    # viewing is positive; abandonment is negative only after a real start.
+    # Middle cases are too noisy for now and are counted, not trained.
+    if engagement_ratio >= WATCH_ENGAGED_THRESHOLD:
+        label = 1
+        engagement_type = "engaged"
+        sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
+    elif max_single_session_seconds >= WATCH_MIN_SECONDS and engagement_ratio <= WATCH_ABANDONED_MAX_RATIO:
+        label = 0
+        engagement_type = "abandoned"
+        sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
+    elif played_duration < WATCH_MIN_SECONDS:
+        return skipped_watch_row("too_short")
     else:
-        # Label the user's aggregate behavior for this item. Multi-session
-        # completion is positive; early abandonment is negative only after a
-        # real start and no later aggregate completion.
-        if engagement_ratio >= 0.50:
-            label = 1
-            engagement_type = "engaged"
-            sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
-        elif max_single_session_seconds >= 120 and max_session_engagement_ratio <= 0.20:
-            label = 0
-            engagement_type = "abandoned_early"
-            sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
-        else:
-            label = 0
-            engagement_type = "partial_or_uncertain"
-            sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
+        return skipped_watch_row("partial_or_uncertain")
 
     return {
+        "include_training": True,
         "username": username,
         "rating_key": rating_key,
         "label": label,
@@ -260,7 +255,7 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
         "season_number": row.get("season_number"),
         "episode_number": row.get("episode_number"),
         "played_duration": int(played_duration),
-        "media_duration": media_duration,
+        "media_duration": int(round(float(media_duration_seconds))),
         "engagement_ratio": engagement_ratio,
         "watch_sim": watch_sim,
         "sample_weight": sample_weight,
@@ -303,17 +298,27 @@ def build_training_data():
                 SUM(t.played_duration)::integer AS total_played_seconds,
                 MAX(t.played_duration)::integer AS max_single_session_seconds,
                 l.duration AS media_duration,
-                l.duration / 1000.0 AS media_duration_seconds,
-                SUM(t.played_duration)::float / (l.duration / 1000.0) AS total_engagement_ratio,
-                MAX(t.played_duration)::float / (l.duration / 1000.0) AS max_session_engagement_ratio,
+                CASE
+                    WHEN l.duration IS NOT NULL AND l.duration > 0
+                        THEN l.duration / 1000.0
+                    ELSE NULL
+                END AS media_duration_seconds,
+                CASE
+                    WHEN l.duration IS NOT NULL AND l.duration > 0
+                        THEN SUM(t.played_duration)::float / (l.duration / 1000.0)
+                    ELSE NULL
+                END AS total_engagement_ratio,
+                CASE
+                    WHEN l.duration IS NOT NULL AND l.duration > 0
+                        THEN MAX(t.played_duration)::float / (l.duration / 1000.0)
+                    ELSE NULL
+                END AS max_session_engagement_ratio,
                 l.year AS release_year,
                 COALESCE(l.season_number, MAX(t.season_number)) AS season_number,
                 COALESCE(l.episode_number, MAX(t.episode_number)) AS episode_number
             FROM watch_history t
-            JOIN library l ON t.rating_key = l.rating_key
+            LEFT JOIN library l ON t.rating_key = l.rating_key
             WHERE t.played_duration IS NOT NULL
-              AND l.duration IS NOT NULL
-              AND l.duration > 0
             GROUP BY t.username, t.rating_key, l.duration, l.year,
                      l.season_number, l.episode_number
         )
@@ -431,28 +436,37 @@ LEFT JOIN LATERAL (
     user_watch_vectors = build_user_watch_vectors(conn)
 
     inserts = []
+    watched_insert_count = 0
+    watched_skip_counts = Counter()
+    watch_engagement_counts = Counter()
     for row in watched_rows:
         result = process_row(row, user_watch_vectors)
-        if result:
+        if not result:
+            continue
+        watch_engagement_counts[result["engagement_type"]] += 1
+        if result.get("include_training"):
             inserts.append(result)
+            watched_insert_count += 1
+        else:
+            watched_skip_counts[result["engagement_type"]] += 1
 
     for row in feedback_only_rows:
         result = process_row(row, user_watch_vectors, from_feedback_only=True)
-        if result:
+        if result and result.get("include_training"):
             inserts.append(result)
 
-    engagement_counts = Counter(
-        r["engagement_type"]
-        for r in inserts
-        if r.get("label_source") == "watch_history"
-    )
     label_counts = Counter(r["label"] for r in inserts)
 
     print(f"📊 Aggregated user/media pairs: {len(watched_rows)}")
-    print(f"✅ Labeled engaged: {engagement_counts.get('engaged', 0)}")
-    print(f"🛑 Labeled abandoned_early: {engagement_counts.get('abandoned_early', 0)}")
-    print(f"⚪ Labeled partial_or_uncertain: {engagement_counts.get('partial_or_uncertain', 0)}")
+    print(f"🧠 Inserted into training_data: {len(inserts)}")
+    print(f"🎬 Inserted watched aggregates: {watched_insert_count}")
+    print(f"🚫 Skipped invalid_duration: {watched_skip_counts.get('invalid_duration', 0)}")
+    print(f"⏱️ Skipped too_short: {watched_skip_counts.get('too_short', 0)}")
+    print(f"⚪ Skipped partial_or_uncertain: {watched_skip_counts.get('partial_or_uncertain', 0)}")
+    print(f"✅ Labeled engaged: {watch_engagement_counts.get('engaged', 0)}")
+    print(f"🛑 Labeled abandoned: {watch_engagement_counts.get('abandoned', 0)}")
     print(f"📈 Label distribution: {dict(sorted(label_counts.items()))}")
+    print(f"🧾 Watch engagement type counts: {dict(sorted(watch_engagement_counts.items()))}")
 
     negative_feedback_count = sum(
         1 for r in inserts
@@ -479,6 +493,19 @@ LEFT JOIN LATERAL (
             insert_cur.execute(insert_sql, [row.get(col) for col in insert_columns])
 
     conn.commit()
+
+    cur.execute("""
+        SELECT COUNT(*) AS duplicate_pairs
+        FROM (
+            SELECT username, rating_key
+            FROM training_data
+            GROUP BY username, rating_key
+            HAVING COUNT(*) > 1
+        ) duplicates
+    """)
+    duplicate_pairs = cur.fetchone()["duplicate_pairs"]
+    print(f"🔎 Duplicate username/rating_key pairs after insert: {duplicate_pairs}")
+
     cur.close()
     conn.close()
     print("✅ Training data build complete.")

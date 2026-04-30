@@ -388,6 +388,17 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         maximum=1.0,
     ),
     _setting(
+        "recommendations.display_threshold",
+        "training_scoring",
+        "Recommendation Display Threshold",
+        "float",
+        default=0.70,
+        env_aliases=("RECOMMENDATION_DISPLAY_THRESHOLD",),
+        description="Minimum raw predicted_probability shown by default in the main feed and digest. Scores below this remain stored for analysis.",
+        minimum=0.0,
+        maximum=1.0,
+    ),
+    _setting(
         "scoring.shap_prune_days",
         "training_scoring",
         "SHAP Prune Days",

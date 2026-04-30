@@ -9,8 +9,13 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.poster_service import build_poster_url
+from api.services.app_settings import get_setting_value
 
 router = APIRouter()
+
+
+def get_default_display_threshold() -> float:
+    return float(get_setting_value("recommendations.display_threshold", default=0.70))
 
 
 def get_plex_username(token: str) -> str:
@@ -73,6 +78,12 @@ def get_recommendations(
     view: str = Query("all"),
     show_rating_key: Optional[int] = Query(None),
     season_rating_key: Optional[int] = Query(None),
+    min_probability: Optional[float] = Query(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Minimum raw predicted_probability to display. Defaults to recommendations.display_threshold.",
+    ),
 ):
     print("Session:", request.session)
 
@@ -95,6 +106,8 @@ def get_recommendations(
         view_key = (view or "all").lower()
         if view_key not in {"all", "movies", "shows", "seasons", "episodes"}:
             raise HTTPException(status_code=400, detail=f"Unsupported view: {view}")
+
+        display_threshold = get_default_display_threshold() if min_probability is None else min_probability
 
         if view_key == "shows":
             sql = _feedback_rollup_cte("show_rating_key", "group_rating_key") + """
@@ -130,10 +143,11 @@ def get_recommendations(
                 FROM show_rollups_v sr
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
                 WHERE sr.username = %s
+                  AND sr.rollup_score >= %s
                   AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
                 ORDER BY sr.rollup_score DESC
             """
-            params = [plex_username, plex_username]
+            params = [plex_username, plex_username, display_threshold]
         elif view_key == "seasons":
             sql = _feedback_rollup_cte("parent_rating_key", "group_rating_key") + """
                 SELECT
@@ -168,9 +182,10 @@ def get_recommendations(
                 FROM season_rollups_v sr
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.season_rating_key
                 WHERE sr.username = %s
+                  AND sr.rollup_score >= %s
                   AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
             """
-            params = [plex_username, plex_username]
+            params = [plex_username, plex_username, display_threshold]
             if show_rating_key is not None:
                 sql += " AND sr.show_rating_key = %s"
                 params.append(show_rating_key)
@@ -223,12 +238,13 @@ def get_recommendations(
                 FROM expanded_recs_w_label_v recs
                 LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
                 WHERE recs.username = %s
+                  AND recs.predicted_probability >= %s
                   AND CASE
                       WHEN lf.feedback = 'interested' THEN TRUE
                       ELSE COALESCE(lf.suppress, FALSE)
                   END = FALSE
             """
-            params = [plex_username, plex_username]
+            params = [plex_username, plex_username, display_threshold]
             if view_key == "movies":
                 sql += " AND recs.media_type = 'movie'"
             elif view_key == "episodes":
@@ -274,6 +290,8 @@ def get_recommendations(
             "recommendations": rec_rows,
             "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
             "feedback_keys": feedback_keys,
+            "display_threshold": display_threshold,
+            "threshold_note": "Raw predicted_probability values are stored unchanged; this threshold only filters display results.",
         }
 
     except HTTPException:

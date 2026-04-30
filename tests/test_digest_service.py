@@ -128,6 +128,70 @@ class DigestServiceTests(unittest.TestCase):
 
         self.assertEqual(slot["schedule_key"], "daily:2026-04-14:09:00:America/Chicago")
 
+    def test_digest_movie_recommendations_apply_display_threshold(self):
+        executed: dict[str, object] = {}
+
+        class FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def execute(self, sql, params):
+                executed["sql"] = sql
+                executed["params"] = params
+
+            def fetchall(self):
+                return []
+
+        class FakeConn:
+            def cursor(self, *_, **__):
+                return FakeCursor()
+
+        rows = digest_service.fetch_top_movie_recommendations(
+            FakeConn(),
+            "member",
+            5,
+            0.70,
+        )
+
+        self.assertEqual(rows, [])
+        self.assertIn("recs.predicted_probability >= %s", executed["sql"])
+        self.assertEqual(executed["params"], ("member", "member", 0.70, 5))
+
+    def test_digest_show_recommendations_apply_display_threshold(self):
+        executed: dict[str, object] = {}
+
+        class FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def execute(self, sql, params):
+                executed["sql"] = sql
+                executed["params"] = params
+
+            def fetchall(self):
+                return []
+
+        class FakeConn:
+            def cursor(self, *_, **__):
+                return FakeCursor()
+
+        rows = digest_service.fetch_top_show_recommendations(
+            FakeConn(),
+            "member",
+            5,
+            0.70,
+        )
+
+        self.assertEqual(rows, [])
+        self.assertIn("sr.rollup_score >= %s", executed["sql"])
+        self.assertEqual(executed["params"], ("member", "member", 0.70, 5))
+
     def test_run_scheduled_digest_returns_disabled_when_feature_off(self):
         with patch.object(
             digest_service,
