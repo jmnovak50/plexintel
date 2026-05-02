@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from PIL import Image
 
-from api.routes import poster_routes
+from api.services import poster_service
 
 
 def _response(status_code: int, content_type: str):
@@ -19,9 +20,21 @@ def _response(status_code: int, content_type: str):
 
 class PosterRouteTests(unittest.TestCase):
     def test_is_image_response_requires_image_content_type(self):
-        self.assertTrue(poster_routes._is_image_response(_response(200, "image/png")))
-        self.assertFalse(poster_routes._is_image_response(_response(200, "text/html;charset=utf-8")))
-        self.assertFalse(poster_routes._is_image_response(_response(303, "image/png")))
+        self.assertTrue(poster_service._is_image_response(_response(200, "image/png")))
+        self.assertFalse(poster_service._is_image_response(_response(200, "text/html;charset=utf-8")))
+        self.assertFalse(poster_service._is_image_response(_response(303, "image/png")))
+
+    def test_optimize_poster_image_resizes_and_converts_to_jpeg(self):
+        source = BytesIO()
+        Image.new("RGBA", (440, 660), color=(32, 64, 128, 255)).save(source, format="PNG")
+
+        payload = poster_service.optimize_poster_image(source.getvalue(), "image/png")
+
+        self.assertEqual(payload["content_type"], "image/jpeg")
+        with Image.open(BytesIO(payload["content"])) as optimized:
+            self.assertEqual(optimized.format, "JPEG")
+            self.assertLessEqual(optimized.width, 220)
+            self.assertLessEqual(optimized.height, 330)
 
     def test_fetch_tautulli_image_falls_back_to_api_proxy_when_direct_proxy_returns_html(self):
         direct_response = _response(200, "text/html;charset=utf-8")
@@ -35,13 +48,13 @@ class PosterRouteTests(unittest.TestCase):
             }
             return values.get(key)
 
-        with patch.object(poster_routes, "get_setting_value", side_effect=fake_get_setting_value):
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
             with patch.object(
-                poster_routes.requests,
+                poster_service.requests,
                 "get",
                 side_effect=[direct_response, api_response],
             ) as mock_get:
-                response = poster_routes._fetch_tautulli_image("/library/metadata/123/thumb/456")
+                response = poster_service.fetch_tautulli_image("/library/metadata/123/thumb/456")
 
         self.assertIs(response, api_response)
         self.assertEqual(mock_get.call_count, 2)
@@ -64,16 +77,16 @@ class PosterRouteTests(unittest.TestCase):
             }
             return values.get(key)
 
-        with patch.object(poster_routes, "get_setting_value", side_effect=fake_get_setting_value):
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
             with patch.object(
-                poster_routes.requests,
+                poster_service.requests,
                 "get",
                 side_effect=[direct_response, api_response],
             ):
-                with self.assertRaises(HTTPException) as raised:
-                    poster_routes._fetch_tautulli_image("/library/metadata/123/thumb/456")
+                with self.assertRaises(RuntimeError) as raised:
+                    poster_service.fetch_tautulli_image("/library/metadata/123/thumb/456")
 
-        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(str(raised.exception), "Unable to fetch poster from Tautulli.")
 
 
 if __name__ == "__main__":

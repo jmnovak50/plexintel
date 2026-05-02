@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -9,6 +10,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, ImageContent, TextContent
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -29,6 +31,7 @@ from api.services.agent_tool_service import (
     search_agent_library,
 )
 from api.services.app_settings import get_setting_value
+from api.services.poster_service import fetch_poster_image_for_rating_key, optimize_poster_image
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,67 @@ def get_mcp_runtime_settings() -> MCPRuntimeSettings:
         enabled=bool(get_setting_value("mcp.enabled", default=False)),
         api_key=get_setting_value("mcp.api_key"),
         allowed_origins=_split_allowed_origins(get_setting_value("mcp.allowed_origins")),
+    )
+
+
+def build_poster_image_result(rating_key: int) -> CallToolResult:
+    title = None
+    media_type = None
+
+    try:
+        item = get_agent_library_item(rating_key=rating_key)
+        title = item.title
+        media_type = item.media_type
+    except Exception:
+        logger.info("MCP poster metadata lookup failed for rating_key=%s", rating_key, exc_info=True)
+
+    metadata = {
+        "rating_key": rating_key,
+        "title": title,
+        "media_type": media_type,
+        "found": False,
+    }
+    display_title = title or f"rating_key {rating_key}"
+
+    try:
+        payload = fetch_poster_image_for_rating_key(rating_key)
+    except Exception as exc:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"Unable to fetch poster for {display_title}: {exc}",
+                )
+            ],
+            structuredContent={**metadata, "error": str(exc)},
+            isError=True,
+        )
+
+    if not payload:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"Poster not found for {display_title}.",
+                )
+            ],
+            structuredContent=metadata,
+        )
+
+    poster_payload = optimize_poster_image(payload["content"], payload.get("content_type"))
+    image_data = base64.b64encode(poster_payload["content"]).decode("ascii")
+    mime_type = poster_payload.get("content_type") or "image/jpeg"
+
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=f"Poster for {display_title}."),
+            ImageContent(type="image", data=image_data, mimeType=mime_type),
+        ],
+        structuredContent={
+            **metadata,
+            "found": True,
+            "content_type": mime_type,
+        },
     )
 
 
@@ -221,7 +285,10 @@ def _build_mcp_server() -> FastMCP:
 
     @mcp.tool(
         name="get_recommendations",
-        description="Fetch PlexIntel recommendations for a user.",
+        description=(
+            "Fetch PlexIntel recommendations for a user. Results include rating_key values; "
+            "call get_poster_image with a rating_key when the user asks to see a poster."
+        ),
         structured_output=True,
     )
     def mcp_get_recommendations(
@@ -241,7 +308,10 @@ def _build_mcp_server() -> FastMCP:
 
     @mcp.tool(
         name="search_library",
-        description="Search the PlexIntel library catalog by free text.",
+        description=(
+            "Search the PlexIntel library catalog by free text. Results include rating_key values; "
+            "call get_poster_image with a rating_key when the user asks to see a poster."
+        ),
         structured_output=True,
     )
     def mcp_search_library(
@@ -261,18 +331,33 @@ def _build_mcp_server() -> FastMCP:
 
     @mcp.tool(
         name="get_library_item",
-        description="Fetch one PlexIntel library item by rating_key.",
+        description=(
+            "Fetch one PlexIntel library item by rating_key. Call get_poster_image with "
+            "the same rating_key when the user asks to see its poster."
+        ),
         structured_output=True,
     )
     def mcp_get_library_item(rating_key: int) -> LibraryItem:
         return get_agent_library_item(rating_key=rating_key)
 
     @mcp.tool(
+        name="get_poster_image",
+        description=(
+            "Return a resized poster image for a PlexIntel library item by rating_key. "
+            "Use this when the user asks to display, show, or view a movie or show poster."
+        ),
+    )
+    def mcp_get_poster_image(rating_key: int) -> CallToolResult:
+        return build_poster_image_result(rating_key)
+
+    @mcp.tool(
         name="get_recent_library_additions",
         description=(
             "Return recently added PlexIntel library items across the whole library. "
             "Use this for questions like 'what was added in the last 7 days?' "
-            "or 'show me recent movies or TV shows'. This does not require a user."
+            "or 'show me recent movies or TV shows'. This does not require a user. "
+            "Results include rating_key values; call get_poster_image with a rating_key "
+            "when the user asks to see a poster."
         ),
         structured_output=True,
     )

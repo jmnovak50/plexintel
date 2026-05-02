@@ -3,12 +3,14 @@ from __future__ import annotations
 import anyio
 import httpx
 import unittest
+from io import BytesIO
 from datetime import datetime
 from unittest.mock import patch
 
 from fastapi import FastAPI
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from PIL import Image
 
 from api.services import mcp_server
 from api.services.agent_tool_service import (
@@ -35,6 +37,13 @@ INITIALIZE_PAYLOAD = {
         "clientInfo": {"name": "plexintel-tests", "version": "1.0.0"},
     },
 }
+
+
+def _png_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (12, 18), color=(32, 64, 128)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
 
 class MCPServerTests(unittest.TestCase):
     def setUp(self):
@@ -78,6 +87,7 @@ class MCPServerTests(unittest.TestCase):
                         )
                         search_result = await session.call_tool("search_library", {"q": "blade"})
                         item_result = await session.call_tool("get_library_item", {"rating_key": 42})
+                        poster_result = await session.call_tool("get_poster_image", {"rating_key": 42})
                         recent_result = await session.call_tool(
                             "get_recent_library_additions",
                             {"media_type": "movie", "days": 7, "limit": 5},
@@ -94,6 +104,7 @@ class MCPServerTests(unittest.TestCase):
             "recommendations": recommendations_result,
             "search": search_result,
             "item": item_result,
+            "poster": poster_result,
             "recent": recent_result,
             "history": history_result,
         }
@@ -198,7 +209,15 @@ class MCPServerTests(unittest.TestCase):
                                     "get_agent_watch_history",
                                     return_value=history_payload,
                                 ):
-                                    results = anyio.run(self._exercise_mcp_protocol)
+                                    with patch.object(
+                                        mcp_server,
+                                        "fetch_poster_image_for_rating_key",
+                                        return_value={
+                                            "content": _png_bytes(),
+                                            "content_type": "image/png",
+                                        },
+                                    ):
+                                        results = anyio.run(self._exercise_mcp_protocol)
 
         self.assertTrue(results["initialize"].serverInfo.name)
         tool_names = {tool.name for tool in results["tools"].tools}
@@ -209,6 +228,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_recommendations",
                 "search_library",
                 "get_library_item",
+                "get_poster_image",
                 "get_recent_library_additions",
                 "get_watch_history",
             },
@@ -217,9 +237,59 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(results["recommendations"].structuredContent["items"][0]["title"], "Arrival")
         self.assertEqual(results["search"].structuredContent["items"][0]["rating_key"], 42)
         self.assertEqual(results["item"].structuredContent["summary"], "Replicants.")
+        self.assertEqual(results["poster"].structuredContent["rating_key"], 42)
+        self.assertTrue(results["poster"].structuredContent["found"])
+        self.assertEqual(results["poster"].content[1].type, "image")
+        self.assertEqual(results["poster"].content[1].mimeType, "image/jpeg")
+        self.assertTrue(results["poster"].content[1].data)
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
+
+    def test_build_poster_image_result_returns_not_found_when_poster_is_missing(self):
+        with patch.object(
+            mcp_server,
+            "get_agent_library_item",
+            return_value=LibraryItem(
+                rating_key=42,
+                title="Blade Runner 2049",
+                media_type="movie",
+            ),
+        ):
+            with patch.object(
+                mcp_server,
+                "fetch_poster_image_for_rating_key",
+                return_value=None,
+            ):
+                result = mcp_server.build_poster_image_result(42)
+
+        self.assertFalse(result.isError)
+        self.assertFalse(result.structuredContent["found"])
+        self.assertEqual(result.structuredContent["title"], "Blade Runner 2049")
+        self.assertEqual(result.content[0].type, "text")
+        self.assertIn("Poster not found", result.content[0].text)
+
+    def test_build_poster_image_result_returns_tool_error_for_fetch_failure(self):
+        with patch.object(
+            mcp_server,
+            "get_agent_library_item",
+            return_value=LibraryItem(
+                rating_key=42,
+                title="Blade Runner 2049",
+                media_type="movie",
+            ),
+        ):
+            with patch.object(
+                mcp_server,
+                "fetch_poster_image_for_rating_key",
+                side_effect=RuntimeError("Poster proxy is not configured."),
+            ):
+                result = mcp_server.build_poster_image_result(42)
+
+        self.assertTrue(result.isError)
+        self.assertFalse(result.structuredContent["found"])
+        self.assertEqual(result.structuredContent["error"], "Poster proxy is not configured.")
+        self.assertIn("Unable to fetch poster", result.content[0].text)
 
     def test_mcp_returns_404_when_disabled(self):
         with patch.object(

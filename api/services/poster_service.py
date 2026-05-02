@@ -1,5 +1,7 @@
+from io import BytesIO
 from typing import Mapping, Optional, Any
 
+from PIL import Image
 import requests
 from psycopg2.extras import RealDictCursor
 
@@ -51,6 +53,27 @@ def build_poster_url(rating_key: Any) -> Optional[str]:
     if rating_key is None:
         return None
     return f"/api/posters/{rating_key}"
+
+
+def optimize_poster_image(
+    content: bytes,
+    content_type: str | None = None,
+    *,
+    max_size: tuple[int, int] = (220, 330),
+    quality: int = 58,
+) -> dict[str, Any]:
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.load()
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+            return {"content": buffer.getvalue(), "content_type": "image/jpeg"}
+    except Exception:
+        return {"content": content, "content_type": content_type or "image/jpeg"}
 
 
 def _is_image_response(response: requests.Response) -> bool:
