@@ -256,34 +256,20 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(results["recommendations"].structuredContent["items"][0]["title"], "Arrival")
         self.assertEqual(results["search"].structuredContent["items"][0]["rating_key"], 42)
         self.assertEqual(results["item"].structuredContent["summary"], "Replicants.")
-        self.assertEqual(results["poster"].structuredContent["rating_key"], 42)
-        self.assertTrue(results["poster"].structuredContent["found"])
-        self.assertEqual(
-            results["poster"].structuredContent["poster_url"],
-            "https://plexintel.kabolly.com/api/posters/42?w=240",
-        )
-        self.assertIn(
-            '<img src="https://plexintel.kabolly.com/api/posters/42?w=240"',
-            results["poster"].structuredContent["html"],
-        )
+        self.assertIsNone(results["poster"].structuredContent)
         self.assertEqual(results["poster"].content[0].type, "text")
         self.assertEqual(
             results["poster"].content[0].text,
+            "### Blade Runner 2049\n"
             "![Poster for Blade Runner 2049](https://plexintel.kabolly.com/api/posters/42?w=240)",
         )
-        self.assertEqual(results["gallery"].structuredContent["count"], 2)
+        self.assertIsNone(results["gallery"].structuredContent)
         self.assertIn(
             "### Blade Runner 2049\n![Poster for Blade Runner 2049](https://plexintel.kabolly.com/api/posters/42?w=180)",
-            results["gallery"].structuredContent["markdown"],
+            results["gallery"].content[0].text,
         )
-        self.assertIn(
-            '<div style="display:flex; flex-wrap:wrap; gap:12px;">',
-            results["gallery"].structuredContent["html"],
-        )
-        self.assertIn(
-            "https://plexintel.kabolly.com/api/posters/88?w=180",
-            results["gallery"].structuredContent["html"],
-        )
+        self.assertIn("### Black Bag", results["gallery"].content[0].text)
+        self.assertIn("https://plexintel.kabolly.com/api/posters/88?w=180", results["gallery"].content[0].text)
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
@@ -331,18 +317,15 @@ class MCPServerTests(unittest.TestCase):
                 items=[{"rating_key": 42, "title": "From"}],
             )
 
-        self.assertEqual(result.structuredContent["count"], 2)
-        self.assertIn("https://plexintel.example.com/api/posters/42?w=180", result.structuredContent["html"])
-        self.assertIn("https://plexintel.example.com/api/posters/88?w=180", result.structuredContent["html"])
+        self.assertIsNone(result.structuredContent)
         self.assertIn(
             "### From\n![Poster for From](https://plexintel.example.com/api/posters/42?w=180)",
-            result.structuredContent["markdown"],
+            result.content[0].text,
         )
         self.assertIn(
             "### rating_key 88\n![Poster for rating_key 88](https://plexintel.example.com/api/posters/88?w=180)",
-            result.structuredContent["markdown"],
+            result.content[0].text,
         )
-        self.assertEqual(result.content[0].text, result.structuredContent["markdown"])
 
     def test_build_poster_image_result_returns_not_found_when_poster_is_missing(self):
         with patch.object(

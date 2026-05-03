@@ -37,14 +37,11 @@ logger = logging.getLogger(__name__)
 
 
 POSTER_RESPONSE_INSTRUCTIONS = (
-    "After get_poster_image or get_poster_gallery returns, prefer the returned markdown field. "
-    "Paste the markdown field directly into the final response. Do not paste raw html unless "
-    "explicitly requested. If only poster_url is returned, render it as Markdown image syntax. "
-    "For poster galleries, use the returned markdown field. Poster gallery URLs should use "
+    "After get_poster_image or get_poster_gallery returns, paste the returned plain text "
+    "Markdown tool result directly into the final response. Poster gallery URLs should use "
     "thumbnail-sized poster URLs returned by the tool. Do not convert thumbnail URLs back to "
-    "original poster URLs. "
-    "Never respond with only poster titles. Never tell the user to expand the tool result. "
-    "Never use the local MCP URL as an image src. Use the returned public poster_url."
+    "original poster URLs. Never respond with only poster titles. Never tell the user to "
+    "expand the tool result. Never use the local MCP URL as an image src."
 )
 
 
@@ -165,14 +162,9 @@ def build_poster_image_result(rating_key: int) -> CallToolResult:
         content=[
             TextContent(
                 type="text",
-                text=poster_payload["markdown"],
+                text=f"### {poster_payload['title']}\n{poster_payload['markdown']}",
             ),
-        ],
-        structuredContent={
-            **metadata,
-            **poster_payload,
-            "found": True,
-        },
+        ]
     )
 
 
@@ -246,34 +238,14 @@ def build_poster_gallery_result(
             )
         )
 
-    cards = []
     markdown_blocks = []
     for item in poster_items:
-        title_html = escape(item["title"], quote=True)
-        url_html = escape(item["poster_url"] or "", quote=True)
-        cards.append(
-            '<div style="width:120px; margin:8px;">'
-            f'<img src="{url_html}" alt="Poster for {title_html}" width="120" />'
-            f'<div style="font-size:12px;">{title_html}</div>'
-            "</div>"
-        )
         markdown_blocks.append(f"### {item['title']}\n{item['markdown']}")
 
-    html = (
-        '<div style="display:flex; flex-wrap:wrap; gap:12px;">'
-        + "".join(cards)
-        + "</div>"
-    )
     markdown = "\n\n".join(markdown_blocks)
 
     return CallToolResult(
         content=[TextContent(type="text", text=markdown)],
-        structuredContent={
-            "count": len(poster_items),
-            "markdown": markdown,
-            "html": html,
-            "items": poster_items,
-        },
     )
 
 
@@ -502,9 +474,9 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_poster_image",
         description=(
-            "Return public HTTPS poster markup for a PlexIntel library item by rating_key. "
+            "Return a plain text Markdown poster block for a PlexIntel library item by rating_key. "
             "Use this when the user asks to display, show, or view a movie or show poster. "
-            "The final assistant response must paste the returned markdown inline."
+            "The final assistant response must paste the returned tool text exactly."
         ),
     )
     def mcp_get_poster_image(rating_key: int) -> CallToolResult:
@@ -513,10 +485,10 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_poster_gallery",
         description=(
-            "Return a completed inline HTML poster gallery for multiple PlexIntel library items. "
+            "Return a completed plain text Markdown poster gallery for multiple PlexIntel library items. "
             "Pass either rating_keys or items containing rating_key and optional title. Use this "
             "for recent additions or any response with several posters. The final assistant "
-            "response must paste the returned markdown inline."
+            "response must paste the returned tool text exactly."
         ),
     )
     def mcp_get_poster_gallery(
