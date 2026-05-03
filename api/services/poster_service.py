@@ -1,4 +1,5 @@
 from io import BytesIO
+from urllib.parse import urlencode
 from typing import Mapping, Optional, Any
 
 from PIL import Image
@@ -7,6 +8,9 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
+
+
+DEFAULT_PUBLIC_BASE_URL = "https://plexintel.kabolly.com"
 
 
 def _normalize_path(value: Optional[str]) -> Optional[str]:
@@ -49,10 +53,55 @@ def resolve_poster_path_from_row(row: Mapping[str, Any]) -> Optional[str]:
     )
 
 
-def build_poster_url(rating_key: Any) -> Optional[str]:
+def _append_poster_size_params(url: str, *, width: int | None = None, thumb: bool = False) -> str:
+    params: dict[str, Any] = {}
+    if width is not None:
+        params["w"] = int(width)
+    if thumb:
+        params["thumb"] = 1
+    if not params:
+        return url
+    return f"{url}?{urlencode(params)}"
+
+
+def build_poster_url(
+    rating_key: Any,
+    *,
+    width: int | None = None,
+    thumb: bool = False,
+) -> Optional[str]:
     if rating_key is None:
         return None
-    return f"/api/posters/{rating_key}"
+    return _append_poster_size_params(f"/api/posters/{rating_key}", width=width, thumb=thumb)
+
+
+def get_public_base_url() -> str:
+    base_url = get_setting_value("agent.public_base_url", default=DEFAULT_PUBLIC_BASE_URL)
+    return (base_url or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
+
+
+def build_public_poster_url(
+    rating_key: Any,
+    *,
+    width: int | None = None,
+    thumb: bool = False,
+) -> Optional[str]:
+    if rating_key is None:
+        return None
+    return _append_poster_size_params(
+        f"{get_public_base_url()}/api/posters/{rating_key}",
+        width=width,
+        thumb=thumb,
+    )
+
+
+def build_public_agent_poster_url(
+    rating_key: Any,
+    *,
+    width: int | None = None,
+    thumb: bool = False,
+) -> Optional[str]:
+    return build_public_poster_url(rating_key, width=width, thumb=thumb)
 
 
 def optimize_poster_image(
@@ -68,6 +117,32 @@ def optimize_poster_image(
             if image.mode != "RGB":
                 image = image.convert("RGB")
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+            return {"content": buffer.getvalue(), "content_type": "image/jpeg"}
+    except Exception:
+        return {"content": content, "content_type": content_type or "image/jpeg"}
+
+
+def resize_poster_image_to_width(
+    content: bytes,
+    content_type: str | None = None,
+    *,
+    width: int,
+    quality: int = 72,
+) -> dict[str, Any]:
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.load()
+            if image.width <= width:
+                return {"content": content, "content_type": content_type or "image/jpeg"}
+
+            ratio = width / image.width
+            height = max(1, round(image.height * ratio))
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
 
             buffer = BytesIO()
             image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)

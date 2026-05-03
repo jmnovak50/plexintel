@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import base64
+from html import escape, unescape
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult, TextContent
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -31,9 +31,21 @@ from api.services.agent_tool_service import (
     search_agent_library,
 )
 from api.services.app_settings import get_setting_value
-from api.services.poster_service import fetch_poster_image_for_rating_key, optimize_poster_image
+from api.services.poster_service import build_public_poster_url, fetch_poster_image_for_rating_key
 
 logger = logging.getLogger(__name__)
+
+
+POSTER_RESPONSE_INSTRUCTIONS = (
+    "After get_poster_image or get_poster_gallery returns, prefer the returned markdown field. "
+    "Paste the markdown field directly into the final response. Do not paste raw html unless "
+    "explicitly requested. If only poster_url is returned, render it as Markdown image syntax. "
+    "For poster galleries, use the returned markdown field. Poster gallery URLs should use "
+    "thumbnail-sized poster URLs returned by the tool. Do not convert thumbnail URLs back to "
+    "original poster URLs. "
+    "Never respond with only poster titles. Never tell the user to expand the tool result. "
+    "Never use the local MCP URL as an image src. Use the returned public poster_url."
+)
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,42 @@ def get_mcp_runtime_settings() -> MCPRuntimeSettings:
         api_key=get_setting_value("mcp.api_key"),
         allowed_origins=_split_allowed_origins(get_setting_value("mcp.allowed_origins")),
     )
+
+
+def _display_title(title: str | None, rating_key: int) -> str:
+    safe_title = unescape(title or "").strip()
+    return safe_title or f"rating_key {rating_key}"
+
+
+def _markdown_alt_text(title: str) -> str:
+    return f"Poster for {title}".replace("\\", "\\\\").replace("]", "\\]")
+
+
+def build_poster_markup_payload(
+    rating_key: int,
+    *,
+    title: str | None = None,
+    media_type: str | None = None,
+    width: int = 180,
+) -> dict[str, Any]:
+    display_title = _display_title(title, rating_key)
+    poster_url = build_public_poster_url(rating_key, width=width)
+    escaped_url = escape(poster_url or "", quote=True)
+    escaped_title = escape(display_title, quote=True)
+
+    return {
+        "title": display_title,
+        "rating_key": rating_key,
+        "media_type": media_type,
+        "poster_url": poster_url,
+        "image_url": poster_url,
+        "url": poster_url,
+        "markdown": f"![{_markdown_alt_text(display_title)}]({poster_url})",
+        "html": (
+            f"<img src=\"{escaped_url}\" alt=\"Poster for {escaped_title}\" "
+            f"width=\"{width}\" />"
+        ),
+    }
 
 
 def build_poster_image_result(rating_key: int) -> CallToolResult:
@@ -106,19 +154,125 @@ def build_poster_image_result(rating_key: int) -> CallToolResult:
             structuredContent=metadata,
         )
 
-    poster_payload = optimize_poster_image(payload["content"], payload.get("content_type"))
-    image_data = base64.b64encode(poster_payload["content"]).decode("ascii")
-    mime_type = poster_payload.get("content_type") or "image/jpeg"
+    poster_payload = build_poster_markup_payload(
+        rating_key,
+        title=title,
+        media_type=media_type,
+        width=240,
+    )
 
     return CallToolResult(
         content=[
-            TextContent(type="text", text=f"Poster for {display_title}."),
-            ImageContent(type="image", data=image_data, mimeType=mime_type),
+            TextContent(
+                type="text",
+                text=poster_payload["markdown"],
+            ),
         ],
         structuredContent={
             **metadata,
+            **poster_payload,
             "found": True,
-            "content_type": mime_type,
+        },
+    )
+
+
+def _coerce_gallery_entries(
+    rating_keys: Optional[list[int]] = None,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        rating_key = item.get("rating_key")
+        if rating_key is None:
+            rating_key = item.get("ratingKey")
+        if rating_key is None:
+            continue
+        try:
+            normalized_rating_key = int(rating_key)
+        except (TypeError, ValueError):
+            continue
+        title = item.get("title") or item.get("name")
+        media_type = item.get("media_type") or item.get("mediaType")
+        entries.append(
+            {
+                "rating_key": normalized_rating_key,
+                "title": str(title) if title else None,
+                "media_type": str(media_type) if media_type else None,
+            }
+        )
+
+    for rating_key in rating_keys or []:
+        try:
+            normalized_rating_key = int(rating_key)
+        except (TypeError, ValueError):
+            continue
+        if any(entry["rating_key"] == normalized_rating_key for entry in entries):
+            continue
+        entries.append({"rating_key": normalized_rating_key, "title": None, "media_type": None})
+
+    return entries[:50]
+
+
+def build_poster_gallery_result(
+    rating_keys: Optional[list[int]] = None,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> CallToolResult:
+    entries = _coerce_gallery_entries(rating_keys=rating_keys, items=items)
+
+    poster_items = []
+    for entry in entries:
+        title = entry.get("title")
+        media_type = entry.get("media_type")
+        if not title or not media_type:
+            try:
+                item = get_agent_library_item(rating_key=entry["rating_key"])
+                title = title or item.title
+                media_type = media_type or item.media_type
+            except Exception:
+                logger.info(
+                    "MCP gallery metadata lookup failed for rating_key=%s",
+                    entry["rating_key"],
+                    exc_info=True,
+                )
+        poster_items.append(
+            build_poster_markup_payload(
+                entry["rating_key"],
+                title=title,
+                media_type=media_type,
+                width=180,
+            )
+        )
+
+    cards = []
+    markdown_blocks = []
+    for item in poster_items:
+        title_html = escape(item["title"], quote=True)
+        url_html = escape(item["poster_url"] or "", quote=True)
+        cards.append(
+            '<div style="width:120px; margin:8px;">'
+            f'<img src="{url_html}" alt="Poster for {title_html}" width="120" />'
+            f'<div style="font-size:12px;">{title_html}</div>'
+            "</div>"
+        )
+        markdown_blocks.append(f"### {item['title']}\n{item['markdown']}")
+
+    html = (
+        '<div style="display:flex; flex-wrap:wrap; gap:12px;">'
+        + "".join(cards)
+        + "</div>"
+    )
+    markdown = "\n\n".join(markdown_blocks)
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=markdown)],
+        structuredContent={
+            "count": len(poster_items),
+            "markdown": markdown,
+            "html": html,
+            "items": poster_items,
         },
     )
 
@@ -261,6 +415,11 @@ class MCPAccessControlApp:
 def _build_mcp_server() -> FastMCP:
     server_name = get_setting_value("mcp.server_name", default="PlexIntel")
     instructions = get_setting_value("mcp.instructions")
+    instructions = (
+        f"{instructions}\n\n{POSTER_RESPONSE_INSTRUCTIONS}"
+        if instructions
+        else POSTER_RESPONSE_INSTRUCTIONS
+    )
 
     mcp = FastMCP(
         server_name,
@@ -343,12 +502,28 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_poster_image",
         description=(
-            "Return a resized poster image for a PlexIntel library item by rating_key. "
-            "Use this when the user asks to display, show, or view a movie or show poster."
+            "Return public HTTPS poster markup for a PlexIntel library item by rating_key. "
+            "Use this when the user asks to display, show, or view a movie or show poster. "
+            "The final assistant response must paste the returned markdown inline."
         ),
     )
     def mcp_get_poster_image(rating_key: int) -> CallToolResult:
         return build_poster_image_result(rating_key)
+
+    @mcp.tool(
+        name="get_poster_gallery",
+        description=(
+            "Return a completed inline HTML poster gallery for multiple PlexIntel library items. "
+            "Pass either rating_keys or items containing rating_key and optional title. Use this "
+            "for recent additions or any response with several posters. The final assistant "
+            "response must paste the returned markdown inline."
+        ),
+    )
+    def mcp_get_poster_gallery(
+        rating_keys: Optional[list[int]] = None,
+        items: Optional[list[dict[str, Any]]] = None,
+    ) -> CallToolResult:
+        return build_poster_gallery_result(rating_keys=rating_keys, items=items)
 
     @mcp.tool(
         name="get_recent_library_additions",

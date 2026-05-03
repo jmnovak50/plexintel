@@ -161,6 +161,15 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         secret=True,
     ),
     _setting(
+        "agent.public_base_url",
+        "public_api",
+        "Agent Public Base URL",
+        "string",
+        default="https://plexintel.kabolly.com",
+        env_aliases=("AGENT_PUBLIC_BASE_URL", "PLEXINTEL_PUBLIC_BASE_URL"),
+        description="Public HTTPS PlexIntel URL used in agent/MCP image and media markup.",
+    ),
+    _setting(
         "mcp.enabled",
         "mcp",
         "Enable MCP Server",

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from api.routes import poster_routes
 from api.services import poster_service
 
 
@@ -35,6 +36,38 @@ class PosterRouteTests(unittest.TestCase):
             self.assertEqual(optimized.format, "JPEG")
             self.assertLessEqual(optimized.width, 220)
             self.assertLessEqual(optimized.height, 330)
+
+    def test_resize_poster_image_to_width_preserves_aspect_ratio(self):
+        source = BytesIO()
+        Image.new("RGB", (600, 900), color=(32, 64, 128)).save(source, format="PNG")
+
+        payload = poster_service.resize_poster_image_to_width(source.getvalue(), "image/png", width=180)
+
+        self.assertEqual(payload["content_type"], "image/jpeg")
+        with Image.open(BytesIO(payload["content"])) as resized:
+            self.assertEqual(resized.width, 180)
+            self.assertEqual(resized.height, 270)
+
+    def test_resize_poster_image_to_width_never_upscales(self):
+        source = BytesIO()
+        Image.new("RGB", (120, 180), color=(32, 64, 128)).save(source, format="PNG")
+        source_bytes = source.getvalue()
+
+        payload = poster_service.resize_poster_image_to_width(source_bytes, "image/png", width=240)
+
+        self.assertEqual(payload["content"], source_bytes)
+        self.assertEqual(payload["content_type"], "image/png")
+
+    def test_build_public_poster_url_can_include_width(self):
+        with patch.object(
+            poster_service,
+            "get_setting_value",
+            return_value="https://plexintel.example.com/",
+        ):
+            self.assertEqual(
+                poster_service.build_public_poster_url(42, width=240),
+                "https://plexintel.example.com/api/posters/42?w=240",
+            )
 
     def test_fetch_tautulli_image_falls_back_to_api_proxy_when_direct_proxy_returns_html(self):
         direct_response = _response(200, "text/html;charset=utf-8")
@@ -87,6 +120,54 @@ class PosterRouteTests(unittest.TestCase):
                     poster_service.fetch_tautulli_image("/library/metadata/123/thumb/456")
 
         self.assertEqual(str(raised.exception), "Unable to fetch poster from Tautulli.")
+
+    def test_public_poster_route_returns_image_without_session(self):
+        image = BytesIO()
+        Image.new("RGB", (12, 18), color=(32, 64, 128)).save(image, format="PNG")
+
+        with patch.object(
+            poster_routes,
+                "fetch_poster_image_for_rating_key",
+                return_value={"content": image.getvalue(), "content_type": "image/png"},
+        ):
+            response = poster_routes.get_poster(42)
+
+        self.assertEqual(response.media_type, "image/png")
+        self.assertEqual(response.headers["Cache-Control"], "public, max-age=3600")
+        self.assertEqual(response.headers["Access-Control-Allow-Origin"], "*")
+        self.assertTrue(response.body)
+
+    def test_public_poster_route_resizes_when_width_is_requested(self):
+        image = BytesIO()
+        Image.new("RGB", (600, 900), color=(32, 64, 128)).save(image, format="PNG")
+
+        with patch.object(
+            poster_routes,
+            "fetch_poster_image_for_rating_key",
+            return_value={"content": image.getvalue(), "content_type": "image/png"},
+        ):
+            response = poster_routes.get_poster(42, w=180)
+
+        self.assertEqual(response.media_type, "image/jpeg")
+        with Image.open(BytesIO(response.body)) as resized:
+            self.assertEqual(resized.width, 180)
+            self.assertEqual(resized.height, 270)
+
+    def test_public_poster_route_thumb_uses_thumbnail_width(self):
+        image = BytesIO()
+        Image.new("RGB", (600, 900), color=(32, 64, 128)).save(image, format="PNG")
+
+        with patch.object(
+            poster_routes,
+            "fetch_poster_image_for_rating_key",
+            return_value={"content": image.getvalue(), "content_type": "image/png"},
+        ):
+            response = poster_routes.get_poster(42, thumb=True)
+
+        self.assertEqual(response.media_type, "image/jpeg")
+        with Image.open(BytesIO(response.body)) as resized:
+            self.assertEqual(resized.width, 180)
+            self.assertEqual(resized.height, 270)
 
 
 if __name__ == "__main__":

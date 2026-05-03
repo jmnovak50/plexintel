@@ -88,6 +88,23 @@ class MCPServerTests(unittest.TestCase):
                         search_result = await session.call_tool("search_library", {"q": "blade"})
                         item_result = await session.call_tool("get_library_item", {"rating_key": 42})
                         poster_result = await session.call_tool("get_poster_image", {"rating_key": 42})
+                        gallery_result = await session.call_tool(
+                            "get_poster_gallery",
+                            {
+                                "items": [
+                                    {
+                                        "rating_key": 42,
+                                        "title": "Blade Runner 2049",
+                                        "media_type": "movie",
+                                    },
+                                    {
+                                        "rating_key": 88,
+                                        "title": "Black Bag",
+                                        "media_type": "movie",
+                                    },
+                                ]
+                            },
+                        )
                         recent_result = await session.call_tool(
                             "get_recent_library_additions",
                             {"media_type": "movie", "days": 7, "limit": 5},
@@ -105,6 +122,7 @@ class MCPServerTests(unittest.TestCase):
             "search": search_result,
             "item": item_result,
             "poster": poster_result,
+            "gallery": gallery_result,
             "recent": recent_result,
             "history": history_result,
         }
@@ -229,6 +247,7 @@ class MCPServerTests(unittest.TestCase):
                 "search_library",
                 "get_library_item",
                 "get_poster_image",
+                "get_poster_gallery",
                 "get_recent_library_additions",
                 "get_watch_history",
             },
@@ -239,12 +258,91 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(results["item"].structuredContent["summary"], "Replicants.")
         self.assertEqual(results["poster"].structuredContent["rating_key"], 42)
         self.assertTrue(results["poster"].structuredContent["found"])
-        self.assertEqual(results["poster"].content[1].type, "image")
-        self.assertEqual(results["poster"].content[1].mimeType, "image/jpeg")
-        self.assertTrue(results["poster"].content[1].data)
+        self.assertEqual(
+            results["poster"].structuredContent["poster_url"],
+            "https://plexintel.kabolly.com/api/posters/42?w=240",
+        )
+        self.assertIn(
+            '<img src="https://plexintel.kabolly.com/api/posters/42?w=240"',
+            results["poster"].structuredContent["html"],
+        )
+        self.assertEqual(results["poster"].content[0].type, "text")
+        self.assertEqual(
+            results["poster"].content[0].text,
+            "![Poster for Blade Runner 2049](https://plexintel.kabolly.com/api/posters/42?w=240)",
+        )
+        self.assertEqual(results["gallery"].structuredContent["count"], 2)
+        self.assertIn(
+            "### Blade Runner 2049\n![Poster for Blade Runner 2049](https://plexintel.kabolly.com/api/posters/42?w=180)",
+            results["gallery"].structuredContent["markdown"],
+        )
+        self.assertIn(
+            '<div style="display:flex; flex-wrap:wrap; gap:12px;">',
+            results["gallery"].structuredContent["html"],
+        )
+        self.assertIn(
+            "https://plexintel.kabolly.com/api/posters/88?w=180",
+            results["gallery"].structuredContent["html"],
+        )
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
+
+    def test_build_poster_markup_payload_uses_public_agent_url(self):
+        with patch.object(
+            mcp_server,
+            "build_public_poster_url",
+            return_value="https://plexintel.example.com/api/posters/42?w=240",
+        ):
+            payload = mcp_server.build_poster_markup_payload(42, title="From", width=240)
+
+        self.assertEqual(payload["title"], "From")
+        self.assertEqual(payload["rating_key"], 42)
+        self.assertEqual(payload["poster_url"], "https://plexintel.example.com/api/posters/42?w=240")
+        self.assertEqual(payload["image_url"], payload["poster_url"])
+        self.assertIn("![Poster for From]", payload["markdown"])
+        self.assertIn('<img src="https://plexintel.example.com/api/posters/42?w=240"', payload["html"])
+
+    def test_build_poster_markup_payload_unescapes_html_entities_in_title(self):
+        with patch.object(
+            mcp_server,
+            "build_public_poster_url",
+            return_value="https://plexintel.example.com/api/posters/42?w=240",
+        ):
+            payload = mcp_server.build_poster_markup_payload(42, title="Tom &amp; Jerry", width=240)
+
+        self.assertEqual(payload["title"], "Tom & Jerry")
+        self.assertEqual(
+            payload["markdown"],
+            "![Poster for Tom & Jerry](https://plexintel.example.com/api/posters/42?w=240)",
+        )
+        self.assertIn('alt="Poster for Tom &amp; Jerry"', payload["html"])
+
+    def test_build_poster_gallery_result_accepts_items_and_rating_keys(self):
+        with patch.object(
+            mcp_server,
+            "build_public_poster_url",
+            side_effect=lambda rating_key, width=None, thumb=False: (
+                f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
+            ),
+        ):
+            result = mcp_server.build_poster_gallery_result(
+                rating_keys=[88],
+                items=[{"rating_key": 42, "title": "From"}],
+            )
+
+        self.assertEqual(result.structuredContent["count"], 2)
+        self.assertIn("https://plexintel.example.com/api/posters/42?w=180", result.structuredContent["html"])
+        self.assertIn("https://plexintel.example.com/api/posters/88?w=180", result.structuredContent["html"])
+        self.assertIn(
+            "### From\n![Poster for From](https://plexintel.example.com/api/posters/42?w=180)",
+            result.structuredContent["markdown"],
+        )
+        self.assertIn(
+            "### rating_key 88\n![Poster for rating_key 88](https://plexintel.example.com/api/posters/88?w=180)",
+            result.structuredContent["markdown"],
+        )
+        self.assertEqual(result.content[0].text, result.structuredContent["markdown"])
 
     def test_build_poster_image_result_returns_not_found_when_poster_is_missing(self):
         with patch.object(
