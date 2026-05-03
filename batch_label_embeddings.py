@@ -10,10 +10,13 @@ from pgvector.psycopg2 import register_vector
 from api.db.connection import connect_db as connect_bootstrap_db
 from api.db.schema import ensure_app_schema
 from gpt_utils import (
+    COMBINED_EMBEDDING_DIMENSIONS,
     DEFAULT_FETCH_ITEMS,
+    EMBEDDING_SIDE_DIMENSIONS,
     UNCLEAR_LABEL,
     build_dimension_prompt,
     call_llm_for_label_result,
+    get_dimension_mode,
     get_bottom_media_for_dimension,
     get_bottom_users_for_dimension,
     get_media_metadata,
@@ -57,10 +60,10 @@ def connect_db():
 
 def _get_dimension_range(dim_type):
     if dim_type == "media":
-        return (768, 1536)
+        return (0, EMBEDDING_SIDE_DIMENSIONS)
     if dim_type == "user":
-        return (0, 768)
-    return (0, 1536)
+        return (EMBEDDING_SIDE_DIMENSIONS, COMBINED_EMBEDDING_DIMENSIONS)
+    return (0, COMBINED_EMBEDDING_DIMENSIONS)
 
 
 def _should_persist_label(label: str) -> bool:
@@ -151,14 +154,14 @@ def get_top_unlabeled_dimensions(cur, limit=25, dim_type="media"):
 
 
 def _fetch_dimension_samples(dimension: int):
-    if dimension < 768:
-        positive_ids = get_top_users_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
-        negative_ids = get_bottom_users_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
-        return "user", get_user_watch_history(positive_ids), get_user_watch_history(negative_ids)
+    if get_dimension_mode(dimension) == "media":
+        positive_ids = get_top_media_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
+        negative_ids = get_bottom_media_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
+        return "media", get_media_metadata(positive_ids), get_media_metadata(negative_ids)
 
-    positive_ids = get_top_media_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
-    negative_ids = get_bottom_media_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
-    return "media", get_media_metadata(positive_ids), get_media_metadata(negative_ids)
+    positive_ids = get_top_users_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
+    negative_ids = get_bottom_users_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
+    return "user", get_user_watch_history(positive_ids), get_user_watch_history(negative_ids)
 
 
 def _default_label_result(skipped_reason: str = "") -> dict:

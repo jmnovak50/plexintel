@@ -10,9 +10,12 @@ import psycopg2
 
 
 DB_URL = os.getenv("DATABASE_URL")
+EMBEDDING_SIDE_DIMENSIONS = 768
+COMBINED_EMBEDDING_DIMENSIONS = EMBEDDING_SIDE_DIMENSIONS * 2
 SCOPE_RANGES = {
-    "media": (768, 1536),
-    "user": (0, 768),
+    "all": (0, COMBINED_EMBEDDING_DIMENSIONS),
+    "media": (0, EMBEDDING_SIDE_DIMENSIONS),
+    "user": (EMBEDDING_SIDE_DIMENSIONS, COMBINED_EMBEDDING_DIMENSIONS),
 }
 
 
@@ -68,7 +71,7 @@ def write_backup_sql(path: str, rows: list[tuple], cur):
 
 def main():
     parser = argparse.ArgumentParser(description="Backup and optionally clear embedding labels by dimension scope.")
-    parser.add_argument("--scope", choices=sorted(SCOPE_RANGES), default="media")
+    parser.add_argument("--scope", choices=sorted(SCOPE_RANGES), default="all")
     parser.add_argument("--backup_csv", help="CSV backup path; required with --execute")
     parser.add_argument("--backup_sql", help="SQL restore path; required with --execute")
     parser.add_argument("--execute", action="store_true", help="Actually delete the selected rows after backups succeed")

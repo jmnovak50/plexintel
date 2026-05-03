@@ -12,6 +12,7 @@ from gpt_utils import (
     UNCLEAR_LABEL,
     build_dimension_prompt,
     call_llm_for_label_result,
+    get_dimension_mode,
     get_bottom_media_for_dimension,
     get_bottom_users_for_dimension,
     get_media_metadata,
@@ -28,14 +29,14 @@ def _should_persist_label(label: str) -> bool:
 
 
 def _fetch_dimension_samples(dimension: int, top_n: int):
-    if dimension < 768:
-        positive_ids = get_top_users_for_dimension(dimension, top_n=top_n)
-        negative_ids = get_bottom_users_for_dimension(dimension, top_n=top_n)
-        return "user", get_user_watch_history(positive_ids), get_user_watch_history(negative_ids)
+    if get_dimension_mode(dimension) == "media":
+        positive_ids = get_top_media_for_dimension(dimension, top_n=top_n)
+        negative_ids = get_bottom_media_for_dimension(dimension, top_n=top_n)
+        return "media", get_media_metadata(positive_ids), get_media_metadata(negative_ids)
 
-    positive_ids = get_top_media_for_dimension(dimension, top_n=top_n)
-    negative_ids = get_bottom_media_for_dimension(dimension, top_n=top_n)
-    return "media", get_media_metadata(positive_ids), get_media_metadata(negative_ids)
+    positive_ids = get_top_users_for_dimension(dimension, top_n=top_n)
+    negative_ids = get_bottom_users_for_dimension(dimension, top_n=top_n)
+    return "user", get_user_watch_history(positive_ids), get_user_watch_history(negative_ids)
 
 
 def label_single_dimension(

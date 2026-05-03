@@ -322,14 +322,15 @@ CREATE VIEW public.expanded_recs_w_label_v AS
     a.actors,
     d.directors,
     r.predicted_probability,
-    ( SELECT string_agg(DISTINCT el.label, ', '::text) AS string_agg
-           FROM (( SELECT si.dimension
+    ( SELECT string_agg(top_labels.label, ', '::text ORDER BY top_labels.max_shap DESC) AS string_agg
+           FROM ( SELECT el.label,
+                    max(si.shap_value) AS max_shap
                    FROM public.shap_impact si
-                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username))
-                  ORDER BY abs(si.shap_value) DESC
-                 LIMIT 5) top_dims
-             JOIN public.embedding_labels el ON ((top_dims.dimension = el.dimension)))
-          WHERE (el.label IS NOT NULL)) AS semantic_themes
+                     JOIN public.embedding_labels el ON (si.dimension = el.dimension)
+                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username) AND (si.shap_value > (0)::double precision) AND (el.label IS NOT NULL))
+                  GROUP BY el.label
+                  ORDER BY (max(si.shap_value)) DESC
+                 LIMIT 3) top_labels) AS semantic_themes
    FROM public.recommendations r
      JOIN public.library m ON (r.rating_key = m.rating_key)
      JOIN public.users_v uv ON (r.username = uv.username)

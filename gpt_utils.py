@@ -20,6 +20,8 @@ MAX_GENRE_TAGS = get_setting_value("labeling.max_genre_tags", default=3)
 MAX_CAST_NAMES = get_setting_value("labeling.max_cast_names", default=2)
 MAX_DIRECTOR_NAMES = get_setting_value("labeling.max_director_names", default=2)
 MAX_ITEMS_PER_USER_IN_PROMPT = get_setting_value("labeling.max_items_per_user_in_prompt", default=2)
+EMBEDDING_SIDE_DIMENSIONS = 768
+COMBINED_EMBEDDING_DIMENSIONS = EMBEDDING_SIDE_DIMENSIONS * 2
 UNCLEAR_LABEL = "UNCLEAR / MIXED SIGNAL"
 LABEL_PROVIDER = str(get_setting_value("labeling.provider", default="ollama")).lower()
 OPENAI_LABEL_MODEL = get_setting_value("labeling.openai_model", default="gpt-4")
@@ -769,6 +771,29 @@ def insert_label(dimension, label):
     print(f"✅ Saved label '{label}' for dimension {dimension}")
 
 
+def get_dimension_mode(dimension: int) -> str:
+    if 0 <= dimension < EMBEDDING_SIDE_DIMENSIONS:
+        return "media"
+    if EMBEDDING_SIDE_DIMENSIONS <= dimension < COMBINED_EMBEDDING_DIMENSIONS:
+        return "user"
+    raise ValueError(
+        f"Dimension {dimension} is outside the combined embedding range "
+        f"0-{COMBINED_EMBEDDING_DIMENSIONS - 1}"
+    )
+
+
+def get_media_embedding_index(dimension: int) -> int:
+    if get_dimension_mode(dimension) != "media":
+        raise ValueError(f"Media dimension {dimension} is outside the media range")
+    return dimension
+
+
+def get_user_embedding_index(dimension: int) -> int:
+    if get_dimension_mode(dimension) != "user":
+        raise ValueError(f"User dimension {dimension} is outside the user range")
+    return dimension - EMBEDDING_SIDE_DIMENSIONS
+
+
 def _get_ranked_embedding_ids(
     table_name: str,
     id_column: str,
@@ -793,12 +818,10 @@ def _get_ranked_embedding_ids(
 
 
 def get_ranked_media_for_dimension(dimension, top_n: int = DEFAULT_FETCH_ITEMS, ascending: bool = False):
-    if dimension < 768:
-        raise ValueError(f"Media dimension {dimension} is below the media offset")
     return _get_ranked_embedding_ids(
         "media_embeddings",
         "rating_key",
-        dimension - 768,
+        get_media_embedding_index(dimension),
         top_n=top_n,
         ascending=ascending,
     )
@@ -813,12 +836,10 @@ def get_bottom_media_for_dimension(dimension, top_n: int = DEFAULT_FETCH_ITEMS):
 
 
 def get_ranked_users_for_dimension(dimension, top_n: int = DEFAULT_FETCH_ITEMS, ascending: bool = False):
-    if dimension >= 768:
-        raise ValueError(f"User dimension {dimension} is outside the user range")
     return _get_ranked_embedding_ids(
         "user_embeddings",
         "username",
-        dimension,
+        get_user_embedding_index(dimension),
         top_n=top_n,
         ascending=ascending,
     )
