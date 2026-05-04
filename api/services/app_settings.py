@@ -153,6 +153,23 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("PLEX_REDIRECT_URI",),
     ),
     _setting(
+        "plex.web_base_url",
+        "connectivity",
+        "Plex Web Base URL",
+        "string",
+        default="https://app.plex.tv/desktop",
+        env_aliases=("PLEX_WEB_BASE_URL",),
+        description="Plex Web base URL used for recommendation poster click-through links.",
+    ),
+    _setting(
+        "plex.server_identifier",
+        "connectivity",
+        "Plex Server Identifier",
+        "string",
+        env_aliases=("PLEX_SERVER_IDENTIFIER", "PLEX_MACHINE_IDENTIFIER"),
+        description="Optional Plex machine identifier used to open local library item links directly.",
+    ),
+    _setting(
         "public_api.api_key",
         "public_api",
         "Public API Key",

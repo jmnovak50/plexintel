@@ -1,5 +1,6 @@
 from io import BytesIO
-from urllib.parse import urlencode
+from functools import lru_cache
+from urllib.parse import quote, urlencode
 from typing import Mapping, Optional, Any
 
 from PIL import Image
@@ -7,10 +8,18 @@ import requests
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
-from api.services.app_settings import get_setting_value
+from api.services.app_settings import (
+    SETTINGS_TABLE,
+    ensure_settings_schema,
+    format_raw_value,
+    get_setting_definition,
+    get_setting_value,
+)
 
 
 DEFAULT_PUBLIC_BASE_URL = "https://plexintel.kabolly.com"
+DEFAULT_PLEX_WEB_BASE_URL = "https://app.plex.tv/desktop"
+AUTO_DISCOVERED_SOURCE = "auto_discovered"
 
 
 def _normalize_path(value: Optional[str]) -> Optional[str]:
@@ -73,6 +82,93 @@ def build_poster_url(
     if rating_key is None:
         return None
     return _append_poster_size_params(f"/api/posters/{rating_key}", width=width, thumb=thumb)
+
+
+def persist_plex_server_identifier(server_identifier: str) -> None:
+    normalized_identifier = (server_identifier or "").strip()
+    if not normalized_identifier:
+        return
+
+    try:
+        definition = get_setting_definition("plex.server_identifier")
+        conn = connect_db()
+        try:
+            ensure_settings_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO {SETTINGS_TABLE} (key, raw_value, source, updated_at, updated_by)
+                    VALUES (%s, %s, %s, now(), %s)
+                    ON CONFLICT (key) DO UPDATE SET
+                        raw_value = EXCLUDED.raw_value,
+                        source = EXCLUDED.source,
+                        updated_at = EXCLUDED.updated_at,
+                        updated_by = EXCLUDED.updated_by
+                    WHERE {SETTINGS_TABLE}.raw_value IS DISTINCT FROM EXCLUDED.raw_value
+                    """,
+                    (
+                        definition.key,
+                        format_raw_value(definition, normalized_identifier),
+                        AUTO_DISCOVERED_SOURCE,
+                        "tautulli",
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        return
+
+
+@lru_cache(maxsize=1)
+def fetch_tautulli_server_identifier() -> Optional[str]:
+    tautulli_api_url = get_setting_value("tautulli.api_url")
+    tautulli_api_key = get_setting_value("tautulli.api_key")
+    if not tautulli_api_url or not tautulli_api_key:
+        return None
+
+    try:
+        response = requests.get(
+            tautulli_api_url,
+            params={"apikey": tautulli_api_key, "cmd": "get_server_info"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (ValueError, requests.RequestException):
+        return None
+
+    data = payload.get("response", {}).get("data", {})
+    server_identifier = (
+        data.get("pms_identifier")
+        or data.get("machine_identifier")
+        or data.get("server_id")
+    )
+    if not server_identifier:
+        return None
+    normalized_identifier = str(server_identifier).strip()
+    if not normalized_identifier:
+        return None
+    persist_plex_server_identifier(normalized_identifier)
+    return normalized_identifier
+
+
+def build_plex_item_url(rating_key: Any) -> Optional[str]:
+    if rating_key is None:
+        return None
+
+    web_base_url = (
+        get_setting_value("plex.web_base_url", default=DEFAULT_PLEX_WEB_BASE_URL)
+        or DEFAULT_PLEX_WEB_BASE_URL
+    ).rstrip("/")
+    metadata_key = quote(f"/library/metadata/{rating_key}", safe="")
+    configured_server_identifier = (get_setting_value("plex.server_identifier") or "").strip()
+    server_identifier = configured_server_identifier or fetch_tautulli_server_identifier()
+    if not server_identifier:
+        return None
+
+    server_path = quote(server_identifier, safe="")
+    return f"{web_base_url}/#!/server/{server_path}/details?key={metadata_key}"
 
 
 def get_public_base_url() -> str:

@@ -24,6 +24,7 @@ interface Recommendation {
   rating_key: number;
   title: string;
   poster_url?: string | null;
+  plex_item_url?: string | null;
   show_title: string | null;
   year: number | null;
   predicted_probability: number;
@@ -335,25 +336,29 @@ function MediaTypeBadge({ mediaType }: { mediaType: string }) {
   );
 }
 
-function RecommendationPoster({ posterUrl }: { posterUrl?: string | null }) {
+function RecommendationPoster({
+  posterUrl,
+  plexItemUrl,
+  title,
+}: {
+  posterUrl?: string | null;
+  plexItemUrl?: string | null;
+  title: string;
+}) {
   const [hasImageError, setHasImageError] = useState(false);
 
   useEffect(() => {
     setHasImageError(false);
   }, [posterUrl]);
 
-  if (!posterUrl || hasImageError) {
-    return (
-      <span
-        aria-hidden="true"
-        className="inline-flex h-20 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-gray-200 bg-gray-100 text-[9px] font-semibold uppercase tracking-wide text-gray-400"
-      >
-        No Art
-      </span>
-    );
-  }
-
-  return (
+  const poster = !posterUrl || hasImageError ? (
+    <span
+      aria-hidden="true"
+      className="inline-flex h-20 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-gray-200 bg-gray-100 text-[9px] font-semibold uppercase tracking-wide text-gray-400"
+    >
+      No Art
+    </span>
+  ) : (
     <img
       src={posterUrl}
       alt=""
@@ -362,6 +367,24 @@ function RecommendationPoster({ posterUrl }: { posterUrl?: string | null }) {
       onError={() => setHasImageError(true)}
       className="h-20 w-14 shrink-0 rounded-md border border-gray-200 bg-gray-100 object-cover"
     />
+  );
+
+  if (!plexItemUrl) {
+    return poster;
+  }
+
+  return (
+    <a
+      href={plexItemUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open ${title} in Plex`}
+      title={`Open ${title} in Plex`}
+      onClick={(event) => event.stopPropagation()}
+      className="inline-flex h-20 w-14 shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+    >
+      {poster}
+    </a>
   );
 }
 
@@ -544,7 +567,7 @@ function RecommendationTitleCell({
 }) {
   return (
     <div className={`flex ${isCompact ? 'flex-col items-center text-center' : 'items-start gap-3'}`}>
-      <RecommendationPoster posterUrl={rec.poster_url} />
+      <RecommendationPoster posterUrl={rec.poster_url} plexItemUrl={rec.plex_item_url} title={rec.title} />
       <div className={isCompact ? 'mt-2' : ''}>
         <p className="text-sm font-semibold leading-tight text-gray-900">{rec.title}</p>
       </div>

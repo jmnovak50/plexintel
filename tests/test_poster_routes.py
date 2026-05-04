@@ -20,6 +20,9 @@ def _response(status_code: int, content_type: str):
 
 
 class PosterRouteTests(unittest.TestCase):
+    def setUp(self):
+        poster_service.fetch_tautulli_server_identifier.cache_clear()
+
     def test_is_image_response_requires_image_content_type(self):
         self.assertTrue(poster_service._is_image_response(_response(200, "image/png")))
         self.assertFalse(poster_service._is_image_response(_response(200, "text/html;charset=utf-8")))
@@ -68,6 +71,64 @@ class PosterRouteTests(unittest.TestCase):
                 poster_service.build_public_poster_url(42, width=240),
                 "https://plexintel.example.com/api/posters/42?w=240",
             )
+
+    def test_build_plex_item_url_uses_server_identifier_when_configured(self):
+        def fake_get_setting_value(key: str, default=None):
+            values = {
+                "plex.web_base_url": "https://app.plex.tv/desktop/",
+                "plex.server_identifier": "server id",
+            }
+            return values.get(key, default)
+
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
+            self.assertEqual(
+                poster_service.build_plex_item_url(42),
+                "https://app.plex.tv/desktop/#!/server/server%20id/details?key=%2Flibrary%2Fmetadata%2F42",
+            )
+
+    def test_build_plex_item_url_fetches_server_identifier_from_tautulli(self):
+        def fake_get_setting_value(key: str, default=None):
+            values = {
+                "plex.web_base_url": "https://app.plex.tv/desktop",
+                "plex.server_identifier": None,
+                "tautulli.api_url": "https://tautulli.example.com/api/v2",
+                "tautulli.api_key": "secret-key",
+            }
+            return values.get(key, default)
+
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
+            with patch.object(
+                poster_service.requests,
+                "get",
+                return_value=SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "response": {
+                            "data": {
+                                "pms_identifier": "server id",
+                            },
+                        },
+                    },
+                ),
+            ) as mock_get:
+                self.assertEqual(
+                    poster_service.build_plex_item_url(42),
+                    "https://app.plex.tv/desktop/#!/server/server%20id/details?key=%2Flibrary%2Fmetadata%2F42",
+                )
+                self.assertEqual(mock_get.call_count, 1)
+
+    def test_build_plex_item_url_returns_none_without_server_identifier(self):
+        def fake_get_setting_value(key: str, default=None):
+            values = {
+                "plex.web_base_url": "https://app.plex.tv/desktop",
+                "plex.server_identifier": None,
+                "tautulli.api_url": None,
+                "tautulli.api_key": None,
+            }
+            return values.get(key, default)
+
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
+            self.assertIsNone(poster_service.build_plex_item_url(42))
 
     def test_fetch_tautulli_image_falls_back_to_api_proxy_when_direct_proxy_returns_html(self):
         direct_response = _response(200, "text/html;charset=utf-8")

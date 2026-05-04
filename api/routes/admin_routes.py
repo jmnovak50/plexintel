@@ -17,7 +17,7 @@ from api.services.app_settings import (
     test_tautulli_settings,
 )
 from api.services.plex_service import get_plex_user_info
-from api.services.poster_service import build_poster_url
+from api.services.poster_service import build_plex_item_url, build_poster_url
 
 router = APIRouter()
 
@@ -293,6 +293,7 @@ def admin_get_recommendations(
             rec_rows = cur.fetchall()
             for row in rec_rows:
                 row["poster_url"] = build_poster_url(row.get("rating_key"))
+                row["plex_item_url"] = build_plex_item_url(row.get("rating_key"))
 
             cur.execute(
                 """

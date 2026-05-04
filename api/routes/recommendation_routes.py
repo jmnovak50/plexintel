@@ -8,7 +8,7 @@ from pgvector.psycopg2 import register_vector
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
-from api.services.poster_service import build_poster_url
+from api.services.poster_service import build_plex_item_url, build_poster_url
 from api.services.app_settings import get_setting_value
 
 router = APIRouter()
@@ -265,6 +265,7 @@ def get_recommendations(
         rec_rows = cur.fetchall()
         for row in rec_rows:
             row["poster_url"] = build_poster_url(row.get("rating_key"))
+            row["plex_item_url"] = build_plex_item_url(row.get("rating_key"))
             row.pop("poster_path", None)
 
         print(f"Found {len(rec_rows)} recs for {plex_username}")
