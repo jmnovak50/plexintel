@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useState, type KeyboardEvent } from 'react';
 import {
   Ban,
   BookmarkPlus,
@@ -53,6 +53,10 @@ interface RecommendationsResponse {
   username?: string | null;
   recommendations?: Recommendation[];
   last_updated?: string | null;
+  has_more?: boolean;
+  next_offset?: number | null;
+  limit?: number;
+  offset?: number;
 }
 
 interface FeedbackApiResponse {
@@ -99,6 +103,7 @@ const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; classN
   episode: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
   episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
 };
+const RECOMMENDATION_PAGE_LIMIT = 100;
 
 const FEEDBACK_ACTIONS: Array<{
   action: FeedbackAction;
@@ -265,21 +270,41 @@ async function loadRecommendationsData({
   viewMode,
   selectedShow,
   selectedSeason,
+  search,
+  minScore,
+  sortOrder,
+  offset,
   signal,
 }: {
   viewMode: ViewMode;
   selectedShow: ScopedSelection | null;
   selectedSeason: ScopedSelection | null;
+  search: string;
+  minScore: number;
+  sortOrder: SortState[];
+  offset: number;
   signal?: AbortSignal;
 }) {
   const baseUrl = window.location.origin;
-  const params = new URLSearchParams({ view: viewMode });
+  const params = new URLSearchParams({
+    view: viewMode,
+    limit: String(RECOMMENDATION_PAGE_LIMIT),
+    offset: String(offset),
+    min_probability: (minScore / 100).toFixed(4),
+  });
+  const normalizedSearch = search.trim();
+  if (normalizedSearch) {
+    params.set('search', normalizedSearch);
+  }
   if (selectedShow?.key && (viewMode === 'seasons' || viewMode === 'episodes')) {
     params.set('show_rating_key', String(selectedShow.key));
   }
   if (selectedSeason?.key && viewMode === 'episodes') {
     params.set('season_rating_key', String(selectedSeason.key));
   }
+  sortOrder.forEach(({ column, direction }) => {
+    params.append('sort', `${String(column)}:${direction}`);
+  });
 
   const res = await fetch(`${baseUrl}/api/recommendations?${params.toString()}`, {
     credentials: 'include',
@@ -296,6 +321,8 @@ function normalizeRecommendationsResponse(data: RecommendationsResponse) {
     recommendations: Array.isArray(data.recommendations) ? data.recommendations : [],
     username: typeof data.username === 'string' ? data.username : null,
     lastUpdated: typeof data.last_updated === 'string' ? data.last_updated : null,
+    hasMore: Boolean(data.has_more),
+    nextOffset: typeof data.next_offset === 'number' ? data.next_offset : null,
   };
 }
 
@@ -773,15 +800,20 @@ function MobileRecommendationsList({
 
 export default function Recommendations() {
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [recs, setRecs] = useState<Recommendation[]>([]);
   const [darkMode, setDarkMode] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('all');
   const [selectedShow, setSelectedShow] = useState<ScopedSelection | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<ScopedSelection | null>(null);
-  const [minScore, setMinScore] = useState(0);
+  const [minScore, setMinScore] = useState(70);
   const [plexUser, setPlexUser] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [pendingKeys, setPendingKeys] = useState<number[]>([]);
   const [pageError, setPageError] = useState<string | null>(null);
   const [pageMessage, setPageMessage] = useState<string | null>(null);
@@ -791,26 +823,51 @@ export default function Recommendations() {
   const [emailPreferencesBusy, setEmailPreferencesBusy] = useState(false);
   const [emailPreferencesError, setEmailPreferencesError] = useState<string | null>(null);
 
-  const applyRecommendationsData = (data: RecommendationsResponse) => {
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [search]);
+
+  const applyRecommendationsData = (data: RecommendationsResponse, append = false) => {
     const normalized = normalizeRecommendationsResponse(data);
-    setRecs(normalized.recommendations);
+    setRecs((prev) => {
+      if (!append) {
+        return normalized.recommendations;
+      }
+      const existingKeys = new Set(prev.map((rec) => rec.rating_key));
+      return [
+        ...prev,
+        ...normalized.recommendations.filter((rec) => !existingKeys.has(rec.rating_key)),
+      ];
+    });
     setPlexUser(normalized.username);
     setLastUpdated(normalized.lastUpdated);
+    setHasMore(normalized.hasMore);
+    setNextOffset(normalized.nextOffset);
   };
 
-  const refreshRecommendations = async (signal?: AbortSignal) => {
+  const refreshRecommendations = async (signal?: AbortSignal, append = false, offset = 0) => {
     const data = await loadRecommendationsData({
       viewMode,
       selectedShow,
       selectedSeason,
+      search: debouncedSearch,
+      minScore,
+      sortOrder,
+      offset,
       signal,
     });
-    applyRecommendationsData(data);
+    applyRecommendationsData(data, append);
   };
 
   useEffect(() => {
     const controller = new AbortController();
 
+    setIsLoadingRecommendations(true);
     refreshRecommendations(controller.signal)
       .then(() => {
         if (controller.signal.aborted) {
@@ -824,12 +881,17 @@ export default function Recommendations() {
         }
         console.error(error);
         setPageError(error instanceof Error ? error.message : 'Failed to load recommendations.');
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingRecommendations(false);
+        }
       });
 
     return () => {
       controller.abort();
     };
-  }, [viewMode, selectedShow, selectedSeason]);
+  }, [viewMode, selectedShow, selectedSeason, debouncedSearch, minScore, sortOrder]);
 
   useEffect(() => {
     let mounted = true;
@@ -1050,6 +1112,23 @@ export default function Recommendations() {
     }
   };
 
+  const loadMoreRecommendations = async () => {
+    if (!hasMore || nextOffset == null || isLoadingMore) {
+      return;
+    }
+
+    setIsLoadingMore(true);
+    setPageError(null);
+    try {
+      await refreshRecommendations(undefined, true, nextOffset);
+    } catch (error) {
+      console.error(error);
+      setPageError(error instanceof Error ? error.message : 'Failed to load more recommendations.');
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
   const handleSort = (column: keyof Recommendation, shiftKey = false) => {
     setSortOrder((prev) => {
       const existing = prev.find((sort) => sort?.column === column);
@@ -1092,37 +1171,6 @@ export default function Recommendations() {
       setPageMessage(null);
     }
   };
-
-  const filteredRecs = useMemo(() => (
-    [...recs]
-      .filter((rec) => {
-        const score = rec.predicted_probability * 100;
-        const searchLower = search.toLowerCase();
-        const matchesSearch = (
-          rec.title?.toLowerCase().includes(searchLower) ||
-          rec.show_title?.toLowerCase().includes(searchLower) ||
-          rec.genres?.toLowerCase().includes(searchLower) ||
-          rec.semantic_themes?.toLowerCase().includes(searchLower)
-        );
-        return score >= minScore && matchesSearch;
-      })
-      .sort((a, b) => {
-        for (const { column, direction } of sortOrder) {
-          const aVal = a[column];
-          const bVal = b[column];
-          if (aVal == null || bVal == null) continue;
-
-          if (typeof aVal === 'string' && typeof bVal === 'string') {
-            const result = aVal.localeCompare(bVal);
-            if (result !== 0) return direction === 'asc' ? result : -result;
-          } else if (typeof aVal === 'number' && typeof bVal === 'number') {
-            const result = aVal - bVal;
-            if (result !== 0) return direction === 'asc' ? result : -result;
-          }
-        }
-        return b.predicted_probability - a.predicted_probability;
-      })
-  ), [minScore, recs, search, sortOrder]);
 
   const isRowClickable = viewMode === 'shows' || viewMode === 'seasons';
 
@@ -1274,14 +1322,18 @@ export default function Recommendations() {
         </div>
       )}
 
-      {filteredRecs.length === 0 ? (
+      {isLoadingRecommendations && recs.length === 0 ? (
+        <div className="rounded-xl border border-gray-200 bg-white px-4 py-6 text-sm text-gray-500 shadow-sm">
+          Loading recommendations...
+        </div>
+      ) : recs.length === 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white px-4 py-6 text-sm text-gray-500 shadow-sm">
           No recommendations match the current filters.
         </div>
       ) : (
         <>
           <MobileRecommendationsList
-            recommendations={filteredRecs}
+            recommendations={recs}
             pendingKeys={pendingKeys}
             onRowClick={handleRowClick}
             onAction={sendFeedback}
@@ -1290,7 +1342,7 @@ export default function Recommendations() {
             isRowClickable={isRowClickable}
           />
           <DesktopRecommendationsTable
-            recommendations={filteredRecs}
+            recommendations={recs}
             pendingKeys={pendingKeys}
             onSort={handleSort}
             onRowClick={handleRowClick}
@@ -1299,6 +1351,20 @@ export default function Recommendations() {
             onUndo={undoFeedback}
             isRowClickable={isRowClickable}
           />
+          <div className="mt-4 flex items-center justify-center">
+            {hasMore ? (
+              <button
+                type="button"
+                onClick={() => void loadMoreRecommendations()}
+                disabled={isLoadingMore}
+                className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isLoadingMore ? 'Loading...' : 'Load more'}
+              </button>
+            ) : (
+              <span className="text-sm text-gray-500">Showing all loaded matches</span>
+            )}
+          </div>
         </>
       )}
 

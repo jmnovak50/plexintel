@@ -154,21 +154,47 @@ def fetch_tautulli_server_identifier() -> Optional[str]:
 
 
 def build_plex_item_url(rating_key: Any) -> Optional[str]:
-    if rating_key is None:
-        return None
-
     web_base_url = (
         get_setting_value("plex.web_base_url", default=DEFAULT_PLEX_WEB_BASE_URL)
         or DEFAULT_PLEX_WEB_BASE_URL
     ).rstrip("/")
-    metadata_key = quote(f"/library/metadata/{rating_key}", safe="")
     configured_server_identifier = (get_setting_value("plex.server_identifier") or "").strip()
     server_identifier = configured_server_identifier or fetch_tautulli_server_identifier()
+
+    return build_plex_item_url_from_context(
+        rating_key,
+        web_base_url=web_base_url,
+        server_identifier=server_identifier,
+    )
+
+
+def get_plex_item_url_context() -> dict[str, Optional[str]]:
+    web_base_url = (
+        get_setting_value("plex.web_base_url", default=DEFAULT_PLEX_WEB_BASE_URL)
+        or DEFAULT_PLEX_WEB_BASE_URL
+    ).rstrip("/")
+    server_identifier = (get_setting_value("plex.server_identifier") or "").strip() or None
+    return {
+        "web_base_url": web_base_url,
+        "server_identifier": server_identifier,
+    }
+
+
+def build_plex_item_url_from_context(
+    rating_key: Any,
+    *,
+    web_base_url: str,
+    server_identifier: Optional[str],
+) -> Optional[str]:
+    if rating_key is None:
+        return None
+
     if not server_identifier:
         return None
 
+    metadata_key = quote(f"/library/metadata/{rating_key}", safe="")
     server_path = quote(server_identifier, safe="")
-    return f"{web_base_url}/#!/server/{server_path}/details?key={metadata_key}"
+    return f"{web_base_url.rstrip('/')}/#!/server/{server_path}/details?key={metadata_key}"
 
 
 def get_public_base_url() -> str:

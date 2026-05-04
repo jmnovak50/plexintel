@@ -1,17 +1,112 @@
-import os
 from typing import Optional
 
-import psycopg2
 import requests
 from fastapi import APIRouter, HTTPException, Query, Request
 from pgvector.psycopg2 import register_vector
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
-from api.services.poster_service import build_plex_item_url, build_poster_url
+from api.services.poster_service import (
+    build_plex_item_url_from_context,
+    build_poster_url,
+    get_plex_item_url_context,
+)
 from api.services.app_settings import get_setting_value
 
 router = APIRouter()
+
+DEFAULT_PAGE_LIMIT = 100
+MAX_PAGE_LIMIT = 250
+SORTABLE_COLUMNS = {
+    "title",
+    "show_title",
+    "season_number",
+    "episode_number",
+    "year",
+    "predicted_probability",
+    "media_type",
+    "score_band",
+}
+
+
+def _normalize_sort(sort: Optional[list[str]]) -> list[tuple[str, str]]:
+    normalized: list[tuple[str, str]] = []
+    if not isinstance(sort, list):
+        return normalized
+    for item in sort:
+        if not isinstance(item, str):
+            continue
+        raw_column, separator, raw_direction = item.partition(":")
+        column = raw_column.strip()
+        direction = raw_direction.strip().lower() if separator else "asc"
+        if column not in SORTABLE_COLUMNS:
+            continue
+        if direction not in {"asc", "desc"}:
+            direction = "asc"
+        normalized.append((column, direction))
+    return normalized[:3]
+
+
+def _build_order_clause(sort: Optional[list[str]], default_column: str = "predicted_probability") -> str:
+    normalized_sort = _normalize_sort(sort)
+    sort_parts = [
+        f"{column} {direction.upper()} NULLS LAST"
+        for column, direction in normalized_sort
+    ]
+    if default_column not in [column for column, _direction in normalized_sort]:
+        sort_parts.append(f"{default_column} DESC NULLS LAST")
+    sort_parts.append("rating_key ASC")
+    return " ORDER BY " + ", ".join(sort_parts)
+
+
+def _escape_like(value: str) -> str:
+    return (
+        value
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+def _append_search_filter(
+    sql: str,
+    params: list,
+    search: Optional[str],
+    columns: list[str],
+) -> str:
+    if not isinstance(search, str):
+        return sql
+    normalized = search.strip()
+    if not normalized:
+        return sql
+    pattern = f"%{_escape_like(normalized)}%"
+    sql += " AND (" + " OR ".join([f"{column} ILIKE %s ESCAPE E'\\\\'" for column in columns]) + ")"
+    params.extend([pattern] * len(columns))
+    return sql
+
+
+def _append_paging(sql: str, params: list, *, limit: int, offset: int) -> str:
+    params.extend([limit + 1, offset])
+    return sql + " LIMIT %s OFFSET %s"
+
+
+def _page_rows(rows: list[dict], *, limit: int, offset: int) -> tuple[list[dict], bool, Optional[int]]:
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_offset = offset + limit if has_more else None
+    return page_rows, has_more, next_offset
+
+
+def _decorate_recommendation_rows(rows: list[dict]) -> None:
+    plex_context = get_plex_item_url_context()
+    for row in rows:
+        row["poster_url"] = build_poster_url(row.get("rating_key"))
+        row["plex_item_url"] = build_plex_item_url_from_context(
+            row.get("rating_key"),
+            web_base_url=plex_context["web_base_url"] or "",
+            server_identifier=plex_context["server_identifier"],
+        )
+        row.pop("poster_path", None)
 
 
 def get_default_display_threshold() -> float:
@@ -78,6 +173,10 @@ def get_recommendations(
     view: str = Query("all"),
     show_rating_key: Optional[int] = Query(None),
     season_rating_key: Optional[int] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    sort: Optional[list[str]] = Query(None),
     min_probability: Optional[float] = Query(
         None,
         ge=0.0,
@@ -107,6 +206,11 @@ def get_recommendations(
         if view_key not in {"all", "movies", "shows", "seasons", "episodes"}:
             raise HTTPException(status_code=400, detail=f"Unsupported view: {view}")
 
+        show_rating_key = show_rating_key if isinstance(show_rating_key, int) else None
+        season_rating_key = season_rating_key if isinstance(season_rating_key, int) else None
+        search = search if isinstance(search, str) else None
+        sort = sort if isinstance(sort, list) else None
+        min_probability = min_probability if isinstance(min_probability, (int, float)) else None
         display_threshold = get_default_display_threshold() if min_probability is None else min_probability
 
         if view_key == "shows":
@@ -145,9 +249,10 @@ def get_recommendations(
                 WHERE sr.username = %s
                   AND sr.rollup_score >= %s
                   AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
-                ORDER BY sr.rollup_score DESC
             """
             params = [plex_username, plex_username, display_threshold]
+            sql = _append_search_filter(sql, params, search, ["sr.show_title", "sr.genres"])
+            sql += _build_order_clause(sort)
         elif view_key == "seasons":
             sql = _feedback_rollup_cte("parent_rating_key", "group_rating_key") + """
                 SELECT
@@ -189,7 +294,8 @@ def get_recommendations(
             if show_rating_key is not None:
                 sql += " AND sr.show_rating_key = %s"
                 params.append(show_rating_key)
-            sql += " ORDER BY sr.rollup_score DESC"
+            sql = _append_search_filter(sql, params, search, ["sr.season_title", "sr.show_title", "sr.genres"])
+            sql += _build_order_clause(sort)
         else:
             sql = """
                 WITH latest_feedback AS (
@@ -259,14 +365,19 @@ def get_recommendations(
                 sql += " AND recs.parent_rating_key = %s"
                 params.append(season_rating_key)
 
-            sql += " ORDER BY recs.predicted_probability DESC"
+            sql = _append_search_filter(
+                sql,
+                params,
+                search,
+                ["recs.title", "recs.show_title", "recs.genres", "recs.semantic_themes"],
+            )
+            sql += _build_order_clause(sort)
 
+        sql = _append_paging(sql, params, limit=limit, offset=offset)
         cur.execute(sql, tuple(params))
-        rec_rows = cur.fetchall()
-        for row in rec_rows:
-            row["poster_url"] = build_poster_url(row.get("rating_key"))
-            row["plex_item_url"] = build_plex_item_url(row.get("rating_key"))
-            row.pop("poster_path", None)
+        fetched_rows = cur.fetchall()
+        rec_rows, has_more, next_offset = _page_rows(fetched_rows, limit=limit, offset=offset)
+        _decorate_recommendation_rows(rec_rows)
 
         print(f"Found {len(rec_rows)} recs for {plex_username}")
 
@@ -292,6 +403,10 @@ def get_recommendations(
             "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
             "feedback_keys": feedback_keys,
             "display_threshold": display_threshold,
+            "has_more": has_more,
+            "next_offset": next_offset,
+            "limit": limit,
+            "offset": offset,
             "threshold_note": "Raw predicted_probability values are stored unchanged; this threshold only filters display results.",
         }
 

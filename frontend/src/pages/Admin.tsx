@@ -33,6 +33,12 @@ interface AdminRecommendation {
   score_band: string | null;
 }
 
+interface AdminRecommendationsResponse {
+  recommendations?: AdminRecommendation[];
+  has_more?: boolean;
+  next_offset?: number | null;
+}
+
 interface AdminFeedbackItem {
   id: number;
   rating_key: number;
@@ -91,6 +97,8 @@ function watchlistStatusLabel(status: string | null) {
   }
 }
 
+const ADMIN_RECOMMENDATION_PAGE_LIMIT = 100;
+
 export default function Admin() {
   const navigate = useNavigate();
   const [me, setMe] = useState<AdminMe | null>(null);
@@ -98,6 +106,9 @@ export default function Admin() {
   const [selectedUser, setSelectedUser] = useState("");
   const [viewMode, setViewMode] = useState<"all" | "movies" | "shows" | "seasons" | "episodes">("all");
   const [recommendations, setRecommendations] = useState<AdminRecommendation[]>([]);
+  const [recommendationsHasMore, setRecommendationsHasMore] = useState(false);
+  const [recommendationsNextOffset, setRecommendationsNextOffset] = useState<number | null>(null);
+  const [recommendationsLoadingMore, setRecommendationsLoadingMore] = useState(false);
   const [feedbackRows, setFeedbackRows] = useState<AdminFeedbackItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,6 +171,8 @@ export default function Admin() {
         const recParams = new URLSearchParams({
           target_username: selectedUser,
           view: viewMode,
+          limit: String(ADMIN_RECOMMENDATION_PAGE_LIMIT),
+          offset: "0",
         });
 
         const [recsRes, feedbackRes] = await Promise.all([
@@ -182,10 +195,12 @@ export default function Admin() {
           throw new Error(`Failed loading feedback history (${feedbackRes.status})`);
         }
 
-        const recData = await recsRes.json();
+        const recData = await recsRes.json() as AdminRecommendationsResponse;
         const feedbackData = await feedbackRes.json();
         if (!mounted) return;
         setRecommendations(recData.recommendations ?? []);
+        setRecommendationsHasMore(Boolean(recData.has_more));
+        setRecommendationsNextOffset(typeof recData.next_offset === "number" ? recData.next_offset : null);
         setFeedbackRows(feedbackData.feedback ?? []);
       } catch (e) {
         if (!mounted) return;
@@ -202,6 +217,43 @@ export default function Admin() {
       mounted = false;
     };
   }, [me?.is_admin, selectedUser, viewMode]);
+
+  const loadMoreRecommendations = async () => {
+    if (!me?.is_admin || !selectedUser || !recommendationsHasMore || recommendationsNextOffset == null) {
+      return;
+    }
+
+    setRecommendationsLoadingMore(true);
+    setError(null);
+    try {
+      const recParams = new URLSearchParams({
+        target_username: selectedUser,
+        view: viewMode,
+        limit: String(ADMIN_RECOMMENDATION_PAGE_LIMIT),
+        offset: String(recommendationsNextOffset),
+      });
+      const res = await fetch(`/api/admin/recommendations?${recParams.toString()}`, {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        throw new Error(`Failed loading more recommendations (${res.status})`);
+      }
+      const data = await res.json() as AdminRecommendationsResponse;
+      setRecommendations((prev) => {
+        const existingKeys = new Set(prev.map((rec) => rec.rating_key));
+        return [
+          ...prev,
+          ...(data.recommendations ?? []).filter((rec) => !existingKeys.has(rec.rating_key)),
+        ];
+      });
+      setRecommendationsHasMore(Boolean(data.has_more));
+      setRecommendationsNextOffset(typeof data.next_offset === "number" ? data.next_offset : null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load more recommendations.");
+    } finally {
+      setRecommendationsLoadingMore(false);
+    }
+  };
 
   const selectedUserMeta = useMemo(
     () => users.find((u) => u.username === selectedUser) || null,
@@ -294,8 +346,8 @@ export default function Admin() {
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-              <p className="text-xs text-gray-500">Total recommendations</p>
-              <p className="text-xl font-semibold">{recommendations.length}</p>
+              <p className="text-xs text-gray-500">Loaded recommendations</p>
+              <p className="text-xl font-semibold">{recommendations.length}{recommendationsHasMore ? "+" : ""}</p>
             </div>
             <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
               <p className="text-xs text-gray-500">Feedback events</p>
@@ -308,6 +360,20 @@ export default function Admin() {
             <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
               <p className="text-xs text-gray-500">DB feedback rows</p>
               <p className="text-xl font-semibold">{selectedUserMeta?.feedback_count ?? 0}</p>
+            </div>
+            <div className="border-t px-4 py-3 text-center">
+              {recommendationsHasMore ? (
+                <button
+                  type="button"
+                  onClick={() => void loadMoreRecommendations()}
+                  disabled={recommendationsLoadingMore}
+                  className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {recommendationsLoadingMore ? "Loading..." : "Load more recommendations"}
+                </button>
+              ) : (
+                <span className="text-sm text-gray-500">Showing all loaded matches</span>
+              )}
             </div>
           </div>
 

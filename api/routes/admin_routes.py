@@ -17,7 +17,15 @@ from api.services.app_settings import (
     test_tautulli_settings,
 )
 from api.services.plex_service import get_plex_user_info
-from api.services.poster_service import build_plex_item_url, build_poster_url
+from api.routes.recommendation_routes import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    _append_paging,
+    _append_search_filter,
+    _build_order_clause,
+    _decorate_recommendation_rows,
+    _page_rows,
+)
 
 router = APIRouter()
 
@@ -196,6 +204,11 @@ def admin_get_recommendations(
     view: str = Query("all"),
     show_rating_key: Optional[int] = Query(None),
     season_rating_key: Optional[int] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    sort: Optional[list[str]] = Query(None),
+    min_probability: Optional[float] = Query(None, ge=0.0, le=1.0),
     admin_user=Depends(require_admin),
 ):
     try:
@@ -204,6 +217,12 @@ def admin_get_recommendations(
             view_key = (view or "all").lower()
             if view_key not in {"all", "movies", "shows", "seasons", "episodes"}:
                 raise HTTPException(status_code=400, detail=f"Unsupported view: {view}")
+
+            show_rating_key = show_rating_key if isinstance(show_rating_key, int) else None
+            season_rating_key = season_rating_key if isinstance(season_rating_key, int) else None
+            search = search if isinstance(search, str) else None
+            sort = sort if isinstance(sort, list) else None
+            min_probability = min_probability if isinstance(min_probability, (int, float)) else None
 
             if view_key == "shows":
                 sql = """
@@ -224,9 +243,13 @@ def admin_get_recommendations(
                            NULL::int AS parent_rating_key
                     FROM show_rollups_v
                     WHERE username = %s
-                    ORDER BY rollup_score DESC
                 """
                 params = [target_username]
+                if min_probability is not None:
+                    sql += " AND rollup_score >= %s"
+                    params.append(min_probability)
+                sql = _append_search_filter(sql, params, search, ["show_title", "genres"])
+                sql += _build_order_clause(sort)
             elif view_key == "seasons":
                 sql = """
                     SELECT friendly_name,
@@ -251,7 +274,11 @@ def admin_get_recommendations(
                 if show_rating_key is not None:
                     sql += " AND show_rating_key = %s"
                     params.append(show_rating_key)
-                sql += " ORDER BY rollup_score DESC"
+                if min_probability is not None:
+                    sql += " AND rollup_score >= %s"
+                    params.append(min_probability)
+                sql = _append_search_filter(sql, params, search, ["season_title", "show_title", "genres"])
+                sql += _build_order_clause(sort)
             else:
                 sql = """
                     SELECT friendly_name,
@@ -286,14 +313,23 @@ def admin_get_recommendations(
                 if season_rating_key is not None:
                     sql += " AND parent_rating_key = %s"
                     params.append(season_rating_key)
+                if min_probability is not None:
+                    sql += " AND predicted_probability >= %s"
+                    params.append(min_probability)
 
-                sql += " ORDER BY predicted_probability DESC"
+                sql = _append_search_filter(
+                    sql,
+                    params,
+                    search,
+                    ["title", "show_title", "genres", "semantic_themes"],
+                )
+                sql += _build_order_clause(sort)
 
+            sql = _append_paging(sql, params, limit=limit, offset=offset)
             cur.execute(sql, tuple(params))
-            rec_rows = cur.fetchall()
-            for row in rec_rows:
-                row["poster_url"] = build_poster_url(row.get("rating_key"))
-                row["plex_item_url"] = build_plex_item_url(row.get("rating_key"))
+            fetched_rows = cur.fetchall()
+            rec_rows, has_more, next_offset = _page_rows(fetched_rows, limit=limit, offset=offset)
+            _decorate_recommendation_rows(rec_rows)
 
             cur.execute(
                 """
@@ -318,6 +354,10 @@ def admin_get_recommendations(
         "recommendations": rec_rows,
         "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
         "feedback_keys": feedback_keys,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "limit": limit,
+        "offset": offset,
     }
 
 
