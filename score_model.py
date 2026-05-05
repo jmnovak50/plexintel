@@ -250,16 +250,17 @@ def get_unwatched_media(username):
             FROM media_directors md
             JOIN directors d ON md.director_id = d.id
             GROUP BY md.media_id
-	        ) d ON d.media_id = m.rating_key
-	        WHERE w.rating_key IS NULL
-	        AND m.media_type IN ('movie', 'episode')
-	        AND NOT EXISTS (
-	            SELECT 1
-	            FROM user_feedback f
-	            WHERE f.username = %s
-            AND f.rating_key = m.rating_key
-            AND f.suppress = true
-    )
+        ) d ON d.media_id = m.rating_key
+        WHERE w.rating_key IS NULL
+        AND m.media_type IN ('movie', 'episode')
+        AND NOT EXISTS (
+            SELECT 1
+            FROM user_feedback f
+            WHERE f.username = %s
+              AND f.rating_key = m.rating_key
+              AND f.suppress = true
+              AND f.feedback <> 'interested'
+        )
     """
     df = pd.read_sql(
         query,

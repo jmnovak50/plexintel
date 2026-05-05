@@ -95,6 +95,19 @@ WHERE
     feedback IN ('up', 'down')
     OR reason_code IN ('thumb_up', 'thumb_down');
 
+UPDATE public.user_feedback
+SET
+    suppress = FALSE,
+    plex_watchlist_status = CASE
+        WHEN feedback = 'interested'
+             AND COALESCE(plex_watchlist_status, '') IN ('', 'not_applicable')
+            THEN 'unresolved'
+        ELSE COALESCE(plex_watchlist_status, 'not_applicable')
+    END,
+    modified_at = COALESCE(modified_at, created_at, now())
+WHERE feedback = 'interested'
+  AND suppress IS DISTINCT FROM FALSE;
+
 WITH ranked AS (
     SELECT
         id,

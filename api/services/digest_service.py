@@ -441,7 +441,10 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
             SELECT
                 l.{group_column} AS {group_alias},
                 COUNT(*)::int AS descendant_episode_count,
-                COUNT(f.rating_key)::int AS descendant_feedback_total_count
+                COUNT(f.rating_key)::int AS descendant_feedback_total_count,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(f.suppress, FALSE) = TRUE
+                )::int AS descendant_feedback_suppress_count
             FROM public.library l
             LEFT JOIN latest_feedback f ON f.rating_key = l.rating_key
             WHERE l.media_type = 'episode'
@@ -485,7 +488,7 @@ def fetch_top_movie_recommendations(
               AND recs.media_type = 'movie'
               AND recs.predicted_probability >= %s
               AND CASE
-                    WHEN lf.feedback = 'interested' THEN TRUE
+                    WHEN lf.feedback = 'interested' THEN FALSE
                     ELSE COALESCE(lf.suppress, FALSE)
                   END = FALSE
             ORDER BY recs.predicted_probability DESC
@@ -516,7 +519,7 @@ def fetch_top_show_recommendations(
         LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
         WHERE sr.username = %s
           AND sr.rollup_score >= %s
-          AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
+          AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_suppress_count, 0)
         ORDER BY sr.rollup_score DESC
         LIMIT %s
     """

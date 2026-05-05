@@ -39,6 +39,7 @@ interface Recommendation {
   descendant_feedback_up_count?: number | null;
   descendant_feedback_down_count?: number | null;
   descendant_feedback_total_count?: number | null;
+  descendant_feedback_suppress_count?: number | null;
   descendant_interested_count?: number | null;
   descendant_never_watch_count?: number | null;
   descendant_watched_like_count?: number | null;
@@ -62,8 +63,11 @@ interface RecommendationsResponse {
 interface FeedbackApiResponse {
   status: string;
   feedback?: {
+    rating_key: number;
     feedback: FeedbackAction;
     feedback_label: string;
+    reason_code: string | null;
+    saved_at: string | null;
     plex_watchlist_status: string | null;
     suppress: boolean;
   };
@@ -217,6 +221,11 @@ function getAggregateStatusMessage(rec: Recommendation) {
   }
 
   return `${counts.tagged} / ${counts.total} tagged (${parts.join(', ')})`;
+}
+
+function getFeedbackStatusMessage(rec: Recommendation) {
+  const label = feedbackActionLabel(rec.feedback_state);
+  return label ? `Recorded: ${label}` : null;
 }
 
 function isBulkActionComplete(rec: Recommendation, action: 'interested' | 'never_watch') {
@@ -529,7 +538,7 @@ function FeedbackActionButtons({
             </div>
           </div>
         ))}
-        {rec.feedback_state === 'interested' && (
+        {rec.feedback_state && (
           <button
             type="button"
             onClick={(event) => {
@@ -644,7 +653,7 @@ function DesktopRecommendationsTable({
               const isPending = pendingKeys.includes(rec.rating_key);
               const statusMessage = canSubmitBulkFeedback(rec.media_type)
                 ? getAggregateStatusMessage(rec)
-                : null;
+                : getFeedbackStatusMessage(rec);
 
               return (
                 <tr
@@ -725,7 +734,7 @@ function MobileRecommendationsList({
         const isPending = pendingKeys.includes(rec.rating_key);
         const statusMessage = canSubmitBulkFeedback(rec.media_type)
           ? getAggregateStatusMessage(rec)
-          : null;
+          : getFeedbackStatusMessage(rec);
 
         return (
           <div
@@ -991,17 +1000,21 @@ export default function Recommendations() {
 
       const data = await res.json() as FeedbackApiResponse;
       const returnedFeedback = data.feedback;
+      const savedAction = returnedFeedback?.feedback ?? action;
+      const savedRec: Recommendation = {
+        ...rec,
+        feedback_state: savedAction,
+        feedback_suppress: returnedFeedback?.suppress ?? savedAction !== 'interested',
+        feedback_reason_code: returnedFeedback?.reason_code ?? savedAction,
+        plex_watchlist_status: returnedFeedback?.plex_watchlist_status ?? 'not_applicable',
+      };
 
-      setRecs((prev) => prev.filter((item) => item.rating_key !== rec.rating_key));
+      setRecs((prev) => prev.map((item) => (
+        item.rating_key === rec.rating_key ? { ...item, ...savedRec } : item
+      )));
       setUndoState({
-        recommendation: {
-          ...rec,
-          feedback_state: null,
-          feedback_suppress: false,
-          feedback_reason_code: null,
-          plex_watchlist_status: returnedFeedback?.plex_watchlist_status ?? 'not_applicable',
-        },
-        action,
+        recommendation: savedRec,
+        action: savedAction,
       });
     } catch (error) {
       console.error(error);

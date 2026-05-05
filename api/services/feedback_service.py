@@ -86,7 +86,7 @@ def seed_feedback_reasons(cur) -> None:
 
 def action_defaults(action: str) -> dict:
     normalized_action = normalize_feedback_action(action)
-    suppress = True
+    suppress = normalized_action != "interested"
     watchlist_status = "not_applicable"
     if normalized_action == "interested":
         watchlist_status = "unresolved"
@@ -134,6 +134,7 @@ def _build_feedback_response(
     plex_watchlist_status: str,
     plex_watchlist_synced_at,
     reason_code: Optional[str],
+    saved_at,
     title: Optional[str],
     media_type: Optional[str],
 ) -> dict:
@@ -145,6 +146,7 @@ def _build_feedback_response(
         "source": source,
         "suppress": suppress,
         "reason_code": reason_code,
+        "saved_at": saved_at,
         "plex_watchlist_status": plex_watchlist_status,
         "plex_watchlist_synced_at": plex_watchlist_synced_at,
         "title": title,
@@ -198,6 +200,8 @@ def _upsert_feedback_row(
             reason_code,
             suppress,
             source,
+            created_at,
+            modified_at,
             plex_watchlist_status,
             plex_watchlist_synced_at
         """,
@@ -264,6 +268,7 @@ def record_feedback(
         row.get("plex_watchlist_status") or "not_applicable",
         row.get("plex_watchlist_synced_at"),
         row.get("reason_code"),
+        row.get("modified_at") or row.get("created_at"),
         item.get("title"),
         item.get("media_type"),
     )

@@ -152,7 +152,7 @@ def apply_schema_updates(conn) -> None:
                     ELSE applies_to
                 END,
                 suppress_default = CASE
-                    WHEN code = 'thumb_up' THEN TRUE
+                    WHEN code = 'thumb_up' THEN FALSE
                     WHEN code = 'thumb_down' THEN TRUE
                     ELSE suppress_default
                 END
@@ -163,7 +163,7 @@ def apply_schema_updates(conn) -> None:
             """
             INSERT INTO public.feedback_reason (code, label, applies_to, suppress_default)
             VALUES
-                ('interested', 'Want to watch', 'interested', TRUE),
+                ('interested', 'Want to watch', 'interested', FALSE),
                 ('never_watch', 'Never watch', 'never_watch', TRUE),
                 ('watched_like', 'Watched, liked', 'watched_like', TRUE),
                 ('watched_dislike', 'Watched, disliked', 'watched_dislike', TRUE)
@@ -189,7 +189,7 @@ def apply_schema_updates(conn) -> None:
                     ELSE reason_code
                 END,
                 suppress = CASE
-                    WHEN feedback = 'up' THEN TRUE
+                    WHEN feedback = 'up' THEN FALSE
                     WHEN feedback = 'down' THEN TRUE
                     ELSE suppress
                 END,
@@ -208,7 +208,7 @@ def apply_schema_updates(conn) -> None:
             """
             UPDATE public.user_feedback
             SET
-                suppress = TRUE,
+                suppress = FALSE,
                 plex_watchlist_status = CASE
                     WHEN feedback = 'interested'
                          AND COALESCE(plex_watchlist_status, '') IN ('', 'not_applicable')
@@ -217,7 +217,7 @@ def apply_schema_updates(conn) -> None:
                 END,
                 modified_at = COALESCE(modified_at, created_at, now())
             WHERE feedback = 'interested'
-              AND suppress IS DISTINCT FROM TRUE
+              AND suppress IS DISTINCT FROM FALSE
             """
         )
 

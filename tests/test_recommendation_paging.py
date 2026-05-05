@@ -66,6 +66,121 @@ class RecommendationPagingTests(unittest.TestCase):
             "https://app.plex.tv/desktop/#!/server/server/details?key=%2Flibrary%2Fmetadata%2F1",
         )
 
+    def test_feedback_rollup_tracks_suppressing_descendants(self):
+        sql = recommendation_routes._feedback_rollup_cte("show_rating_key", "group_rating_key")
+
+        self.assertIn("descendant_feedback_suppress_count", sql)
+        self.assertIn("COALESCE(f.suppress, FALSE) = TRUE", sql)
+
+    def test_recommendations_route_treats_interested_as_visible(self):
+        class FakeRequest:
+            session = {"plex_token": "token"}
+
+        class FakeCursor:
+            closed = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchall(self):
+                return []
+
+            def close(self):
+                self.closed = True
+
+        class FakeConn:
+            closed = False
+
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def cursor(self, *_, **__):
+                return self.cursor_obj
+
+            def close(self):
+                self.closed = True
+
+        conn = FakeConn()
+
+        with patch.object(recommendation_routes, "connect_db", return_value=conn):
+            with patch.object(recommendation_routes, "register_vector"):
+                with patch.object(recommendation_routes, "get_plex_username", return_value="member"):
+                    recommendation_routes.get_recommendations(
+                        FakeRequest(),
+                        view="all",
+                        show_rating_key=None,
+                        season_rating_key=None,
+                        search=None,
+                        limit=100,
+                        offset=0,
+                        sort=None,
+                        min_probability=0.70,
+                    )
+
+        rec_sql = conn.cursor_obj.calls[0][0]
+        self.assertIn("WHEN lf.feedback = 'interested' THEN FALSE", rec_sql)
+        self.assertIn("ELSE COALESCE(lf.suppress, FALSE)", rec_sql)
+        self.assertIn("END = FALSE", rec_sql)
+
+    def test_show_rollups_hide_only_when_all_descendants_suppress(self):
+        class FakeRequest:
+            session = {"plex_token": "token"}
+
+        class FakeCursor:
+            closed = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchall(self):
+                return []
+
+            def close(self):
+                self.closed = True
+
+        class FakeConn:
+            closed = False
+
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def cursor(self, *_, **__):
+                return self.cursor_obj
+
+            def close(self):
+                self.closed = True
+
+        conn = FakeConn()
+
+        with patch.object(recommendation_routes, "connect_db", return_value=conn):
+            with patch.object(recommendation_routes, "register_vector"):
+                with patch.object(recommendation_routes, "get_plex_username", return_value="member"):
+                    recommendation_routes.get_recommendations(
+                        FakeRequest(),
+                        view="shows",
+                        show_rating_key=None,
+                        season_rating_key=None,
+                        search=None,
+                        limit=100,
+                        offset=0,
+                        sort=None,
+                        min_probability=0.70,
+                    )
+
+        rec_sql = conn.cursor_obj.calls[0][0]
+        self.assertIn("descendant_feedback_suppress_count", rec_sql)
+        self.assertIn(
+            "COALESCE(df.descendant_episode_count, 0) > "
+            "COALESCE(df.descendant_feedback_suppress_count, 0)",
+            rec_sql,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

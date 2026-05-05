@@ -149,6 +149,9 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
                 COUNT(*)::int AS descendant_episode_count,
                 COUNT(f.rating_key)::int AS descendant_feedback_total_count,
                 COUNT(*) FILTER (
+                    WHERE COALESCE(f.suppress, FALSE) = TRUE
+                )::int AS descendant_feedback_suppress_count,
+                COUNT(*) FILTER (
                     WHERE f.feedback IN ('interested', 'watched_like')
                 )::int AS descendant_feedback_up_count,
                 COUNT(*) FILTER (
@@ -236,6 +239,7 @@ def get_recommendations(
                     COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
                     COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
                     COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count,
+                    COALESCE(df.descendant_feedback_suppress_count, 0) AS descendant_feedback_suppress_count,
                     COALESCE(df.descendant_interested_count, 0) AS descendant_interested_count,
                     COALESCE(df.descendant_never_watch_count, 0) AS descendant_never_watch_count,
                     COALESCE(df.descendant_watched_like_count, 0) AS descendant_watched_like_count,
@@ -248,7 +252,7 @@ def get_recommendations(
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
                 WHERE sr.username = %s
                   AND sr.rollup_score >= %s
-                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
+                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_suppress_count, 0)
             """
             params = [plex_username, plex_username, display_threshold]
             sql = _append_search_filter(sql, params, search, ["sr.show_title", "sr.genres"])
@@ -276,6 +280,7 @@ def get_recommendations(
                     COALESCE(df.descendant_feedback_up_count, 0) AS descendant_feedback_up_count,
                     COALESCE(df.descendant_feedback_down_count, 0) AS descendant_feedback_down_count,
                     COALESCE(df.descendant_feedback_total_count, 0) AS descendant_feedback_total_count,
+                    COALESCE(df.descendant_feedback_suppress_count, 0) AS descendant_feedback_suppress_count,
                     COALESCE(df.descendant_interested_count, 0) AS descendant_interested_count,
                     COALESCE(df.descendant_never_watch_count, 0) AS descendant_never_watch_count,
                     COALESCE(df.descendant_watched_like_count, 0) AS descendant_watched_like_count,
@@ -288,7 +293,7 @@ def get_recommendations(
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.season_rating_key
                 WHERE sr.username = %s
                   AND sr.rollup_score >= %s
-                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_total_count, 0)
+                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_suppress_count, 0)
             """
             params = [plex_username, plex_username, display_threshold]
             if show_rating_key is not None:
@@ -330,13 +335,14 @@ def get_recommendations(
                     NULL::int AS descendant_feedback_up_count,
                     NULL::int AS descendant_feedback_down_count,
                     NULL::int AS descendant_feedback_total_count,
+                    NULL::int AS descendant_feedback_suppress_count,
                     NULL::int AS descendant_interested_count,
                     NULL::int AS descendant_never_watch_count,
                     NULL::int AS descendant_watched_like_count,
                     NULL::int AS descendant_watched_dislike_count,
                     lf.feedback AS feedback_state,
                     CASE
-                        WHEN lf.feedback = 'interested' THEN TRUE
+                        WHEN lf.feedback = 'interested' THEN FALSE
                         ELSE COALESCE(lf.suppress, FALSE)
                     END AS feedback_suppress,
                     lf.reason_code AS feedback_reason_code,
@@ -346,7 +352,7 @@ def get_recommendations(
                 WHERE recs.username = %s
                   AND recs.predicted_probability >= %s
                   AND CASE
-                      WHEN lf.feedback = 'interested' THEN TRUE
+                      WHEN lf.feedback = 'interested' THEN FALSE
                       ELSE COALESCE(lf.suppress, FALSE)
                   END = FALSE
             """
