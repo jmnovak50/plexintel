@@ -44,6 +44,8 @@ interface Recommendation {
   descendant_never_watch_count?: number | null;
   descendant_watched_like_count?: number | null;
   descendant_watched_dislike_count?: number | null;
+  visible_recommendation_episode_count?: number | null;
+  visible_recommendation_season_count?: number | null;
   feedback_state?: FeedbackAction | null;
   feedback_suppress?: boolean;
   feedback_reason_code?: string | null;
@@ -169,6 +171,10 @@ function feedbackActionLabel(action: FeedbackAction | null | undefined) {
   return FEEDBACK_ACTIONS.find((config) => config.action === action)?.label ?? null;
 }
 
+function pluralize(count: number, singular: string, plural = `${singular}s`) {
+  return count === 1 ? singular : plural;
+}
+
 const BULK_FEEDBACK_ACTIONS: Array<{
   action: 'interested' | 'never_watch';
   label: string;
@@ -197,16 +203,32 @@ function getDescendantCounts(rec: Recommendation) {
   };
 }
 
+function getVisibleRecommendationCounts(rec: Recommendation) {
+  return {
+    episodes: rec.visible_recommendation_episode_count ?? 0,
+    seasons: rec.visible_recommendation_season_count ?? 0,
+  };
+}
+
+function getVisibleRecommendationSummary(rec: Recommendation) {
+  const visible = getVisibleRecommendationCounts(rec);
+  const typeKey = rec.media_type.toLowerCase();
+  const parts = [
+    `${visible.episodes} visible ${pluralize(visible.episodes, 'recommendation')}`,
+  ];
+
+  if (typeKey === 'show' || typeKey === 'series' || typeKey === 'tv_show') {
+    parts.push(`${visible.seasons} visible ${pluralize(visible.seasons, 'season')}`);
+  }
+
+  return parts.join(', ');
+}
+
 function getAggregateStatusMessage(rec: Recommendation) {
   const counts = getDescendantCounts(rec);
+  const visibleSummary = getVisibleRecommendationSummary(rec);
   if (counts.total <= 0) {
-    return 'No episodes available';
-  }
-  if (counts.interested === counts.total) {
-    return `All ${counts.total} episodes want to watch`;
-  }
-  if (counts.neverWatch === counts.total) {
-    return `All ${counts.total} episodes marked never watch`;
+    return `${visibleSummary}; no library episodes`;
   }
 
   const parts = [
@@ -217,10 +239,10 @@ function getAggregateStatusMessage(rec: Recommendation) {
   ].filter(Boolean);
 
   if (parts.length === 0) {
-    return `0 / ${counts.total} tagged`;
+    return `${visibleSummary}; 0 / ${counts.total} library episodes tagged`;
   }
 
-  return `${counts.tagged} / ${counts.total} tagged (${parts.join(', ')})`;
+  return `${visibleSummary}; ${counts.tagged} / ${counts.total} library episodes tagged (${parts.join(', ')})`;
 }
 
 function getFeedbackStatusMessage(rec: Recommendation) {
@@ -242,6 +264,28 @@ function isBulkActionComplete(rec: Recommendation, action: 'interested' | 'never
   return action === 'interested'
     ? counts.interested >= mutableCount
     : counts.neverWatch >= mutableCount;
+}
+
+function canDrillIntoRecommendation(rec: Recommendation, viewMode: ViewMode) {
+  const visible = getVisibleRecommendationCounts(rec);
+  if (viewMode === 'shows') {
+    return visible.seasons > 0;
+  }
+  if (viewMode === 'seasons') {
+    return visible.episodes > 0;
+  }
+  return false;
+}
+
+function getEmptyRecommendationsMessage(
+  viewMode: ViewMode,
+  selectedShow: ScopedSelection | null,
+  selectedSeason: ScopedSelection | null,
+) {
+  if ((viewMode === 'seasons' && selectedShow) || (viewMode === 'episodes' && (selectedShow || selectedSeason))) {
+    return 'No visible child recommendations remain at the current threshold or feedback filters.';
+  }
+  return 'No recommendations match the current filters.';
 }
 
 function buildBulkConfirmationMessage(rec: Recommendation, action: 'interested' | 'never_watch') {
@@ -628,7 +672,7 @@ function DesktopRecommendationsTable({
   onAction: (rec: Recommendation, action: FeedbackAction) => void;
   onBulkAction: (rec: Recommendation, action: 'interested' | 'never_watch') => void;
   onUndo: (rec: Recommendation) => void;
-  isRowClickable: boolean;
+  isRowClickable: (rec: Recommendation) => boolean;
 }) {
   return (
     <div className="hidden md:block">
@@ -651,6 +695,7 @@ function DesktopRecommendationsTable({
           <tbody>
             {recommendations.map((rec) => {
               const isPending = pendingKeys.includes(rec.rating_key);
+              const canOpenRow = isRowClickable(rec);
               const statusMessage = canSubmitBulkFeedback(rec.media_type)
                 ? getAggregateStatusMessage(rec)
                 : getFeedbackStatusMessage(rec);
@@ -658,8 +703,12 @@ function DesktopRecommendationsTable({
               return (
                 <tr
                   key={rec.rating_key}
-                  onClick={() => onRowClick(rec)}
-                  className={`group border-b transition-colors duration-300 hover:bg-gray-50 ${isRowClickable ? 'cursor-pointer' : ''}`}
+                  onClick={() => {
+                    if (canOpenRow) {
+                      onRowClick(rec);
+                    }
+                  }}
+                  className={`group border-b transition-colors duration-300 hover:bg-gray-50 ${canOpenRow ? 'cursor-pointer' : ''}`}
                 >
                   <td className="px-4 py-2 text-center">
                     <MediaTypeIcon mediaType={rec.media_type} />
@@ -713,13 +762,13 @@ function MobileRecommendationsList({
   onAction: (rec: Recommendation, action: FeedbackAction) => void;
   onBulkAction: (rec: Recommendation, action: 'interested' | 'never_watch') => void;
   onUndo: (rec: Recommendation) => void;
-  isRowClickable: boolean;
+  isRowClickable: (rec: Recommendation) => boolean;
 }) {
   const handleCardKeyDown = (
     event: KeyboardEvent<HTMLDivElement>,
     rec: Recommendation,
   ) => {
-    if (!isRowClickable) {
+    if (!isRowClickable(rec)) {
       return;
     }
     if (event.key === 'Enter' || event.key === ' ') {
@@ -732,6 +781,7 @@ function MobileRecommendationsList({
     <div className="space-y-3 md:hidden">
       {recommendations.map((rec) => {
         const isPending = pendingKeys.includes(rec.rating_key);
+        const canOpenRow = isRowClickable(rec);
         const statusMessage = canSubmitBulkFeedback(rec.media_type)
           ? getAggregateStatusMessage(rec)
           : getFeedbackStatusMessage(rec);
@@ -739,11 +789,15 @@ function MobileRecommendationsList({
         return (
           <div
             key={rec.rating_key}
-            role={isRowClickable ? 'button' : undefined}
-            tabIndex={isRowClickable ? 0 : undefined}
-            onClick={() => onRowClick(rec)}
+            role={canOpenRow ? 'button' : undefined}
+            tabIndex={canOpenRow ? 0 : undefined}
+            onClick={() => {
+              if (canOpenRow) {
+                onRowClick(rec);
+              }
+            }}
             onKeyDown={(event) => handleCardKeyDown(event, rec)}
-            className={`rounded-xl border border-gray-200 bg-white p-4 text-gray-900 shadow-sm ${isRowClickable ? 'cursor-pointer active:bg-gray-50' : ''}`}
+            className={`rounded-xl border border-gray-200 bg-white p-4 text-gray-900 shadow-sm ${canOpenRow ? 'cursor-pointer active:bg-gray-50' : ''}`}
           >
             <div className="flex items-start justify-between gap-3">
               <MediaTypeBadge mediaType={rec.media_type} />
@@ -1167,6 +1221,9 @@ export default function Recommendations() {
   };
 
   const handleRowClick = (rec: Recommendation) => {
+    if (!canDrillIntoRecommendation(rec, viewMode)) {
+      return;
+    }
     if (viewMode === 'shows') {
       const showKey = rec.show_rating_key ?? rec.rating_key;
       if (!showKey) return;
@@ -1185,7 +1242,8 @@ export default function Recommendations() {
     }
   };
 
-  const isRowClickable = viewMode === 'shows' || viewMode === 'seasons';
+  const isRowClickable = (rec: Recommendation) => canDrillIntoRecommendation(rec, viewMode);
+  const emptyRecommendationsMessage = getEmptyRecommendationsMessage(viewMode, selectedShow, selectedSeason);
 
   return (
     <div className={`mx-auto w-full max-w-7xl overflow-x-hidden px-3 py-4 sm:px-4 ${darkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
@@ -1341,7 +1399,7 @@ export default function Recommendations() {
         </div>
       ) : recs.length === 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white px-4 py-6 text-sm text-gray-500 shadow-sm">
-          No recommendations match the current filters.
+          {emptyRecommendationsMessage}
         </div>
       ) : (
         <>

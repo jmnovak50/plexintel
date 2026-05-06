@@ -71,6 +71,11 @@ class RecommendationPagingTests(unittest.TestCase):
 
         self.assertIn("descendant_feedback_suppress_count", sql)
         self.assertIn("COALESCE(f.suppress, FALSE) = TRUE", sql)
+        self.assertIn("visible_recommendation_descendants", sql)
+        self.assertIn("FROM public.expanded_recs_w_label_v recs", sql)
+        self.assertIn("recs.predicted_probability >= %s", sql)
+        self.assertIn("WHEN lf.feedback = 'interested' THEN FALSE", sql)
+        self.assertIn("ELSE COALESCE(lf.suppress, FALSE)", sql)
 
     def test_recommendations_route_treats_interested_as_visible(self):
         class FakeRequest:
@@ -125,7 +130,7 @@ class RecommendationPagingTests(unittest.TestCase):
         self.assertIn("ELSE COALESCE(lf.suppress, FALSE)", rec_sql)
         self.assertIn("END = FALSE", rec_sql)
 
-    def test_show_rollups_hide_only_when_all_descendants_suppress(self):
+    def test_show_rollups_require_visible_recommendation_descendants(self):
         class FakeRequest:
             session = {"plex_token": "token"}
 
@@ -174,12 +179,74 @@ class RecommendationPagingTests(unittest.TestCase):
                     )
 
         rec_sql = conn.cursor_obj.calls[0][0]
-        self.assertIn("descendant_feedback_suppress_count", rec_sql)
-        self.assertIn(
+        rec_params = conn.cursor_obj.calls[0][1]
+        self.assertIn("JOIN visible_recommendation_scored vr", rec_sql)
+        self.assertIn("vr.visible_rollup_score AS predicted_probability", rec_sql)
+        self.assertIn("COALESCE(vr.visible_recommendation_episode_count, 0)", rec_sql)
+        self.assertNotIn("sr.rollup_score >= %s", rec_sql)
+        self.assertNotIn(
             "COALESCE(df.descendant_episode_count, 0) > "
             "COALESCE(df.descendant_feedback_suppress_count, 0)",
             rec_sql,
         )
+        self.assertEqual(rec_params, ("member", "member", 0.70, "member", 101, 0))
+
+    def test_season_rollups_require_visible_recommendation_descendants(self):
+        class FakeRequest:
+            session = {"plex_token": "token"}
+
+        class FakeCursor:
+            closed = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchall(self):
+                return []
+
+            def close(self):
+                self.closed = True
+
+        class FakeConn:
+            closed = False
+
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def cursor(self, *_, **__):
+                return self.cursor_obj
+
+            def close(self):
+                self.closed = True
+
+        conn = FakeConn()
+
+        with patch.object(recommendation_routes, "connect_db", return_value=conn):
+            with patch.object(recommendation_routes, "register_vector"):
+                with patch.object(recommendation_routes, "get_plex_username", return_value="member"):
+                    recommendation_routes.get_recommendations(
+                        FakeRequest(),
+                        view="seasons",
+                        show_rating_key=15965,
+                        season_rating_key=None,
+                        search=None,
+                        limit=100,
+                        offset=0,
+                        sort=None,
+                        min_probability=0.70,
+                    )
+
+        rec_sql = conn.cursor_obj.calls[0][0]
+        rec_params = conn.cursor_obj.calls[0][1]
+        self.assertIn("JOIN visible_recommendation_scored vr", rec_sql)
+        self.assertIn("vr.visible_rollup_score AS predicted_probability", rec_sql)
+        self.assertIn("AND vr.group_rating_key = sr.season_rating_key", rec_sql)
+        self.assertIn("AND sr.show_rating_key = %s", rec_sql)
+        self.assertNotIn("sr.rollup_score >= %s", rec_sql)
+        self.assertEqual(rec_params, ("member", "member", 0.70, "member", 15965, 101, 0))
 
 
 if __name__ == "__main__":

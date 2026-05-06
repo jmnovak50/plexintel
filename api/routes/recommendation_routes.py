@@ -166,6 +166,70 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
             WHERE l.media_type = 'episode'
               AND l.{group_column} IS NOT NULL
             GROUP BY l.{group_column}
+        ),
+        visible_recommendation_descendants AS (
+            SELECT
+                recs.rating_key,
+                recs.username,
+                recs.predicted_probability,
+                recs.scored_at,
+                recs.show_rating_key,
+                recs.parent_rating_key,
+                recs.{group_column} AS {group_alias},
+                ROW_NUMBER() OVER (
+                    PARTITION BY recs.username, recs.{group_column}
+                    ORDER BY recs.predicted_probability DESC
+                ) AS visible_rank,
+                (COUNT(*) OVER (
+                    PARTITION BY recs.username, recs.{group_column}
+                ))::int AS visible_episode_count,
+                MAX(recs.scored_at) OVER (
+                    PARTITION BY recs.username, recs.{group_column}
+                ) AS visible_last_scored_at
+            FROM public.expanded_recs_w_label_v recs
+            LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
+            WHERE recs.username = %s
+              AND recs.media_type = 'episode'
+              AND recs.predicted_probability >= %s
+              AND recs.{group_column} IS NOT NULL
+              AND CASE
+                    WHEN lf.feedback = 'interested' THEN FALSE
+                    ELSE COALESCE(lf.suppress, FALSE)
+                  END = FALSE
+        ),
+        visible_recommendation_topk AS (
+            SELECT
+                visible_recommendation_descendants.*,
+                GREATEST(
+                    1,
+                    CEIL(visible_episode_count::double precision * 0.2)::int
+                ) AS visible_top_k
+            FROM visible_recommendation_descendants
+        ),
+        visible_recommendation_rollup AS (
+            SELECT
+                username,
+                {group_alias},
+                AVG(predicted_probability) FILTER (
+                    WHERE visible_rank <= visible_top_k
+                ) AS visible_rollup_score,
+                MAX(visible_episode_count)::int AS visible_recommendation_episode_count,
+                COUNT(DISTINCT parent_rating_key) FILTER (
+                    WHERE parent_rating_key IS NOT NULL
+                )::int AS visible_recommendation_season_count,
+                MAX(visible_top_k)::int AS visible_top_k,
+                MAX(visible_last_scored_at) AS visible_scored_at
+            FROM visible_recommendation_topk
+            GROUP BY username, {group_alias}
+        ),
+        visible_recommendation_scored AS (
+            SELECT
+                visible_recommendation_rollup.*,
+                PERCENT_RANK() OVER (
+                    PARTITION BY username
+                    ORDER BY visible_rollup_score
+                ) AS visible_score_percentile
+            FROM visible_recommendation_rollup
         )
     """
 
@@ -222,7 +286,7 @@ def get_recommendations(
                     sr.friendly_name,
                     sr.show_rating_key AS rating_key,
                     sr.show_title AS title,
-                    sr.rollup_score AS predicted_probability,
+                    vr.visible_rollup_score AS predicted_probability,
                     NULL::text AS semantic_themes,
                     sr.year,
                     sr.genres,
@@ -230,8 +294,13 @@ def get_recommendations(
                     NULL::int AS season_number,
                     NULL::int AS episode_number,
                     'show'::text AS media_type,
-                    sr.scored_at,
-                    sr.score_band,
+                    vr.visible_scored_at AS scored_at,
+                    CASE
+                        WHEN vr.visible_score_percentile <= 0.2 THEN '0-20'
+                        WHEN vr.visible_score_percentile <= 0.5 THEN '21-50'
+                        WHEN vr.visible_score_percentile <= 0.8 THEN '51-80'
+                        ELSE '81-100'
+                    END AS score_band,
                     sr.show_rating_key,
                     NULL::int AS parent_rating_key,
                     sr.poster_path,
@@ -244,17 +313,20 @@ def get_recommendations(
                     COALESCE(df.descendant_never_watch_count, 0) AS descendant_never_watch_count,
                     COALESCE(df.descendant_watched_like_count, 0) AS descendant_watched_like_count,
                     COALESCE(df.descendant_watched_dislike_count, 0) AS descendant_watched_dislike_count,
+                    COALESCE(vr.visible_recommendation_episode_count, 0) AS visible_recommendation_episode_count,
+                    COALESCE(vr.visible_recommendation_season_count, 0) AS visible_recommendation_season_count,
                     NULL::text AS feedback_state,
                     FALSE AS feedback_suppress,
                     NULL::text AS feedback_reason_code,
                     'not_applicable'::text AS plex_watchlist_status
                 FROM show_rollups_v sr
+                JOIN visible_recommendation_scored vr
+                  ON vr.username = sr.username
+                 AND vr.group_rating_key = sr.show_rating_key
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
                 WHERE sr.username = %s
-                  AND sr.rollup_score >= %s
-                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_suppress_count, 0)
             """
-            params = [plex_username, plex_username, display_threshold]
+            params = [plex_username, plex_username, display_threshold, plex_username]
             sql = _append_search_filter(sql, params, search, ["sr.show_title", "sr.genres"])
             sql += _build_order_clause(sort)
         elif view_key == "seasons":
@@ -263,7 +335,7 @@ def get_recommendations(
                     sr.friendly_name,
                     sr.season_rating_key AS rating_key,
                     sr.season_title AS title,
-                    sr.rollup_score AS predicted_probability,
+                    vr.visible_rollup_score AS predicted_probability,
                     NULL::text AS semantic_themes,
                     sr.year,
                     sr.genres,
@@ -271,8 +343,13 @@ def get_recommendations(
                     sr.season_number,
                     NULL::int AS episode_number,
                     'season'::text AS media_type,
-                    sr.scored_at,
-                    sr.score_band,
+                    vr.visible_scored_at AS scored_at,
+                    CASE
+                        WHEN vr.visible_score_percentile <= 0.2 THEN '0-20'
+                        WHEN vr.visible_score_percentile <= 0.5 THEN '21-50'
+                        WHEN vr.visible_score_percentile <= 0.8 THEN '51-80'
+                        ELSE '81-100'
+                    END AS score_band,
                     sr.show_rating_key,
                     sr.show_rating_key AS parent_rating_key,
                     sr.poster_path,
@@ -285,17 +362,20 @@ def get_recommendations(
                     COALESCE(df.descendant_never_watch_count, 0) AS descendant_never_watch_count,
                     COALESCE(df.descendant_watched_like_count, 0) AS descendant_watched_like_count,
                     COALESCE(df.descendant_watched_dislike_count, 0) AS descendant_watched_dislike_count,
+                    COALESCE(vr.visible_recommendation_episode_count, 0) AS visible_recommendation_episode_count,
+                    COALESCE(vr.visible_recommendation_season_count, 0) AS visible_recommendation_season_count,
                     NULL::text AS feedback_state,
                     FALSE AS feedback_suppress,
                     NULL::text AS feedback_reason_code,
                     'not_applicable'::text AS plex_watchlist_status
                 FROM season_rollups_v sr
+                JOIN visible_recommendation_scored vr
+                  ON vr.username = sr.username
+                 AND vr.group_rating_key = sr.season_rating_key
                 LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.season_rating_key
                 WHERE sr.username = %s
-                  AND sr.rollup_score >= %s
-                  AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_suppress_count, 0)
             """
-            params = [plex_username, plex_username, display_threshold]
+            params = [plex_username, plex_username, display_threshold, plex_username]
             if show_rating_key is not None:
                 sql += " AND sr.show_rating_key = %s"
                 params.append(show_rating_key)
@@ -340,6 +420,8 @@ def get_recommendations(
                     NULL::int AS descendant_never_watch_count,
                     NULL::int AS descendant_watched_like_count,
                     NULL::int AS descendant_watched_dislike_count,
+                    NULL::int AS visible_recommendation_episode_count,
+                    NULL::int AS visible_recommendation_season_count,
                     lf.feedback AS feedback_state,
                     CASE
                         WHEN lf.feedback = 'interested' THEN FALSE

@@ -450,6 +450,60 @@ def _feedback_rollup_cte(group_column: str, group_alias: str) -> str:
             WHERE l.media_type = 'episode'
               AND l.{group_column} IS NOT NULL
             GROUP BY l.{group_column}
+        ),
+        visible_recommendation_descendants AS (
+            SELECT
+                recs.rating_key,
+                recs.username,
+                recs.predicted_probability,
+                recs.scored_at,
+                recs.parent_rating_key,
+                recs.{group_column} AS {group_alias},
+                ROW_NUMBER() OVER (
+                    PARTITION BY recs.username, recs.{group_column}
+                    ORDER BY recs.predicted_probability DESC
+                ) AS visible_rank,
+                (COUNT(*) OVER (
+                    PARTITION BY recs.username, recs.{group_column}
+                ))::int AS visible_episode_count,
+                MAX(recs.scored_at) OVER (
+                    PARTITION BY recs.username, recs.{group_column}
+                ) AS visible_last_scored_at
+            FROM public.expanded_recs_w_label_v recs
+            LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
+            WHERE recs.username = %s
+              AND recs.media_type = 'episode'
+              AND recs.predicted_probability >= %s
+              AND recs.{group_column} IS NOT NULL
+              AND CASE
+                    WHEN lf.feedback = 'interested' THEN FALSE
+                    ELSE COALESCE(lf.suppress, FALSE)
+                  END = FALSE
+        ),
+        visible_recommendation_topk AS (
+            SELECT
+                visible_recommendation_descendants.*,
+                GREATEST(
+                    1,
+                    CEIL(visible_episode_count::double precision * 0.2)::int
+                ) AS visible_top_k
+            FROM visible_recommendation_descendants
+        ),
+        visible_recommendation_rollup AS (
+            SELECT
+                username,
+                {group_alias},
+                AVG(predicted_probability) FILTER (
+                    WHERE visible_rank <= visible_top_k
+                ) AS visible_rollup_score,
+                MAX(visible_episode_count)::int AS visible_recommendation_episode_count,
+                COUNT(DISTINCT parent_rating_key) FILTER (
+                    WHERE parent_rating_key IS NOT NULL
+                )::int AS visible_recommendation_season_count,
+                MAX(visible_top_k)::int AS visible_top_k,
+                MAX(visible_last_scored_at) AS visible_scored_at
+            FROM visible_recommendation_topk
+            GROUP BY username, {group_alias}
         )
     """
 
@@ -514,17 +568,18 @@ def fetch_top_show_recommendations(
             sr.show_title AS title,
             sr.year,
             sr.genres,
-            sr.rollup_score AS predicted_probability
+            vr.visible_rollup_score AS predicted_probability
         FROM public.show_rollups_v sr
+        JOIN visible_recommendation_rollup vr
+          ON vr.username = sr.username
+         AND vr.group_rating_key = sr.show_rating_key
         LEFT JOIN descendant_feedback df ON df.group_rating_key = sr.show_rating_key
         WHERE sr.username = %s
-          AND sr.rollup_score >= %s
-          AND COALESCE(df.descendant_episode_count, 0) > COALESCE(df.descendant_feedback_suppress_count, 0)
-        ORDER BY sr.rollup_score DESC
+        ORDER BY vr.visible_rollup_score DESC
         LIMIT %s
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, (username, username, display_threshold, limit))
+        cur.execute(sql, (username, username, display_threshold, username, limit))
         return cur.fetchall()
 
 

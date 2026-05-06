@@ -189,8 +189,12 @@ class DigestServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(rows, [])
-        self.assertIn("sr.rollup_score >= %s", executed["sql"])
-        self.assertEqual(executed["params"], ("member", "member", 0.70, 5))
+        self.assertIn("visible_recommendation_descendants", executed["sql"])
+        self.assertIn("recs.predicted_probability >= %s", executed["sql"])
+        self.assertIn("JOIN visible_recommendation_rollup vr", executed["sql"])
+        self.assertIn("vr.visible_rollup_score AS predicted_probability", executed["sql"])
+        self.assertNotIn("sr.rollup_score >= %s", executed["sql"])
+        self.assertEqual(executed["params"], ("member", "member", 0.70, "member", 5))
 
     def test_run_scheduled_digest_returns_disabled_when_feature_off(self):
         with patch.object(
