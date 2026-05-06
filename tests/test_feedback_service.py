@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from api.services.feedback_service import action_defaults
+from api.services.feedback_service import action_defaults, normalize_feedback_action
 
 
 class FeedbackServiceTests(unittest.TestCase):
@@ -23,6 +23,9 @@ class FeedbackServiceTests(unittest.TestCase):
                 self.assertTrue(defaults["suppress"])
                 self.assertEqual(defaults["reason_code"], action)
                 self.assertEqual(defaults["plex_watchlist_status"], "not_applicable")
+
+    def test_legacy_thumb_up_maps_to_watched_like(self):
+        self.assertEqual(normalize_feedback_action("up"), "watched_like")
 
 
 if __name__ == "__main__":

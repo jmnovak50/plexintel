@@ -17,6 +17,11 @@ from api.services.app_settings import (
     test_tautulli_settings,
 )
 from api.services.plex_service import get_plex_user_info
+from api.services.recommendation_filter_service import (
+    latest_feedback_cte,
+    leaf_feedback_join,
+    leaf_feedback_visibility_clause,
+)
 from api.routes.recommendation_routes import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -280,48 +285,49 @@ def admin_get_recommendations(
                 sql = _append_search_filter(sql, params, search, ["season_title", "show_title", "genres"])
                 sql += _build_order_clause(sort)
             else:
-                sql = """
-                    SELECT friendly_name,
-                           rating_key,
-                           title,
-                           predicted_probability,
-                           semantic_themes,
-                           year,
-                           genres,
-                           show_title,
-                           season_number,
-                           episode_number,
-                           media_type,
-                           scored_at,
+                sql = latest_feedback_cte() + """
+                    SELECT recs.friendly_name,
+                           recs.rating_key,
+                           recs.title,
+                           recs.predicted_probability,
+                           recs.semantic_themes,
+                           recs.year,
+                           recs.genres,
+                           recs.show_title,
+                           recs.season_number,
+                           recs.episode_number,
+                           recs.media_type,
+                           recs.scored_at,
                            NULL::text AS score_band,
-                           show_rating_key,
-                           parent_rating_key
-                    FROM expanded_recs_w_label_v
-                    WHERE username = %s
-                """
-                params = [target_username]
+                           recs.show_rating_key,
+                           recs.parent_rating_key
+                    FROM expanded_recs_w_label_v recs
+                """ + leaf_feedback_join("recs") + """
+                    WHERE recs.username = %s
+                """ + leaf_feedback_visibility_clause()
+                params = [target_username, target_username]
                 if view_key == "movies":
-                    sql += " AND media_type = 'movie'"
+                    sql += " AND recs.media_type = 'movie'"
                 elif view_key == "episodes":
-                    sql += " AND media_type = 'episode'"
+                    sql += " AND recs.media_type = 'episode'"
                 else:
-                    sql += " AND media_type IN ('movie', 'episode')"
+                    sql += " AND recs.media_type IN ('movie', 'episode')"
 
                 if show_rating_key is not None:
-                    sql += " AND show_rating_key = %s"
+                    sql += " AND recs.show_rating_key = %s"
                     params.append(show_rating_key)
                 if season_rating_key is not None:
-                    sql += " AND parent_rating_key = %s"
+                    sql += " AND recs.parent_rating_key = %s"
                     params.append(season_rating_key)
                 if min_probability is not None:
-                    sql += " AND predicted_probability >= %s"
+                    sql += " AND recs.predicted_probability >= %s"
                     params.append(min_probability)
 
                 sql = _append_search_filter(
                     sql,
                     params,
                     search,
-                    ["title", "show_title", "genres", "semantic_themes"],
+                    ["recs.title", "recs.show_title", "recs.genres", "recs.semantic_themes"],
                 )
                 sql += _build_order_clause(sort)
 

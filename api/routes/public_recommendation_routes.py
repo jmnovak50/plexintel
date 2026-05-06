@@ -5,6 +5,11 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
+from api.services.recommendation_filter_service import (
+    latest_feedback_cte,
+    leaf_feedback_join,
+    leaf_feedback_visibility_clause,
+)
 
 router = APIRouter()
 
@@ -20,30 +25,32 @@ def validate_api_key(apikey: Optional[str]):
 # 📦 Shared logic for both routes
 def fetch_recommendations(username, genre, media_type, score_threshold, page, page_size):
     base_query = """
-        FROM expanded_recs_w_label_v
-        WHERE username = %s
-    """
-    params = [username]
+        FROM expanded_recs_w_label_v recs
+    """ + leaf_feedback_join("recs") + """
+        WHERE recs.username = %s
+    """ + leaf_feedback_visibility_clause()
+    params = [username, username]
 
     if genre:
-        base_query += " AND genres ILIKE %s"
+        base_query += " AND recs.genres ILIKE %s"
         params.append(f"%{genre}%")
     if media_type:
-        base_query += " AND media_type = %s"
+        base_query += " AND recs.media_type = %s"
         params.append(media_type)
     if score_threshold is not None:
-        base_query += " AND predicted_probability >= %s"
+        base_query += " AND recs.predicted_probability >= %s"
         params.append(score_threshold)
 
     offset = (page - 1) * page_size
 
-    data_query = f"""
-        SELECT rating_key, title, predicted_probability, semantic_themes, year, genres, show_title, media_type
+    data_query = latest_feedback_cte() + f"""
+        SELECT recs.rating_key, recs.title, recs.predicted_probability, recs.semantic_themes,
+               recs.year, recs.genres, recs.show_title, recs.media_type
         {base_query}
-        ORDER BY predicted_probability DESC
+        ORDER BY recs.predicted_probability DESC
         LIMIT %s OFFSET %s
     """
-    count_query = f"SELECT COUNT(*) {base_query}"
+    count_query = latest_feedback_cte() + f"SELECT COUNT(*) {base_query}"
     params_with_pagination = params + [page_size, offset]
 
     try:

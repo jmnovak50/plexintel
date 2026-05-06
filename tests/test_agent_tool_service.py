@@ -83,10 +83,12 @@ class AgentToolServiceTests(unittest.TestCase):
         self.assertEqual(response.items[0].title, "Arrival")
         self.assertEqual(response.items[0].rating, 8.0)
         executed_sql, executed_params = conn.cursor_obj.executed[0]
-        self.assertIn("media_type ILIKE %s", executed_sql)
-        self.assertIn("predicted_probability >=", executed_sql)
-        self.assertIn("predicted_probability <=", executed_sql)
-        self.assertEqual(executed_params, ["jmnovak", "movie", 0.5, 0.99, 25])
+        self.assertIn("LEFT JOIN latest_feedback", executed_sql)
+        self.assertIn("WHEN lf.feedback = 'interested' THEN FALSE", executed_sql)
+        self.assertIn("recs.media_type ILIKE %s", executed_sql)
+        self.assertIn("recs.predicted_probability >=", executed_sql)
+        self.assertIn("recs.predicted_probability <=", executed_sql)
+        self.assertEqual(executed_params, ["jmnovak", "jmnovak", "movie", 0.5, 0.99, 25])
 
     def test_search_agent_library_maps_rows(self):
         conn = FakeConnection(

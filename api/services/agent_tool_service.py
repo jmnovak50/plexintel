@@ -9,6 +9,11 @@ from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
+from api.services.recommendation_filter_service import (
+    latest_feedback_cte,
+    leaf_feedback_join,
+    leaf_feedback_visibility_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,41 +154,42 @@ def get_agent_recommendations(
     min_score: Optional[float] = None,
     max_score: Optional[float] = None,
 ) -> AgentRecommendationsResponse:
-    sql = """
+    sql = latest_feedback_cte() + """
         SELECT
-            rating_key,
-            show_title,
-            title,
-            media_type,
-            season_number,
-            episode_number,
-            year,
-            genres,
-            actors,
-            directors,
-            summary,
-            duration,
-            rating,
-            added_at,
-            predicted_probability,
-            semantic_themes
-        FROM expanded_recs_w_label_v
-        WHERE username = %s
-    """
+            recs.rating_key,
+            recs.show_title,
+            recs.title,
+            recs.media_type,
+            recs.season_number,
+            recs.episode_number,
+            recs.year,
+            recs.genres,
+            recs.actors,
+            recs.directors,
+            recs.summary,
+            recs.duration,
+            recs.rating,
+            recs.added_at,
+            recs.predicted_probability,
+            recs.semantic_themes
+        FROM expanded_recs_w_label_v recs
+    """ + leaf_feedback_join("recs") + """
+        WHERE recs.username = %s
+    """ + leaf_feedback_visibility_clause()
 
-    params: list[object] = [user]
+    params: list[object] = [user, user]
 
     if media_type:
-        sql += " AND media_type ILIKE %s"
+        sql += " AND recs.media_type ILIKE %s"
         params.append(media_type)
     if min_score is not None:
-        sql += " AND predicted_probability >= %s"
+        sql += " AND recs.predicted_probability >= %s"
         params.append(min_score)
     if max_score is not None:
-        sql += " AND predicted_probability <= %s"
+        sql += " AND recs.predicted_probability <= %s"
         params.append(max_score)
 
-    sql += " ORDER BY predicted_probability DESC LIMIT %s"
+    sql += " ORDER BY recs.predicted_probability DESC LIMIT %s"
     params.append(limit)
 
     with _get_conn() as conn:

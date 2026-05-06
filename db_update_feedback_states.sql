@@ -46,12 +46,12 @@ ALTER TABLE IF EXISTS public.feedback_reason
 UPDATE public.feedback_reason
 SET
     applies_to = CASE
-        WHEN code = 'thumb_up' THEN 'interested'
+        WHEN code = 'thumb_up' THEN 'watched_like'
         WHEN code = 'thumb_down' THEN 'never_watch'
         ELSE applies_to
     END,
     suppress_default = CASE
-        WHEN code = 'thumb_up' THEN FALSE
+        WHEN code = 'thumb_up' THEN TRUE
         WHEN code = 'thumb_down' THEN TRUE
         ELSE suppress_default
     END
@@ -71,23 +71,23 @@ ON CONFLICT (code) DO UPDATE SET
 UPDATE public.user_feedback
 SET
     feedback = CASE
-        WHEN feedback = 'up' THEN 'interested'
+        WHEN feedback = 'up' THEN 'watched_like'
         WHEN feedback = 'down' THEN 'never_watch'
         ELSE feedback
     END,
     reason_code = CASE
-        WHEN reason_code = 'thumb_up' THEN 'interested'
+        WHEN reason_code = 'thumb_up' THEN 'watched_like'
         WHEN reason_code = 'thumb_down' THEN 'never_watch'
         ELSE reason_code
     END,
     suppress = CASE
-        WHEN feedback = 'up' THEN FALSE
+        WHEN feedback = 'up' THEN TRUE
         WHEN feedback = 'down' THEN TRUE
         ELSE suppress
     END,
     plex_watchlist_status = CASE
-        WHEN feedback = 'up' AND COALESCE(plex_watchlist_status, '') IN ('', 'not_applicable')
-            THEN 'unresolved'
+        WHEN feedback = 'up'
+            THEN 'not_applicable'
         ELSE COALESCE(plex_watchlist_status, 'not_applicable')
     END,
     modified_at = COALESCE(modified_at, created_at, now())

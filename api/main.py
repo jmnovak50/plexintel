@@ -34,6 +34,11 @@ from api.services.app_settings import get_setting_value
 from api.services.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
 from api.services.pipeline_scheduler import start_pipeline_scheduler, stop_pipeline_scheduler
 from api.services.mcp_server import mcp_mount_app, mcp_runtime
+from api.services.recommendation_filter_service import (
+    latest_feedback_cte,
+    leaf_feedback_join,
+    leaf_feedback_visibility_clause,
+)
 
 
 @asynccontextmanager
@@ -152,15 +157,18 @@ async def get_recommendations(
         conn = connect_db()
         cur = conn.cursor()
 
-        query = """
-            SELECT rating_key, username, friendly_name, scored_at, media_type, show_title, title,
-                   season_number, episode_number, year, genres, predicted_probability, semantic_themes
-            FROM expanded_recs_w_label_v
-            WHERE username = %s
-              AND predicted_probability >= %s
-            ORDER BY predicted_probability DESC
+        query = latest_feedback_cte() + """
+            SELECT recs.rating_key, recs.username, recs.friendly_name, recs.scored_at, recs.media_type,
+                   recs.show_title, recs.title, recs.season_number, recs.episode_number, recs.year,
+                   recs.genres, recs.predicted_probability, recs.semantic_themes
+            FROM expanded_recs_w_label_v recs
+        """ + leaf_feedback_join("recs") + """
+            WHERE recs.username = %s
+              AND recs.predicted_probability >= %s
+        """ + leaf_feedback_visibility_clause() + """
+            ORDER BY recs.predicted_probability DESC
         """
-        cur.execute(query, (username, display_threshold))
+        cur.execute(query, (username, username, display_threshold))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         results = [dict(zip(columns, row)) for row in rows]

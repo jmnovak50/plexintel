@@ -25,7 +25,7 @@ PROTECTED_BULK_FEEDBACK_ACTIONS = {
     "watched_dislike",
 }
 LEGACY_FEEDBACK_ALIASES = {
-    "up": "interested",
+    "up": "watched_like",
     "down": "never_watch",
 }
 FEEDBACK_REASON_SEEDS = (
