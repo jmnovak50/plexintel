@@ -14,6 +14,41 @@ def _admin_user():
     return {"username": "admin", "is_admin": True}
 
 
+class _FakeCursor:
+    closed = False
+
+    def __init__(self):
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchall(self):
+        return []
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeConn:
+    closed = False
+
+    def __init__(self):
+        self.cursor_obj = _FakeCursor()
+
+    def cursor(self, *_, **__):
+        return self.cursor_obj
+
+    def close(self):
+        self.closed = True
+
+
 class AdminSettingsRouteTests(unittest.TestCase):
     def test_require_admin_rejects_non_admin_users(self):
         with self.assertRaises(HTTPException) as raised:
@@ -104,6 +139,57 @@ class AdminSettingsRouteTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 502)
         self.assertIn("Ollama test failed", raised.exception.detail)
+
+    def test_admin_recommendations_default_threshold_uses_shared_show_query(self):
+        conn = _FakeConn()
+
+        with patch.object(admin_routes, "connect_db", return_value=conn):
+            with patch.object(admin_routes, "get_default_display_threshold", return_value=0.82):
+                response = admin_routes.admin_get_recommendations(
+                    target_username="member",
+                    view="shows",
+                    show_rating_key=None,
+                    season_rating_key=None,
+                    search=None,
+                    limit=100,
+                    offset=0,
+                    sort=None,
+                    min_probability=None,
+                    admin_user=_admin_user(),
+                )
+
+        rec_sql, rec_params = conn.cursor_obj.calls[0]
+        self.assertEqual(response["display_threshold"], 0.82)
+        self.assertIn("JOIN visible_recommendation_scored vr", rec_sql)
+        self.assertIn("vr.visible_rollup_score AS predicted_probability", rec_sql)
+        self.assertIn("COALESCE(vr.visible_recommendation_episode_count, 0)", rec_sql)
+        self.assertNotIn("sr.rollup_score >= %s", rec_sql)
+        self.assertEqual(rec_params, ("member", "member", 0.82, "member", 101, 0))
+
+    def test_admin_recommendations_seasons_use_visible_child_rollups(self):
+        conn = _FakeConn()
+
+        with patch.object(admin_routes, "connect_db", return_value=conn):
+            response = admin_routes.admin_get_recommendations(
+                target_username="member",
+                view="seasons",
+                show_rating_key=15136,
+                season_rating_key=None,
+                search=None,
+                limit=100,
+                offset=0,
+                sort=None,
+                min_probability=0.70,
+                admin_user=_admin_user(),
+            )
+
+        rec_sql, rec_params = conn.cursor_obj.calls[0]
+        self.assertEqual(response["display_threshold"], 0.70)
+        self.assertIn("JOIN visible_recommendation_scored vr", rec_sql)
+        self.assertIn("AND vr.group_rating_key = sr.season_rating_key", rec_sql)
+        self.assertIn("AND sr.show_rating_key = %s", rec_sql)
+        self.assertNotIn("sr.rollup_score >= %s", rec_sql)
+        self.assertEqual(rec_params, ("member", "member", 0.70, "member", 15136, 101, 0))
 
 
 if __name__ == "__main__":

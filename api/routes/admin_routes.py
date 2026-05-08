@@ -17,19 +17,14 @@ from api.services.app_settings import (
     test_tautulli_settings,
 )
 from api.services.plex_service import get_plex_user_info
-from api.services.recommendation_filter_service import (
-    latest_feedback_cte,
-    leaf_feedback_join,
-    leaf_feedback_visibility_clause,
-)
 from api.routes.recommendation_routes import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
     _append_paging,
-    _append_search_filter,
-    _build_order_clause,
+    _build_recommendations_query,
     _decorate_recommendation_rows,
     _page_rows,
+    get_default_display_threshold,
 )
 
 router = APIRouter()
@@ -219,117 +214,17 @@ def admin_get_recommendations(
     try:
         conn = connect_db(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
-            view_key = (view or "all").lower()
-            if view_key not in {"all", "movies", "shows", "seasons", "episodes"}:
-                raise HTTPException(status_code=400, detail=f"Unsupported view: {view}")
-
-            show_rating_key = show_rating_key if isinstance(show_rating_key, int) else None
-            season_rating_key = season_rating_key if isinstance(season_rating_key, int) else None
-            search = search if isinstance(search, str) else None
-            sort = sort if isinstance(sort, list) else None
             min_probability = min_probability if isinstance(min_probability, (int, float)) else None
-
-            if view_key == "shows":
-                sql = """
-                    SELECT friendly_name,
-                           show_rating_key AS rating_key,
-                           show_title AS title,
-                           rollup_score AS predicted_probability,
-                           NULL::text AS semantic_themes,
-                           year,
-                           genres,
-                           show_title,
-                           NULL::int AS season_number,
-                           NULL::int AS episode_number,
-                           'show'::text AS media_type,
-                           scored_at,
-                           score_band,
-                           show_rating_key,
-                           NULL::int AS parent_rating_key
-                    FROM show_rollups_v
-                    WHERE username = %s
-                """
-                params = [target_username]
-                if min_probability is not None:
-                    sql += " AND rollup_score >= %s"
-                    params.append(min_probability)
-                sql = _append_search_filter(sql, params, search, ["show_title", "genres"])
-                sql += _build_order_clause(sort)
-            elif view_key == "seasons":
-                sql = """
-                    SELECT friendly_name,
-                           season_rating_key AS rating_key,
-                           season_title AS title,
-                           rollup_score AS predicted_probability,
-                           NULL::text AS semantic_themes,
-                           year,
-                           genres,
-                           show_title,
-                           season_number,
-                           NULL::int AS episode_number,
-                           'season'::text AS media_type,
-                           scored_at,
-                           score_band,
-                           show_rating_key,
-                           show_rating_key AS parent_rating_key
-                    FROM season_rollups_v
-                    WHERE username = %s
-                """
-                params = [target_username]
-                if show_rating_key is not None:
-                    sql += " AND show_rating_key = %s"
-                    params.append(show_rating_key)
-                if min_probability is not None:
-                    sql += " AND rollup_score >= %s"
-                    params.append(min_probability)
-                sql = _append_search_filter(sql, params, search, ["season_title", "show_title", "genres"])
-                sql += _build_order_clause(sort)
-            else:
-                sql = latest_feedback_cte() + """
-                    SELECT recs.friendly_name,
-                           recs.rating_key,
-                           recs.title,
-                           recs.predicted_probability,
-                           recs.semantic_themes,
-                           recs.year,
-                           recs.genres,
-                           recs.show_title,
-                           recs.season_number,
-                           recs.episode_number,
-                           recs.media_type,
-                           recs.scored_at,
-                           NULL::text AS score_band,
-                           recs.show_rating_key,
-                           recs.parent_rating_key
-                    FROM expanded_recs_w_label_v recs
-                """ + leaf_feedback_join("recs") + """
-                    WHERE recs.username = %s
-                """ + leaf_feedback_visibility_clause()
-                params = [target_username, target_username]
-                if view_key == "movies":
-                    sql += " AND recs.media_type = 'movie'"
-                elif view_key == "episodes":
-                    sql += " AND recs.media_type = 'episode'"
-                else:
-                    sql += " AND recs.media_type IN ('movie', 'episode')"
-
-                if show_rating_key is not None:
-                    sql += " AND recs.show_rating_key = %s"
-                    params.append(show_rating_key)
-                if season_rating_key is not None:
-                    sql += " AND recs.parent_rating_key = %s"
-                    params.append(season_rating_key)
-                if min_probability is not None:
-                    sql += " AND recs.predicted_probability >= %s"
-                    params.append(min_probability)
-
-                sql = _append_search_filter(
-                    sql,
-                    params,
-                    search,
-                    ["recs.title", "recs.show_title", "recs.genres", "recs.semantic_themes"],
-                )
-                sql += _build_order_clause(sort)
+            display_threshold = get_default_display_threshold() if min_probability is None else min_probability
+            sql, params = _build_recommendations_query(
+                username=target_username,
+                view=view,
+                show_rating_key=show_rating_key,
+                season_rating_key=season_rating_key,
+                search=search,
+                sort=sort,
+                display_threshold=display_threshold,
+            )
 
             sql = _append_paging(sql, params, limit=limit, offset=offset)
             cur.execute(sql, tuple(params))
@@ -360,10 +255,12 @@ def admin_get_recommendations(
         "recommendations": rec_rows,
         "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
         "feedback_keys": feedback_keys,
+        "display_threshold": display_threshold,
         "has_more": has_more,
         "next_offset": next_offset,
         "limit": limit,
         "offset": offset,
+        "threshold_note": "Raw predicted_probability values are stored unchanged; this threshold only filters display results.",
     }
 
 

@@ -39,6 +39,10 @@ class FeedbackResponse(BaseModel):
 @router.get("/recommendations", response_model=AgentRecommendationsResponse)
 def agent_get_recommendations(
     user: str = Query(..., description="Username, e.g. jmnovak"),
+    view: Optional[str] = Query(
+        None,
+        description="Optional recommendation view: all, movies, shows, seasons, or episodes.",
+    ),
     media_type: Optional[str] = Query(
         None, description="Optional filter: movie, episode, show, etc."
     ),
@@ -52,6 +56,7 @@ def agent_get_recommendations(
 ):
     return get_agent_recommendations(
         user=user,
+        view=view,
         media_type=media_type,
         limit=limit,
         min_score=min_score,

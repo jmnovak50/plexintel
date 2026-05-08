@@ -417,13 +417,19 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_recommendations",
         description=(
-            "Fetch PlexIntel recommendations for a user. Results include rating_key values; "
-            "call get_poster_image with a rating_key when the user asks to see a poster."
+            "Fetch PlexIntel recommendations for a user. Use view='shows' for clean "
+            "TV show-level recommendations, view='seasons' for season rollups, "
+            "view='movies' for movies, or view='episodes' for individual episodes. "
+            "The media_type argument remains supported for backward compatibility "
+            "(movie, episode, show, and series map to the matching view). Results "
+            "include rating_key values; call get_poster_image with a rating_key "
+            "when the user asks to see a poster."
         ),
         structured_output=True,
     )
     def mcp_get_recommendations(
         user: str,
+        view: Optional[str] = None,
         media_type: Optional[str] = None,
         limit: int = 100,
         min_score: Optional[float] = None,
@@ -431,6 +437,7 @@ def _build_mcp_server() -> FastMCP:
     ) -> AgentRecommendationsResponse:
         return get_agent_recommendations(
             user=user,
+            view=view,
             media_type=media_type,
             limit=limit,
             min_score=min_score,

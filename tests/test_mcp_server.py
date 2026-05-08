@@ -83,7 +83,7 @@ class MCPServerTests(unittest.TestCase):
                         users_result = await session.call_tool("list_users", {"username": "jm"})
                         recommendations_result = await session.call_tool(
                             "get_recommendations",
-                            {"user": "jmnovak", "limit": 5},
+                            {"user": "jmnovak", "view": "shows", "media_type": "episode", "limit": 5},
                         )
                         search_result = await session.call_tool("search_library", {"q": "blade"})
                         item_result = await session.call_tool("get_library_item", {"rating_key": 42})
@@ -214,7 +214,7 @@ class MCPServerTests(unittest.TestCase):
                     mcp_server,
                     "get_agent_recommendations",
                     return_value=recommendations_payload,
-                ):
+                ) as mock_recommendations:
                     with patch.object(mcp_server, "search_agent_library", return_value=search_payload):
                         with patch.object(mcp_server, "get_agent_library_item", return_value=item_payload):
                             with patch.object(
@@ -254,6 +254,14 @@ class MCPServerTests(unittest.TestCase):
         )
         self.assertEqual(results["users"].structuredContent["items"][0]["username"], "jmnovak")
         self.assertEqual(results["recommendations"].structuredContent["items"][0]["title"], "Arrival")
+        mock_recommendations.assert_called_once_with(
+            user="jmnovak",
+            view="shows",
+            media_type="episode",
+            limit=5,
+            min_score=None,
+            max_score=None,
+        )
         self.assertEqual(results["search"].structuredContent["items"][0]["rating_key"], 42)
         self.assertEqual(results["item"].structuredContent["summary"], "Replicants.")
         self.assertIsNone(results["poster"].structuredContent)

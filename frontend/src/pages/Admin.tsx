@@ -31,10 +31,13 @@ interface AdminRecommendation {
   year: number | null;
   predicted_probability: number;
   score_band: string | null;
+  visible_recommendation_episode_count?: number | null;
+  visible_recommendation_season_count?: number | null;
 }
 
 interface AdminRecommendationsResponse {
   recommendations?: AdminRecommendation[];
+  display_threshold?: number;
   has_more?: boolean;
   next_offset?: number | null;
 }
@@ -106,6 +109,7 @@ export default function Admin() {
   const [selectedUser, setSelectedUser] = useState("");
   const [viewMode, setViewMode] = useState<"all" | "movies" | "shows" | "seasons" | "episodes">("all");
   const [recommendations, setRecommendations] = useState<AdminRecommendation[]>([]);
+  const [recommendationsDisplayThreshold, setRecommendationsDisplayThreshold] = useState<number | null>(null);
   const [recommendationsHasMore, setRecommendationsHasMore] = useState(false);
   const [recommendationsNextOffset, setRecommendationsNextOffset] = useState<number | null>(null);
   const [recommendationsLoadingMore, setRecommendationsLoadingMore] = useState(false);
@@ -199,6 +203,9 @@ export default function Admin() {
         const feedbackData = await feedbackRes.json();
         if (!mounted) return;
         setRecommendations(recData.recommendations ?? []);
+        setRecommendationsDisplayThreshold(
+          typeof recData.display_threshold === "number" ? recData.display_threshold : null
+        );
         setRecommendationsHasMore(Boolean(recData.has_more));
         setRecommendationsNextOffset(typeof recData.next_offset === "number" ? recData.next_offset : null);
         setFeedbackRows(feedbackData.feedback ?? []);
@@ -239,6 +246,9 @@ export default function Admin() {
         throw new Error(`Failed loading more recommendations (${res.status})`);
       }
       const data = await res.json() as AdminRecommendationsResponse;
+      setRecommendationsDisplayThreshold(
+        typeof data.display_threshold === "number" ? data.display_threshold : recommendationsDisplayThreshold
+      );
       setRecommendations((prev) => {
         const existingKeys = new Set(prev.map((rec) => rec.rating_key));
         return [
@@ -348,6 +358,11 @@ export default function Admin() {
             <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
               <p className="text-xs text-gray-500">Loaded recommendations</p>
               <p className="text-xl font-semibold">{recommendations.length}{recommendationsHasMore ? "+" : ""}</p>
+              {recommendationsDisplayThreshold != null && (
+                <p className="text-xs text-gray-500">
+                  Persona threshold {(recommendationsDisplayThreshold * 100).toFixed(0)}%
+                </p>
+              )}
             </div>
             <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
               <p className="text-xs text-gray-500">Feedback events</p>

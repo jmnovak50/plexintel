@@ -9,10 +9,10 @@ from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
-from api.services.recommendation_filter_service import (
-    latest_feedback_cte,
-    leaf_feedback_join,
-    leaf_feedback_visibility_clause,
+from api.services.recommendation_query_service import (
+    _build_recommendations_query,
+    is_media_type_view_alias,
+    resolve_recommendation_view,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,13 @@ class AgentRecommendation(BaseModel):
     duration: Optional[int] = None
     rating: float | None = None
     added_at: Optional[datetime] = None
+    scored_at: Optional[datetime] = None
+    score_band: Optional[str] = None
+    show_rating_key: Optional[int] = None
+    parent_rating_key: Optional[int] = None
+    descendant_episode_count: Optional[int] = None
+    visible_recommendation_episode_count: Optional[int] = None
+    visible_recommendation_season_count: Optional[int] = None
 
 
 class AgentRecommendationsResponse(BaseModel):
@@ -150,46 +157,31 @@ def get_agent_recommendations(
     *,
     user: str,
     media_type: Optional[str] = None,
+    view: Optional[str] = None,
     limit: int = 100,
     min_score: Optional[float] = None,
     max_score: Optional[float] = None,
 ) -> AgentRecommendationsResponse:
-    sql = latest_feedback_cte() + """
-        SELECT
-            recs.rating_key,
-            recs.show_title,
-            recs.title,
-            recs.media_type,
-            recs.season_number,
-            recs.episode_number,
-            recs.year,
-            recs.genres,
-            recs.actors,
-            recs.directors,
-            recs.summary,
-            recs.duration,
-            recs.rating,
-            recs.added_at,
-            recs.predicted_probability,
-            recs.semantic_themes
-        FROM expanded_recs_w_label_v recs
-    """ + leaf_feedback_join("recs") + """
-        WHERE recs.username = %s
-    """ + leaf_feedback_visibility_clause()
-
-    params: list[object] = [user, user]
-
-    if media_type:
-        sql += " AND recs.media_type ILIKE %s"
-        params.append(media_type)
-    if min_score is not None:
-        sql += " AND recs.predicted_probability >= %s"
-        params.append(min_score)
-    if max_score is not None:
-        sql += " AND recs.predicted_probability <= %s"
-        params.append(max_score)
-
-    sql += " ORDER BY recs.predicted_probability DESC LIMIT %s"
+    view_key = resolve_recommendation_view(view=view, media_type=media_type)
+    view_was_supplied = isinstance(view, str) and bool(view.strip())
+    media_type_filter = (
+        media_type
+        if media_type and not view_was_supplied and not is_media_type_view_alias(media_type)
+        else None
+    )
+    sql, params = _build_recommendations_query(
+        username=user,
+        view=view_key,
+        show_rating_key=None,
+        season_rating_key=None,
+        search=None,
+        sort=None,
+        display_threshold=0.0,
+        score_min=min_score,
+        score_max=max_score,
+        media_type_filter=media_type_filter,
+    )
+    sql += " LIMIT %s"
     params.append(limit)
 
     with _get_conn() as conn:
@@ -214,6 +206,13 @@ def get_agent_recommendations(
             duration=row.get("duration"),
             rating=normalize_float(row.get("rating")),
             added_at=row.get("added_at"),
+            scored_at=row.get("scored_at"),
+            score_band=row.get("score_band"),
+            show_rating_key=row.get("show_rating_key"),
+            parent_rating_key=row.get("parent_rating_key"),
+            descendant_episode_count=row.get("descendant_episode_count"),
+            visible_recommendation_episode_count=row.get("visible_recommendation_episode_count"),
+            visible_recommendation_season_count=row.get("visible_recommendation_season_count"),
             explanation=row.get("semantic_themes"),
         )
         for row in rows

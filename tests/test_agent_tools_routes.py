@@ -36,13 +36,28 @@ class AgentToolsRouteTests(unittest.TestCase):
             ],
         )
 
-        with patch.object(agent_tools, "get_agent_recommendations", return_value=payload):
-            response = agent_tools.agent_get_recommendations(user="jmnovak")
+        with patch.object(agent_tools, "get_agent_recommendations", return_value=payload) as mock_get:
+            response = agent_tools.agent_get_recommendations(
+                user="jmnovak",
+                view="shows",
+                media_type="episode",
+                limit=12,
+                min_score=None,
+                max_score=None,
+            )
 
         data = jsonable_encoder(response)
         self.assertEqual(data["user"], "jmnovak")
         self.assertEqual(data["items"][0]["title"], "Arrival")
         self.assertEqual(data["items"][0]["score"], 0.88)
+        mock_get.assert_called_once_with(
+            user="jmnovak",
+            view="shows",
+            media_type="episode",
+            limit=12,
+            min_score=None,
+            max_score=None,
+        )
 
     def test_search_and_item_routes_preserve_payload_shapes(self):
         search_payload = LibrarySearchResponse(

@@ -85,10 +85,79 @@ class AgentToolServiceTests(unittest.TestCase):
         executed_sql, executed_params = conn.cursor_obj.executed[0]
         self.assertIn("LEFT JOIN latest_feedback", executed_sql)
         self.assertIn("WHEN lf.feedback = 'interested' THEN FALSE", executed_sql)
-        self.assertIn("recs.media_type ILIKE %s", executed_sql)
+        self.assertIn("recs.media_type = 'movie'", executed_sql)
         self.assertIn("recs.predicted_probability >=", executed_sql)
         self.assertIn("recs.predicted_probability <=", executed_sql)
-        self.assertEqual(executed_params, ["jmnovak", "jmnovak", "movie", 0.5, 0.99, 25])
+        self.assertEqual(executed_params, ["jmnovak", "jmnovak", 0.0, 0.5, 0.99, 25])
+
+    def test_get_agent_recommendations_supports_show_view_rollups(self):
+        scored_at = datetime(2026, 3, 1, 12, 0, 0)
+        conn = FakeConnection(
+            fetch_rows=[
+                {
+                    "rating_key": 501,
+                    "show_title": "Severance",
+                    "title": "Severance",
+                    "media_type": "show",
+                    "season_number": None,
+                    "episode_number": None,
+                    "year": 2022,
+                    "genres": "Drama, Sci-Fi",
+                    "actors": None,
+                    "directors": None,
+                    "summary": None,
+                    "duration": None,
+                    "rating": None,
+                    "added_at": None,
+                    "scored_at": scored_at,
+                    "score_band": "81-100",
+                    "show_rating_key": 501,
+                    "parent_rating_key": None,
+                    "descendant_episode_count": 19,
+                    "visible_recommendation_episode_count": 6,
+                    "visible_recommendation_season_count": 2,
+                    "predicted_probability": 0.94,
+                    "semantic_themes": None,
+                }
+            ]
+        )
+
+        with patch.object(agent_tool_service, "connect_db", return_value=conn):
+            response = agent_tool_service.get_agent_recommendations(
+                user="jmnovak",
+                view="shows",
+                limit=10,
+            )
+
+        self.assertEqual(response.count, 1)
+        self.assertEqual(response.items[0].title, "Severance")
+        self.assertEqual(response.items[0].media_type, "show")
+        self.assertEqual(response.items[0].score, 0.94)
+        self.assertEqual(response.items[0].show_rating_key, 501)
+        self.assertEqual(response.items[0].descendant_episode_count, 19)
+        self.assertEqual(response.items[0].visible_recommendation_episode_count, 6)
+        executed_sql, executed_params = conn.cursor_obj.executed[0]
+        self.assertIn("FROM show_rollups_v sr", executed_sql)
+        self.assertIn("JOIN visible_recommendation_scored vr", executed_sql)
+        self.assertIn("vr.visible_rollup_score AS predicted_probability", executed_sql)
+        self.assertEqual(executed_params, ["jmnovak", "jmnovak", 0.0, "jmnovak", 10])
+
+    def test_get_agent_recommendations_maps_show_media_type_aliases_to_rollups(self):
+        for media_type in ("show", "series"):
+            with self.subTest(media_type=media_type):
+                conn = FakeConnection(fetch_rows=[])
+
+                with patch.object(agent_tool_service, "connect_db", return_value=conn):
+                    agent_tool_service.get_agent_recommendations(
+                        user="jmnovak",
+                        media_type=media_type,
+                        limit=5,
+                    )
+
+                executed_sql, executed_params = conn.cursor_obj.executed[0]
+                self.assertIn("FROM show_rollups_v sr", executed_sql)
+                self.assertNotIn("recs.media_type ILIKE %s", executed_sql)
+                self.assertEqual(executed_params, ["jmnovak", "jmnovak", 0.0, "jmnovak", 5])
 
     def test_search_agent_library_maps_rows(self):
         conn = FakeConnection(
