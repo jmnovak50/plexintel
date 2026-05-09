@@ -84,6 +84,8 @@ The repo includes `run_daily_pipeline.sh`, which runs the full sequence (Tautull
 **Option A — In-app scheduler (recommended when the API is always running)**
 In **Admin → Settings → Nightly pipeline**, enable the scheduler and set frequency, day (for weekly), local run time, and timezone. The FastAPI process runs a background poll (default every 60s; override with `PIPELINE_SCHEDULER_INTERVAL_SECONDS`). Disable with `PIPELINE_SCHEDULER_ENABLED=false`. When this is enabled, **do not** also cron the same shell script, or you may double-run the pipeline. Monitor runs under **Admin → Pipeline runs** (`/admin/pipeline`).
 
+In-app pipeline runs also append the complete stdout/stderr for every stage to `logs/pipeline.log` by default. Override the destination with `PIPELINE_LOG_PATH`; in Docker, map the host log directory to `/app/logs` and set `PIPELINE_LOG_PATH=/app/logs/pipeline.log`.
+
 **Option B — Cron**
 Schedule `run_daily_pipeline.sh` (or the individual Python steps) with cron on the host. If you use cron, leave the in-app pipeline scheduler **disabled** in admin settings.
 

@@ -23,8 +23,10 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://jmnovak:brigid@192.168.1.9:5432/plexintel  # override host
+      PIPELINE_LOG_PATH: /app/logs/pipeline.log
     volumes:
       - .:/app
+      - ./logs:/app/logs
 
 volumes:
   postgres_data:

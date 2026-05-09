@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, time as time_of_day, timedelta
@@ -19,6 +20,8 @@ VENV_PYTHON = REPO_ROOT / "plexenv" / "bin" / "python"
 PIPELINE_ADVISORY_LOCK_ID = 884722901
 
 LOG_TAIL_MAX = 5000
+PIPELINE_LOG_PATH_ENV = "PIPELINE_LOG_PATH"
+DEFAULT_PIPELINE_LOG_PATH = REPO_ROOT / "logs" / "pipeline.log"
 
 WEEKDAY_INDEX = {
     "monday": 0,
@@ -44,6 +47,59 @@ def _tail(s: str | None, max_len: int = LOG_TAIL_MAX) -> str:
     if len(s) <= max_len:
         return s
     return s[-max_len:]
+
+
+def get_pipeline_log_path() -> Path:
+    raw_path = os.getenv(PIPELINE_LOG_PATH_ENV, "").strip()
+    if raw_path:
+        return Path(raw_path).expanduser()
+    return DEFAULT_PIPELINE_LOG_PATH
+
+
+def _append_pipeline_log(text: str) -> None:
+    try:
+        log_path = get_pipeline_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(text)
+    except Exception as exc:
+        print(f"Failed to write pipeline log file: {exc}", file=sys.stderr)
+
+
+def _log_run_event(run_id: int, message: str) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    _append_pipeline_log(f"[{timestamp}] [run:{run_id}] {message}\n")
+
+
+def _log_stage_output(
+    *,
+    run_id: int,
+    stage_key: str,
+    argv: list[str],
+    stdout: str | None,
+    stderr: str | None,
+    exit_code: int | None,
+) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    lines = [
+        "\n",
+        f"[{timestamp}] [run:{run_id}] [stage:{stage_key}] command: {shlex.join(argv)}\n",
+        f"[{timestamp}] [run:{run_id}] [stage:{stage_key}] exit_code: {exit_code}\n",
+        f"[{timestamp}] [run:{run_id}] [stage:{stage_key}] stdout:\n",
+        stdout or "",
+    ]
+    if stdout and not stdout.endswith("\n"):
+        lines.append("\n")
+    lines.extend(
+        [
+            f"[{timestamp}] [run:{run_id}] [stage:{stage_key}] stderr:\n",
+            stderr or "",
+        ]
+    )
+    if stderr and not stderr.endswith("\n"):
+        lines.append("\n")
+    lines.append(f"[{timestamp}] [run:{run_id}] [stage:{stage_key}] end\n")
+    _append_pipeline_log("".join(lines))
 
 
 def build_pipeline_stages() -> list[tuple[str, list[str]]]:
@@ -187,6 +243,10 @@ def run_pipeline(
             rid = cur.fetchone()
             run_id = rid["run_id"] if isinstance(rid, dict) else rid[0]
         conn.commit()
+        _log_run_event(
+            run_id,
+            f"Pipeline run started delivery_type={delivery_type} schedule_key={schedule_key or '-'} triggered_by={triggered_by or '-'}",
+        )
 
         env = {**os.environ}
         env.setdefault("PGHOST", env.get("PGHOST", "localhost"))
@@ -220,6 +280,14 @@ def run_pipeline(
                 )
             except Exception as exc:
                 err_msg = str(exc)
+                _log_stage_output(
+                    run_id=run_id,
+                    stage_key=stage_key,
+                    argv=argv,
+                    stdout="",
+                    stderr=err_msg,
+                    exit_code=None,
+                )
                 with conn.cursor() as cur:
                     cur.execute(
                         """
@@ -240,11 +308,20 @@ def run_pipeline(
                         (_tail(err_msg, 2000), run_id),
                     )
                 conn.commit()
+                _log_run_event(run_id, f"Pipeline run failed during stage {stage_key}: {err_msg}")
                 break
 
             out_t = _tail(proc.stdout)
             err_t = _tail(proc.stderr)
             stage_status = "success" if proc.returncode == 0 else "failed"
+            _log_stage_output(
+                run_id=run_id,
+                stage_key=stage_key,
+                argv=argv,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                exit_code=proc.returncode,
+            )
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -270,6 +347,7 @@ def run_pipeline(
                         (_tail(note, 2000), run_id),
                     )
                 conn.commit()
+                _log_run_event(run_id, f"Pipeline run failed: {note}")
                 break
         else:
             with conn.cursor() as cur:
@@ -282,6 +360,7 @@ def run_pipeline(
                     (run_id,),
                 )
             conn.commit()
+            _log_run_event(run_id, "Pipeline run completed successfully")
 
         result: dict[str, Any] = {"status": "success", "run_id": run_id}
         with conn.cursor() as cur:

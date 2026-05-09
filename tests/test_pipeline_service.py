@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -108,6 +111,47 @@ class PipelineRunTests(unittest.TestCase):
         executed_sql = " ".join(sql for sql, _params in conn.executed)
         self.assertIn("pg_try_advisory_lock", executed_sql)
         self.assertNotIn("pg_advisory_unlock", executed_sql)
+
+    def test_run_pipeline_writes_complete_stage_log_to_file(self):
+        conn = FakeConnection(
+            [
+                {"acquired": True},
+                {"run_id": 123},
+                {"stage_id": 456},
+                {"status": "success"},
+            ]
+        )
+        completed = subprocess.CompletedProcess(
+            args=["python", "stage.py"],
+            returncode=0,
+            stdout="complete stdout\nincluding a second line\n",
+            stderr="complete stderr\n",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "logs" / "pipeline.log"
+            with patch.dict("os.environ", {"PIPELINE_LOG_PATH": str(log_path)}):
+                with patch.object(pipeline_service, "connect_db", return_value=conn):
+                    with patch.object(
+                        pipeline_service,
+                        "build_pipeline_stages",
+                        return_value=[("stage_one", ["python", "stage.py"])],
+                    ):
+                        with patch.object(pipeline_service.subprocess, "run", return_value=completed):
+                            out = pipeline_service.run_pipeline(
+                                delivery_type="manual",
+                                triggered_by="admin",
+                                schedule_key=None,
+                            )
+
+            self.assertEqual(out, {"status": "success", "run_id": 123})
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertIn("[run:123] Pipeline run started", log_text)
+        self.assertIn("[stage:stage_one] command: python stage.py", log_text)
+        self.assertIn("complete stdout\nincluding a second line\n", log_text)
+        self.assertIn("complete stderr\n", log_text)
+        self.assertIn("[run:123] Pipeline run completed successfully", log_text)
 
 
 if __name__ == "__main__":
