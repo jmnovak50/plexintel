@@ -175,6 +175,38 @@ function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return count === 1 ? singular : plural;
 }
 
+function splitSemanticThemes(semanticThemes: string) {
+  const themes: string[] = [];
+  let current = '';
+  let parenDepth = 0;
+
+  for (const char of semanticThemes) {
+    if (char === '(') {
+      parenDepth += 1;
+    } else if (char === ')') {
+      parenDepth = Math.max(0, parenDepth - 1);
+    }
+
+    if (char === ',' && parenDepth === 0) {
+      const theme = current.trim();
+      if (theme) {
+        themes.push(theme);
+      }
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  const finalTheme = current.trim();
+  if (finalTheme) {
+    themes.push(finalTheme);
+  }
+
+  return themes;
+}
+
 const BULK_FEEDBACK_ACTIONS: Array<{
   action: 'interested' | 'never_watch';
   label: string;
@@ -481,12 +513,12 @@ function RecommendationThemeChips({
 
   return (
     <div className="flex flex-wrap gap-1">
-      {semanticThemes.split(',').map((tag, index) => (
+      {splitSemanticThemes(semanticThemes).map((tag, index) => (
         <span
           key={`${tag}-${index}`}
-          className={`inline-flex rounded-full bg-blue-100 text-blue-800 ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
+          className={`inline-block min-w-0 max-w-full whitespace-normal break-words rounded-full bg-blue-100 text-left leading-snug text-blue-800 ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
         >
-          {tag.trim()}
+          {tag}
         </span>
       ))}
     </div>
