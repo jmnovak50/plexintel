@@ -72,6 +72,7 @@ class Pipeline:
             default="http://192.168.1.9:8489",
             description="Base URL for PlexIntel, without a trailing slash.",
         )
+        # OpenWebUI configuration (kept for backward compatibility)
         OPENWEBUI_BASE_URL: str = Field(
             default="http://localhost:3000",
             description="Base URL for OpenWebUI, without a trailing slash.",
@@ -80,9 +81,14 @@ class Pipeline:
             default="",
             description="OpenWebUI API key for optional Gemma narration.",
         )
-        GEMMA_MODEL: str = Field(
-            default="gemma3",
-            description="OpenWebUI model id used only for optional narration.",
+        # Ollama configuration for Gemma models
+        OLLAMA_BASE_URL: str = Field(
+            default="http://localhost:11434",
+            description="Base URL for Ollama server, without a trailing slash.",
+        )
+        OLLAMA_MODEL: str = Field(
+            default="gemma4:31b-cloud",
+            description="Ollama model name for Gemma narration.",
         )
         ENABLE_GEMMA_NARRATION: bool = Field(
             default=True,
@@ -203,6 +209,19 @@ class Pipeline:
             f"{self.valves.OPENWEBUI_BASE_URL.rstrip('/')}{path}",
             json_payload=payload,
             headers=headers,
+        )
+
+    def _ollama_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send a POST request to an Ollama server.
+
+        The Ollama API is similar to OpenAI's chat endpoint but hosted locally.
+        ``path`` should start with a leading slash, e.g. ``/api/chat``.
+        """
+        url = f"{self.valves.OLLAMA_BASE_URL.rstrip('/')}{path}"
+        return self._http_json(
+            "POST",
+            url,
+            json_payload=payload,
         )
 
     def _plexintel_url(self, path: str) -> str:
@@ -574,7 +593,10 @@ class Pipeline:
     ) -> str | None:
         if not self.valves.ENABLE_GEMMA_NARRATION:
             return None
-        if not self.valves.OPENWEBUI_API_KEY or not self.valves.OPENWEBUI_BASE_URL:
+        # Determine which backend to use for narration.
+        # Prefer Ollama if its configuration is present; otherwise fall back to OpenWebUI.
+        use_ollama = bool(self.valves.OLLAMA_BASE_URL and self.valves.OLLAMA_MODEL)
+        if not use_ollama and (not self.valves.OPENWEBUI_API_KEY or not self.valves.OPENWEBUI_BASE_URL):
             return None
         facts = [
             {
@@ -589,7 +611,7 @@ class Pipeline:
             for index, item in enumerate(items, start=1)
         ]
         payload = {
-            "model": self.valves.GEMMA_MODEL,
+            "model": self.valves.OLLAMA_MODEL if use_ollama else self.valves.GEMMA_MODEL,
             "stream": False,
             "temperature": 0.2,
             "messages": [
@@ -616,7 +638,10 @@ class Pipeline:
             ],
         }
         try:
-            response = self._openwebui_post("/api/chat/completions", payload)
+            if use_ollama:
+                response = self._ollama_post("/api/chat", payload)
+            else:
+                response = self._openwebui_post("/api/chat/completions", payload)
         except PipelineHttpError:
             return None
         content = (
