@@ -19,6 +19,11 @@ from api.services.agent_tool_service import (
     search_agent_library,
 )
 from api.services.feedback_service import normalize_feedback_action, record_feedback
+from api.services.poster_markup_service import (
+    build_poster_gallery_payload,
+    coerce_gallery_entries,
+)
+from api.services.poster_service import build_public_poster_url
 
 router = APIRouter()
 
@@ -34,6 +39,35 @@ class FeedbackPayload(BaseModel):
 class FeedbackResponse(BaseModel):
     status: str
     message: str
+
+
+class PosterGalleryItemPayload(BaseModel):
+    rating_key: int
+    title: Optional[str] = None
+    media_type: Optional[str] = None
+
+
+class PosterGalleryPayload(BaseModel):
+    rating_keys: list[int] = Field(default_factory=list)
+    items: list[PosterGalleryItemPayload] = Field(default_factory=list)
+    width: int = Field(default=180, ge=1, le=1200)
+
+
+class PosterMarkupResponse(BaseModel):
+    title: str
+    rating_key: int
+    media_type: Optional[str] = None
+    poster_url: Optional[str] = None
+    image_url: Optional[str] = None
+    url: Optional[str] = None
+    markdown: str
+    html: str
+
+
+class PosterGalleryResponse(BaseModel):
+    count: int
+    items: list[PosterMarkupResponse]
+    markdown: str
 
 
 @router.get("/recommendations", response_model=AgentRecommendationsResponse)
@@ -94,6 +128,33 @@ def agent_search_library(
 @router.get("/items/{rating_key}", response_model=LibraryItem)
 def agent_get_item(rating_key: int):
     return get_agent_library_item(rating_key=rating_key)
+
+
+@router.post("/poster-gallery", response_model=PosterGalleryResponse)
+def agent_poster_gallery(payload: PosterGalleryPayload):
+    entries = coerce_gallery_entries(
+        rating_keys=payload.rating_keys,
+        items=[item.model_dump() for item in payload.items],
+    )
+
+    for entry in entries:
+        title = entry.get("title")
+        media_type = entry.get("media_type")
+        if title and media_type:
+            continue
+        try:
+            item = get_agent_library_item(rating_key=entry["rating_key"])
+            entry["title"] = title or item.title
+            entry["media_type"] = media_type or item.media_type
+        except Exception:
+            entry["title"] = title
+            entry["media_type"] = media_type
+
+    return build_poster_gallery_payload(
+        entries,
+        width=payload.width,
+        url_builder=build_public_poster_url,
+    )
 
 
 @router.get("/recent-additions", response_model=RecentLibraryAdditionsResponse)

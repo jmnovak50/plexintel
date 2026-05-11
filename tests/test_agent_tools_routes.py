@@ -112,6 +112,85 @@ class AgentToolsRouteTests(unittest.TestCase):
         self.assertEqual(data["days"], 7)
         self.assertEqual(data["items"][0]["title"], "Black Bag")
 
+    def test_poster_gallery_route_accepts_rating_keys_and_resolves_metadata(self):
+        with patch.object(
+            agent_tools,
+            "build_public_poster_url",
+            side_effect=lambda rating_key, width=None, thumb=False: (
+                f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
+            ),
+        ):
+            with patch.object(
+                agent_tools,
+                "get_agent_library_item",
+                return_value=LibraryItem(
+                    rating_key=42,
+                    title="Blade Runner 2049",
+                    media_type="movie",
+                ),
+            ) as mock_item:
+                response = agent_tools.agent_poster_gallery(
+                    agent_tools.PosterGalleryPayload(rating_keys=[42], width=240)
+                )
+
+        data = jsonable_encoder(response)
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["items"][0]["title"], "Blade Runner 2049")
+        self.assertEqual(data["items"][0]["media_type"], "movie")
+        self.assertEqual(data["items"][0]["poster_url"], "https://plexintel.example.com/api/posters/42?w=240")
+        self.assertIn(
+            "### Blade Runner 2049\n"
+            "![Poster for Blade Runner 2049](https://plexintel.example.com/api/posters/42?w=240)",
+            data["markdown"],
+        )
+        mock_item.assert_called_once_with(rating_key=42)
+
+    def test_poster_gallery_route_accepts_items_without_metadata_lookup(self):
+        with patch.object(
+            agent_tools,
+            "build_public_poster_url",
+            side_effect=lambda rating_key, width=None, thumb=False: (
+                f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
+            ),
+        ):
+            with patch.object(agent_tools, "get_agent_library_item") as mock_item:
+                response = agent_tools.agent_poster_gallery(
+                    agent_tools.PosterGalleryPayload(
+                        items=[
+                            agent_tools.PosterGalleryItemPayload(
+                                rating_key=88,
+                                title="Black Bag",
+                                media_type="movie",
+                            )
+                        ]
+                    )
+                )
+
+        data = jsonable_encoder(response)
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["items"][0]["title"], "Black Bag")
+        self.assertIn("https://plexintel.example.com/api/posters/88?w=180", data["markdown"])
+        mock_item.assert_not_called()
+
+    def test_poster_gallery_route_falls_back_when_metadata_lookup_fails(self):
+        with patch.object(
+            agent_tools,
+            "build_public_poster_url",
+            side_effect=lambda rating_key, width=None, thumb=False: (
+                f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
+            ),
+        ):
+            with patch.object(agent_tools, "get_agent_library_item", side_effect=RuntimeError("missing")):
+                response = agent_tools.agent_poster_gallery(
+                    agent_tools.PosterGalleryPayload(rating_keys=[99])
+                )
+
+        data = jsonable_encoder(response)
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["items"][0]["title"], "rating_key 99")
+        self.assertIsNone(data["items"][0]["media_type"])
+        self.assertIn("![Poster for rating_key 99]", data["markdown"])
+
     def test_users_and_watch_history_routes_preserve_payload_shapes(self):
         users_payload = AgentUsersResponse(
             count=1,
