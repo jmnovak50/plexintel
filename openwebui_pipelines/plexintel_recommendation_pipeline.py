@@ -1,17 +1,17 @@
 """
 title: PlexIntel Recommendation Pipeline
 author: jmnovak
-version: 0.1.0
+version: 0.1.2
+requirements: requests
 description: Deterministic PlexIntel recommendation, search, poster, and watch-history workflows for OpenWebUI Pipelines.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Generator, Iterator, Optional, Union
 
 from pydantic import BaseModel, Field
 import requests
@@ -34,19 +34,32 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-@dataclass
 class PipelineHttpError(Exception):
-    endpoint: str
-    status_code: int | None = None
-    detail: str | None = None
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        status_code: int | None = None,
+        detail: str | None = None,
+    ):
+        super().__init__(detail or endpoint)
+        self.endpoint = endpoint
+        self.status_code = status_code
+        self.detail = detail
 
 
-@dataclass
 class UserResolution:
-    username: str | None
-    friendly_name: str | None = None
-    candidates: list[dict[str, Any]] | None = None
-    reason: str | None = None
+    def __init__(
+        self,
+        username: str | None,
+        friendly_name: str | None = None,
+        candidates: list[dict[str, Any]] | None = None,
+        reason: str | None = None,
+    ):
+        self.username = username
+        self.friendly_name = friendly_name
+        self.candidates = candidates
+        self.reason = reason
 
     @property
     def ok(self) -> bool:
@@ -85,7 +98,11 @@ class Pipeline:
         REQUEST_TIMEOUT_S: int = Field(default=30, ge=1)
 
     def __init__(self):
+        self.id = "plexintel_recommendations"
         self.name = "PlexIntel Recommendations"
+        self.type = "pipe"
+        self.description = "Deterministic PlexIntel recommendation, search, poster, and watch-history workflows."
+        self.version = "0.1.2"
         self.valves = self.Valves(
             PLEXINTEL_BASE_URL=os.getenv("PLEXINTEL_BASE_URL", "http://192.168.1.9:8489"),
             OPENWEBUI_BASE_URL=os.getenv("OPENWEBUI_BASE_URL", "http://localhost:3000"),
@@ -111,7 +128,7 @@ class Pipeline:
         model_id: str = "",
         messages: Optional[list[dict[str, Any]]] = None,
         body: Optional[dict[str, Any]] = None,
-    ) -> str:
+    ) -> Union[str, Generator, Iterator]:
         del model_id
         body = body or {}
         messages = messages or body.get("messages") or []
