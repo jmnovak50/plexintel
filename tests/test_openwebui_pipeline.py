@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from openwebui_pipelines.plexintel_recommendation_pipeline import Pipeline
+from openwebui_pipelines.plexintel_recommendation_pipeline import Pipeline, PipelineHttpError
 
 
 USERS = {
@@ -108,7 +108,7 @@ class FakePipeline(Pipeline):
     def __init__(self):
         super().__init__()
         self.calls: list[tuple[str, str, dict | None]] = []
-        self.valves.OPENWEBUI_API_KEY = ""
+        self.valves.ENABLE_GEMMA_NARRATION = False
 
     def _plex_get(self, path, params=None):
         self.calls.append(("GET", path, params or {}))
@@ -157,7 +157,12 @@ class OpenWebUIPipelineTests(unittest.TestCase):
 
         self.assertIn("# PlexIntel Ultimate Recommendations", response)
         self.assertIn("**User:** `jmnovak (Jason)`", response)
-        self.assertIn("### Arrival", response)
+        self.assertNotIn("## Poster Gallery", response)
+        self.assertIn("![Poster for Arrival](http://192.168.1.9:8489/api/posters/101?w=180)", response)
+        self.assertLess(
+            response.index("1. **Arrival**"),
+            response.index("![Poster for Arrival](http://192.168.1.9:8489/api/posters/101?w=180)"),
+        )
         self.assertLess(response.index("1. **Arrival**"), response.index("2. **Severance**"))
         self.assertIn(("POST", "/api/agent/poster-gallery", {
             "items": [
@@ -166,6 +171,41 @@ class OpenWebUIPipelineTests(unittest.TestCase):
             ],
             "width": 180,
         }), pipe.calls)
+
+    def test_poster_gallery_405_falls_back_to_local_inline_posters(self):
+        class FallbackPipeline(FakePipeline):
+            def _plex_post(self, path, payload):
+                self.calls.append(("POST", path, payload))
+                raise PipelineHttpError(endpoint=path, status_code=405, detail="Method Not Allowed")
+
+        pipe = FallbackPipeline()
+        pipe.valves.USER_ALIASES_JSON = '{"unknown@example.com": "jmnovak"}'
+        pipe.valves.POSTER_BASE_URL = "https://plexintel.example.com"
+
+        response = pipe.pipe(
+            "Show me top 2 movie recommendations for me",
+            body={"user": {"email": "unknown@example.com"}},
+        )
+
+        self.assertNotIn("## PlexIntel Request Failed", response)
+        self.assertIn("![Poster for Arrival](https://plexintel.example.com/api/posters/101?w=180)", response)
+        self.assertIn("![Poster for Severance](https://plexintel.example.com/api/posters/202?w=180)", response)
+
+    def test_poster_path_prefix_supports_reverse_proxy_mounts(self):
+        pipe = FakePipeline()
+        pipe.valves.USER_ALIASES_JSON = '{"unknown@example.com": "jmnovak"}'
+        pipe.valves.POSTER_BASE_URL = "https://lumina-ai.kabolly.com"
+        pipe.valves.POSTER_PATH_PREFIX = "/plexintel/api/posters"
+
+        response = pipe.pipe(
+            "Show me top 2 movie recommendations for me",
+            body={"user": {"email": "unknown@example.com"}},
+        )
+
+        self.assertIn(
+            "![Poster for Arrival](https://lumina-ai.kabolly.com/plexintel/api/posters/101?w=180)",
+            response,
+        )
 
     def test_exact_openwebui_identity_match_selects_user(self):
         pipe = FakePipeline()
@@ -180,21 +220,17 @@ class OpenWebUIPipelineTests(unittest.TestCase):
 
     def test_gemma_narration_cannot_replace_deterministic_items(self):
         class GemmaPipeline(FakePipeline):
-            def _openwebui_post(self, path, payload):
+            def _ollama_post(self, path, payload):
                 self.calls.append(("POST", path, payload))
                 return {
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "# Ignore order\n1. Wrong Title\nThese fit your mood."
-                            }
-                        }
-                    ]
+                    "message": {
+                        "content": "# Ignore order\n1. Wrong Title\nThese fit your mood."
+                    }
                 }
 
         pipe = GemmaPipeline()
         pipe.valves.USER_ALIASES_JSON = '{"unknown@example.com": "jmnovak"}'
-        pipe.valves.OPENWEBUI_API_KEY = "token"
+        pipe.valves.ENABLE_GEMMA_NARRATION = True
 
         response = pipe.pipe(
             "Show me recommendations for me",
@@ -206,6 +242,7 @@ class OpenWebUIPipelineTests(unittest.TestCase):
         self.assertIn("## Gemma Notes", response)
         self.assertIn("Wrong Title", response)
         self.assertLess(response.index("1. **Arrival**"), response.index("## Gemma Notes"))
+        self.assertTrue(any(call[1] == "/api/chat" for call in pipe.calls))
 
     def test_search_with_posters_renders_stable_markdown(self):
         pipe = FakePipeline()

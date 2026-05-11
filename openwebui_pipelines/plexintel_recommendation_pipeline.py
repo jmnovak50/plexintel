@@ -1,9 +1,9 @@
 """
 title: PlexIntel Recommendation Pipeline
 author: jmnovak
-version: 0.1.2
+version: 0.1.7
 requirements: requests
-description: Deterministic PlexIntel recommendation, search, poster, and watch-history workflows for OpenWebUI Pipelines.
+description: Deterministic PlexIntel workflows with optional Ollama Gemma narration.
 """
 
 from __future__ import annotations
@@ -72,16 +72,20 @@ class Pipeline:
             default="http://192.168.1.9:8489",
             description="Base URL for PlexIntel, without a trailing slash.",
         )
-        # OpenWebUI configuration (kept for backward compatibility)
-        OPENWEBUI_BASE_URL: str = Field(
-            default="http://localhost:3000",
-            description="Base URL for OpenWebUI, without a trailing slash.",
-        )
-        OPENWEBUI_API_KEY: str = Field(
+        POSTER_BASE_URL: str = Field(
             default="",
-            description="OpenWebUI API key for optional Gemma narration.",
+            description=(
+                "Optional browser-visible base URL for poster images. Leave blank to use "
+                "PLEXINTEL_BASE_URL."
+            ),
         )
-        # Ollama configuration for Gemma models
+        POSTER_PATH_PREFIX: str = Field(
+            default="/api/posters",
+            description=(
+                "Browser-visible path prefix for poster images. Use this when PlexIntel is "
+                "published behind a reverse-proxy prefix, e.g. /plexintel/api/posters."
+            ),
+        )
         OLLAMA_BASE_URL: str = Field(
             default="http://localhost:11434",
             description="Base URL for Ollama server, without a trailing slash.",
@@ -106,14 +110,14 @@ class Pipeline:
     def __init__(self):
         self.id = "plexintel_recommendations"
         self.name = "PlexIntel Recommendations"
-        self.type = "pipe"
         self.description = "Deterministic PlexIntel recommendation, search, poster, and watch-history workflows."
-        self.version = "0.1.2"
+        self.version = "0.1.7"
         self.valves = self.Valves(
             PLEXINTEL_BASE_URL=os.getenv("PLEXINTEL_BASE_URL", "http://192.168.1.9:8489"),
-            OPENWEBUI_BASE_URL=os.getenv("OPENWEBUI_BASE_URL", "http://localhost:3000"),
-            OPENWEBUI_API_KEY=os.getenv("OPENWEBUI_API_KEY", ""),
-            GEMMA_MODEL=os.getenv("GEMMA_MODEL", "gemma3"),
+            POSTER_BASE_URL=os.getenv("POSTER_BASE_URL", ""),
+            POSTER_PATH_PREFIX=os.getenv("POSTER_PATH_PREFIX", "/api/posters"),
+            OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            OLLAMA_MODEL=os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud"),
             ENABLE_GEMMA_NARRATION=_env_bool("ENABLE_GEMMA_NARRATION", True),
             USER_ALIASES_JSON=os.getenv("USER_ALIASES_JSON", "{}"),
             DEFAULT_LIMIT=_env_int("DEFAULT_LIMIT", 8),
@@ -198,18 +202,6 @@ class Pipeline:
 
     def _plex_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._http_json("POST", self._plexintel_url(path), json_payload=payload)
-
-    def _openwebui_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {self.valves.OPENWEBUI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        return self._http_json(
-            "POST",
-            f"{self.valves.OPENWEBUI_BASE_URL.rstrip('/')}{path}",
-            json_payload=payload,
-            headers=headers,
-        )
 
     def _ollama_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Send a POST request to an Ollama server.
@@ -578,9 +570,108 @@ class Pipeline:
         ]
         if not payload_items:
             return None
-        return self._plex_post(
-            "/api/agent/poster-gallery",
-            {"items": payload_items, "width": self.valves.POSTER_WIDTH},
+        try:
+            gallery = self._plex_post(
+                "/api/agent/poster-gallery",
+                {"items": payload_items, "width": self.valves.POSTER_WIDTH},
+            )
+            return self._normalize_gallery_urls(gallery)
+        except PipelineHttpError as exc:
+            if exc.status_code not in {404, 405}:
+                raise
+            return self._build_local_poster_gallery(payload_items)
+
+    def _build_local_poster_gallery(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        poster_items = []
+        markdown_blocks = []
+        width = self.valves.POSTER_WIDTH
+
+        for item in items:
+            rating_key = item.get("rating_key")
+            if rating_key is None:
+                continue
+            title = str(item.get("title") or f"rating_key {rating_key}")
+            media_type = item.get("media_type")
+            poster_url = self._poster_url(rating_key)
+            alt = f"Poster for {title}".replace("\\", "\\\\").replace("]", "\\]")
+            markdown = f"![{alt}]({poster_url})"
+            poster_items.append(
+                {
+                    "rating_key": rating_key,
+                    "title": title,
+                    "media_type": media_type,
+                    "poster_url": poster_url,
+                    "image_url": poster_url,
+                    "url": poster_url,
+                    "markdown": markdown,
+                    "html": f'<img src="{poster_url}" alt="Poster for {title}" width="{width}" />',
+                }
+            )
+            markdown_blocks.append(f"### {title}\n{markdown}")
+
+        return {
+            "count": len(poster_items),
+            "items": poster_items,
+            "markdown": "\n\n".join(markdown_blocks),
+        }
+
+    def _normalize_gallery_urls(self, gallery: dict[str, Any]) -> dict[str, Any]:
+        items = gallery.get("items")
+        if not isinstance(items, list):
+            return gallery
+
+        normalized_items = []
+        markdown_blocks = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rating_key = item.get("rating_key")
+            if rating_key is None:
+                normalized_items.append(item)
+                continue
+            title = str(item.get("title") or f"rating_key {rating_key}")
+            poster_url = self._poster_url(rating_key)
+            markdown = f"![{self._markdown_alt(title)}]({poster_url})"
+            normalized_item = dict(item)
+            normalized_item.update(
+                {
+                    "poster_url": poster_url,
+                    "image_url": poster_url,
+                    "url": poster_url,
+                    "markdown": markdown,
+                    "html": self._poster_img_tag(poster_url, title),
+                }
+            )
+            normalized_items.append(normalized_item)
+            markdown_blocks.append(f"### {title}\n{markdown}")
+
+        normalized_gallery = dict(gallery)
+        normalized_gallery["items"] = normalized_items
+        normalized_gallery["markdown"] = "\n\n".join(markdown_blocks)
+        return normalized_gallery
+
+    def _poster_url(self, rating_key: Any) -> str:
+        base_url = (self.valves.POSTER_BASE_URL or self.valves.PLEXINTEL_BASE_URL).rstrip("/")
+        path_prefix = "/" + (self.valves.POSTER_PATH_PREFIX or "/api/posters").strip("/")
+        return f"{base_url}{path_prefix}/{rating_key}?w={self.valves.POSTER_WIDTH}"
+
+    def _markdown_alt(self, title: str) -> str:
+        return f"Poster for {title}".replace("\\", "\\\\").replace("]", "\\]")
+
+    def _poster_img_tag(self, poster_url: str, title: str) -> str:
+        return (
+            f'<img src="{self._html_attr(poster_url)}" '
+            f'alt="{self._html_attr(f"Poster for {title}")}" '
+            f'width="{int(self.valves.POSTER_WIDTH)}" />'
+        )
+
+    def _html_attr(self, value: str) -> str:
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
         )
 
     def _call_gemma_narration(
@@ -593,10 +684,7 @@ class Pipeline:
     ) -> str | None:
         if not self.valves.ENABLE_GEMMA_NARRATION:
             return None
-        # Determine which backend to use for narration.
-        # Prefer Ollama if its configuration is present; otherwise fall back to OpenWebUI.
-        use_ollama = bool(self.valves.OLLAMA_BASE_URL and self.valves.OLLAMA_MODEL)
-        if not use_ollama and (not self.valves.OPENWEBUI_API_KEY or not self.valves.OPENWEBUI_BASE_URL):
+        if not self.valves.OLLAMA_BASE_URL or not self.valves.OLLAMA_MODEL:
             return None
         facts = [
             {
@@ -611,9 +699,9 @@ class Pipeline:
             for index, item in enumerate(items, start=1)
         ]
         payload = {
-            "model": self.valves.OLLAMA_MODEL if use_ollama else self.valves.GEMMA_MODEL,
+            "model": self.valves.OLLAMA_MODEL,
             "stream": False,
-            "temperature": 0.2,
+            "options": {"temperature": 0.2},
             "messages": [
                 {
                     "role": "system",
@@ -638,17 +726,10 @@ class Pipeline:
             ],
         }
         try:
-            if use_ollama:
-                response = self._ollama_post("/api/chat", payload)
-            else:
-                response = self._openwebui_post("/api/chat/completions", payload)
+            response = self._ollama_post("/api/chat", payload)
         except PipelineHttpError:
             return None
-        content = (
-            response.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content")
-        )
+        content = response.get("message", {}).get("content")
         if not isinstance(content, str):
             return None
         return self._clean_narration(content)
@@ -679,25 +760,39 @@ class Pipeline:
             f"**View:** `{view or 'all'}`  ",
             f"**Showing:** `{len(items)}`",
             "",
-            "## Poster Gallery",
+            "## Ranked Picks",
             "",
         ]
-        if gallery and gallery.get("markdown"):
-            lines.append(gallery["markdown"])
-        else:
-            lines.append("_Poster gallery unavailable._")
-        lines.extend(["", "## Ranked Picks", ""])
 
         if not items:
             lines.append("No recommendations matched this request.")
+        poster_items = self._gallery_items_by_rating_key(gallery)
         for index, item in enumerate(items, start=1):
-            lines.extend(self._format_ranked_item(index, item))
+            poster_item = poster_items.get(item.get("rating_key"))
+            lines.extend(self._format_ranked_item(index, item, poster_item))
 
         if narration:
             lines.extend(["", "## Gemma Notes", "", narration])
         return "\n".join(lines).strip()
 
-    def _format_ranked_item(self, index: int, item: dict[str, Any]) -> list[str]:
+    def _gallery_items_by_rating_key(self, gallery: dict[str, Any] | None) -> dict[Any, dict[str, Any]]:
+        if not gallery:
+            return {}
+        gallery_items = gallery.get("items")
+        if not isinstance(gallery_items, list):
+            return {}
+        return {
+            gallery_item.get("rating_key"): gallery_item
+            for gallery_item in gallery_items
+            if isinstance(gallery_item, dict) and gallery_item.get("rating_key") is not None
+        }
+
+    def _format_ranked_item(
+        self,
+        index: int,
+        item: dict[str, Any],
+        poster_item: dict[str, Any] | None = None,
+    ) -> list[str]:
         score = item.get("score")
         score_text = f"{float(score) * 100:.0f}%" if isinstance(score, (int, float)) else "n/a"
         title = item.get("title") or f"rating_key {item.get('rating_key')}"
@@ -706,6 +801,9 @@ class Pipeline:
         lines = [
             f"{index}. **{title}**{year} - `{media}` - score `{score_text}`",
         ]
+        poster_markup = self._inline_poster_markup(poster_item, str(title))
+        if poster_markup:
+            lines.extend(["", f"   {poster_markup}"])
         context = self._series_context(item)
         if context:
             lines.append(f"   - Context: {context}")
@@ -716,6 +814,17 @@ class Pipeline:
         if reason:
             lines.append(f"   - Why: {self._truncate(str(reason), 220)}")
         return lines
+
+    def _inline_poster_markup(self, poster_item: dict[str, Any] | None, title: str) -> str | None:
+        if not poster_item:
+            return None
+        markdown = poster_item.get("markdown")
+        if isinstance(markdown, str) and markdown.strip():
+            return markdown.strip()
+        poster_url = poster_item.get("poster_url") or poster_item.get("image_url") or poster_item.get("url")
+        if not poster_url:
+            return None
+        return f"![{self._markdown_alt(title)}]({poster_url})"
 
     def _series_context(self, item: dict[str, Any]) -> str | None:
         pieces = []
