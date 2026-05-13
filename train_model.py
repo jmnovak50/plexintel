@@ -7,23 +7,74 @@ import numpy as np
 import psycopg2
 from sqlalchemy import create_engine
 import os
+from urllib.parse import urlsplit, urlunsplit
+
+from api.db.connection import get_database_url
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # Configs (adapt this to your actual setup)
-DB_URL = os.getenv("DATABASE_URL")
+DB_URL = get_database_url()
+
+
+def _redact_db_url(url):
+    if not url:
+        return "<missing>"
+
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname or ""
+        netloc = hostname
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        if parsed.username:
+            netloc = f"{parsed.username}:***@{netloc}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
+        return "<unparseable>"
+
 
 def load_training_data():
+    if not DB_URL:
+        raise RuntimeError(
+            "No database connection configured. Set DATABASE_URL or DB_NAME/DB_USER/DB_HOST/DB_PORT."
+        )
+
+    print(f"🔌 Loading training_data from {_redact_db_url(DB_URL)}")
     engine = create_engine(DB_URL)
-    query = "SELECT * FROM training_data"
+    query = "SELECT * FROM training_data WHERE embedding IS NOT NULL"
     df = pd.read_sql(query, engine)
+    print(f"📦 Loaded {len(df)} training rows with non-null embeddings.")
     return df
 
 from sklearn.preprocessing import MultiLabelBinarizer
 import ast
 
-def preprocess(df, top_k=20):
+
+def normalize_tag_list(value):
+    if isinstance(value, (list, tuple, set)):
+        return [str(tag).strip() for tag in value if str(tag).strip()]
+    if value is None or pd.isna(value):
+        return []
+    return [tag.strip() for tag in str(value).split(",") if tag.strip()]
+
+
+def preprocess(df, top_k=20, genre_top_k=None, actor_top_k=None, director_top_k=None):
     # Turn vector column into actual np.ndarray
+    if df.empty:
+        raise RuntimeError(
+            "training_data has no rows with non-null embeddings. "
+            "Run build_training_data.py and confirm it reports inserted rows in the same database."
+        )
+
+    missing_columns = [
+        col for col in ("embedding", "label", "genre_tags", "actor_tags", "director_tags", "release_year")
+        if col not in df.columns
+    ]
+    if missing_columns:
+        raise RuntimeError(
+            "training_data is missing required columns: " + ", ".join(missing_columns)
+        )
 
     def safe_embedding_parse(x):
         if isinstance(x, str):
@@ -31,6 +82,9 @@ def preprocess(df, top_k=20):
         return np.array(x, dtype=np.float32)
 
     df['embedding'] = df['embedding'].apply(safe_embedding_parse)
+    df = df[df['embedding'].apply(lambda value: value.size > 0)].copy()
+    if df.empty:
+        raise RuntimeError("training_data rows were found, but every embedding was empty.")
 
     # 🎞️ Decade features from release_year
     def get_decade_flags(year):
@@ -46,21 +100,24 @@ def preprocess(df, top_k=20):
     decade_df = df['release_year'].apply(get_decade_flags).apply(pd.Series).fillna(0).astype(int)
 
 
-    # Split tags into lists
-    df['genres'] = df['genre_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
-    df['actors'] = df['actor_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
-    df['directors'] = df['director_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
+    # Split tags into normalized lists.
+    df['genres'] = df['genre_tags'].apply(normalize_tag_list)
+    df['actors'] = df['actor_tags'].apply(normalize_tag_list)
+    df['directors'] = df['director_tags'].apply(normalize_tag_list)
 
     # Binarize top-k tags for each category
-    def binarize_tags(col_name):
+    def binarize_tags(col_name, tag_limit):
         mlb = MultiLabelBinarizer()
-        all_tags = df[col_name].explode().value_counts().nlargest(top_k).index
+        tag_counts = df[col_name].explode().dropna().value_counts()
+        all_tags = tag_counts.index if tag_limit is None else tag_counts.nlargest(tag_limit).index
         df[col_name] = df[col_name].apply(lambda tags: [tag for tag in tags if tag in all_tags])
         return pd.DataFrame(mlb.fit_transform(df[col_name]), columns=[f"{col_name[:-1]}_{t}" for t in mlb.classes_])
 
-    genre_features = binarize_tags('genres')
-    actor_features = binarize_tags('actors')
-    director_features = binarize_tags('directors')
+    actor_top_k = top_k if actor_top_k is None else actor_top_k
+    director_top_k = top_k if director_top_k is None else director_top_k
+    genre_features = binarize_tags('genres', genre_top_k)
+    actor_features = binarize_tags('actors', actor_top_k)
+    director_features = binarize_tags('directors', director_top_k)
 
     # Stack features: embedding + tag binarizations
     X = np.vstack(df['embedding'].values)

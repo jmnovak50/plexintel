@@ -68,7 +68,7 @@ CREATE VIEW public.expanded_recs_w_label_v AS
                  w.percent_complete IS NOT NULL
                  AND (
                    CASE
-                     WHEN w.percent_complete > (1)::double precision
+                     WHEN w.percent_complete >= (1)::double precision
                        THEN w.percent_complete / (100.0)::double precision
                      ELSE w.percent_complete
                    END

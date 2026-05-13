@@ -52,6 +52,8 @@ OPTIONAL_TRAINING_COLUMNS = [
 WATCH_ENGAGED_THRESHOLD = 0.60
 WATCH_ABANDONED_MAX_RATIO = 0.35
 WATCH_MIN_SECONDS = 120
+WATCH_ABANDONED_MIN_SECONDS = 600
+WATCH_ABANDONED_MIN_RATIO = 0.05
 
 
 def connect():
@@ -220,11 +222,40 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
 
     played_duration = int(row.get("total_played_seconds") or 0)
     engagement_ratio = float(row["total_engagement_ratio"])
+    max_session_engagement_ratio = float(row.get("max_session_engagement_ratio") or 0.0)
     max_single_session_seconds = int(row.get("max_single_session_seconds") or 0)
     watch_count = int(row.get("watch_count") or 0)
 
     label_source = "watch_history"
     feedback_value = feedback
+
+    feedback_config = feedback_only_config(feedback)
+    if feedback_config:
+        label, sample_weight, _feedback_engagement_ratio, label_source = feedback_config
+        return {
+            "include_training": True,
+            "username": username,
+            "rating_key": rating_key,
+            "label": label,
+            "embedding": combined_emb,
+            "genre_tags": genres,
+            "actor_tags": actors,
+            "director_tags": directors,
+            "release_year": row.get("release_year"),
+            "season_number": row.get("season_number"),
+            "episode_number": row.get("episode_number"),
+            "played_duration": int(played_duration),
+            "media_duration": int(round(float(media_duration_seconds))),
+            "engagement_ratio": engagement_ratio,
+            "watch_sim": watch_sim,
+            "sample_weight": sample_weight,
+            "label_source": label_source,
+            "feedback_value": feedback_value,
+            "engagement_type": label_source,
+            "watch_count": watch_count,
+            "max_single_session_seconds": max_single_session_seconds,
+            "total_played_seconds": int(played_duration),
+        }
 
     # Label the user's aggregate behavior for this item. Completed-over-time
     # viewing is positive; abandonment is negative only after a real start.
@@ -233,14 +264,21 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
         label = 1
         engagement_type = "engaged"
         sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
-    elif max_single_session_seconds >= WATCH_MIN_SECONDS and engagement_ratio <= WATCH_ABANDONED_MAX_RATIO:
+    elif (
+        max_single_session_seconds >= WATCH_MIN_SECONDS
+        and engagement_ratio <= WATCH_ABANDONED_MAX_RATIO
+        and (
+            max_single_session_seconds >= WATCH_ABANDONED_MIN_SECONDS
+            or max_session_engagement_ratio >= WATCH_ABANDONED_MIN_RATIO
+        )
+    ):
         label = 0
         engagement_type = "abandoned"
         sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
     elif played_duration < WATCH_MIN_SECONDS:
         return skipped_watch_row("too_short")
     else:
-        return skipped_watch_row("partial_or_uncertain")
+        return skipped_watch_row("sample_or_uncertain")
 
     return {
         "include_training": True,
@@ -275,10 +313,6 @@ def build_training_data():
 
     existing_columns = get_training_data_columns(conn)
     insert_sql, insert_columns = build_insert_sql(existing_columns)
-
-    print("🚧 Clearing existing training data...")
-    cur.execute("DELETE FROM training_data;")
-    conn.commit()
 
     print("📦 Fetching aggregated watch-based rows...")
     cur.execute("""
@@ -427,8 +461,12 @@ LEFT JOIN LATERAL (
         embedding_dim = len(sample_embedding)
         print("🔍 Detected embedding dimension:", embedding_dim)
     else:
-        print("❌ No embeddings found to detect dimension.")
-        return
+        cur.close()
+        conn.close()
+        raise RuntimeError(
+            "No joined media/user embeddings found for training data. "
+            "Leaving existing training_data unchanged."
+        )
 
     print(f"✅ Retrieved {len(watched_rows)} aggregated watched + {len(feedback_only_rows)} feedback-only rows")
 
@@ -458,7 +496,7 @@ LEFT JOIN LATERAL (
     label_counts = Counter(r["label"] for r in inserts)
 
     print(f"📊 Aggregated user/media pairs: {len(watched_rows)}")
-    print(f"🧠 Inserted into training_data: {len(inserts)}")
+    print(f"🧠 Prepared training_data records: {len(inserts)}")
     print(f"🎬 Inserted watched aggregates: {watched_insert_count}")
     print(f"🚫 Skipped invalid_duration: {watched_skip_counts.get('invalid_duration', 0)}")
     print(f"⏱️ Skipped too_short: {watched_skip_counts.get('too_short', 0)}")
@@ -486,9 +524,19 @@ LEFT JOIN LATERAL (
     )
     print(f"🔁 Rewatch-boosted positive labels: {rewatch_boosted}")
 
+    if not inserts:
+        cur.close()
+        conn.close()
+        raise RuntimeError(
+            "No valid training records were generated after engagement filtering. "
+            "Leaving existing training_data unchanged."
+        )
+
     print(f"🧠 Inserting {len(inserts)} training records...")
 
     with conn.cursor() as insert_cur:
+        print("🚧 Replacing existing training data...")
+        insert_cur.execute("DELETE FROM training_data;")
         for row in inserts:
             insert_cur.execute(insert_sql, [row.get(col) for col in insert_columns])
 

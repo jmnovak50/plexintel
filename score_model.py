@@ -148,6 +148,13 @@ def parse_vector(x):
         return np.array(ast.literal_eval(x), dtype=np.float32)
     return np.array(x, dtype=np.float32)
 
+def normalize_tag_list(value):
+    if isinstance(value, (list, tuple, set)):
+        return [str(tag).strip() for tag in value if str(tag).strip()]
+    if value is None or pd.isna(value):
+        return []
+    return [tag.strip() for tag in str(value).split(",") if tag.strip()]
+
 def get_user_watch_vector(username):
     """
     Build a per-user average watch-embedding vector (from watch_history + watch_embeddings).
@@ -221,7 +228,7 @@ def get_unwatched_media(username):
                     w.percent_complete IS NOT NULL
                     AND (
                         CASE
-                            WHEN w.percent_complete > 1 THEN w.percent_complete / 100.0
+                            WHEN w.percent_complete >= 1 THEN w.percent_complete / 100.0
                             ELSE w.percent_complete
                         END
                     ) >= %s
@@ -277,6 +284,8 @@ def get_unwatched_media(username):
     return df
 
 def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
+    feature_names_template = [str(name) for name in feature_names_template]
+
     def safe_embedding_parse(x):
         if isinstance(x, str):
             return np.array(ast.literal_eval(x), dtype=np.float32)
@@ -291,9 +300,9 @@ def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
         except:
             return {}
 
-    df['genres'] = df['genre_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
-    df['actors'] = df['actor_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
-    df['directors'] = df['director_tags'].fillna('').apply(lambda x: x.split(',') if x else [])
+    df['genres'] = df['genre_tags'].apply(normalize_tag_list)
+    df['actors'] = df['actor_tags'].apply(normalize_tag_list)
+    df['directors'] = df['director_tags'].apply(normalize_tag_list)
 
     # Parse embeddings before combination
     df['media_embedding'] = df['embedding'].apply(safe_embedding_parse)
@@ -315,11 +324,10 @@ def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
     # Combine user and media embeddings
     df['embedding'] = df.apply(lambda row: np.concatenate([row['media_embedding'], row['user_embedding']]), axis=1)
 
-    decade_df = df['year'].apply(get_decade_flags).apply(pd.Series).fillna(0).astype(int)
-
     genre_top = [f.split("_", 1)[1] for f in feature_names_template if f.startswith("genre_")]
     actor_top = [f.split("_", 1)[1] for f in feature_names_template if f.startswith("actor_")]
     director_top = [f.split("_", 1)[1] for f in feature_names_template if f.startswith("director_")]
+    decade_features = [f for f in feature_names_template if f.startswith("is_") and f.endswith("s")]
 
     def filter_known(labels, allowed_set):
         return [label for label in labels if label in allowed_set]
@@ -332,13 +340,46 @@ def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
     actor_bin = MultiLabelBinarizer(classes=actor_top)
     director_bin = MultiLabelBinarizer(classes=director_top)
 
-    genre_features = genre_bin.fit_transform(df['genres'])
-    actor_features = actor_bin.fit_transform(df['actors'])
-    director_features = director_bin.fit_transform(df['directors'])
+    embedding_features = [f"emb_{i}" for i in range(len(df['embedding'].iloc[0]))]
+    feature_df = pd.DataFrame(
+        np.vstack(df['embedding'].values),
+        columns=embedding_features,
+        index=df.index,
+    )
+    feature_df = pd.concat(
+        [
+            feature_df,
+            pd.DataFrame(
+                genre_bin.fit_transform(df['genres']),
+                columns=[f"genre_{genre}" for genre in genre_top],
+                index=df.index,
+            ),
+            pd.DataFrame(
+                actor_bin.fit_transform(df['actors']),
+                columns=[f"actor_{actor}" for actor in actor_top],
+                index=df.index,
+            ),
+            pd.DataFrame(
+                director_bin.fit_transform(df['directors']),
+                columns=[f"director_{director}" for director in director_top],
+                index=df.index,
+            ),
+        ],
+        axis=1,
+    )
 
-    X = np.vstack(df['embedding'].values)
-    X = np.hstack((X, genre_features, actor_features, director_features, decade_df.values, watch_sim.reshape(-1, 1)))
-    print("📆 Decade columns added:", list(decade_df.columns))
+    decade_df = pd.DataFrame(0, columns=decade_features, index=df.index, dtype=np.int8)
+    for idx, flags in df['year'].apply(get_decade_flags).items():
+        for feature in flags:
+            if feature in decade_df.columns:
+                decade_df.at[idx, feature] = 1
+    feature_df = pd.concat([feature_df, decade_df], axis=1)
+    feature_df["watch_sim"] = watch_sim
+
+    feature_df = feature_df.reindex(columns=feature_names_template, fill_value=0)
+    X = feature_df.values
+    active_decades = [col for col in decade_features if feature_df[col].any()]
+    print("📆 Decade columns active:", active_decades)
 
     return X, df
 
@@ -462,8 +503,10 @@ def score_and_store(username, skip_shap=False):
 
     output = df[['username', 'rating_key', 'predicted_probability', 'model_name', 'scored_at', 'rank', 'cosine_similarity', 'explanation']]
     engine = get_engine()
-    output.to_sql("recommendations", engine, if_exists="append", index=False)
-    print(f"✅ Stored {len(output)} recommendations for {username}.")
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM recommendations WHERE username = :username"), {"username": username})
+        output.to_sql("recommendations", conn, if_exists="append", index=False)
+    print(f"✅ Replaced recommendations for {username} with {len(output)} scored items.")
     if skip_shap:
         print("⏩ Skipping SHAP impact generation.")
         return
