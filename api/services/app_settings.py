@@ -113,6 +113,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         env_aliases=("TAUTULLI_API_KEY",),
         secret=True,
+        description=(
+            "Secret API key PlexIntel uses to connect to Tautulli and read users, watch history, and media activity. "
+            "This is not a tuning value. Change it only if the Tautulli key was rotated, revoked, or PlexIntel can no "
+            "longer connect to Tautulli. Keep this private."
+        ),
     ),
     _setting(
         "tautulli.base_url",
@@ -128,6 +133,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "Plex Client ID",
         "string",
         env_aliases=("PLEX_CLIENT_ID",),
+        description=(
+            "Unique client identifier Plex uses to recognize this PlexIntel install during login. Usually set once and "
+            "left alone. Change only if you are rebuilding Plex authentication or intentionally want Plex to treat this "
+            "as a new client."
+        ),
     ),
     _setting(
         "plex.product",
@@ -136,6 +146,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="PlexIntel",
         env_aliases=("PLEX_PRODUCT",),
+        description=(
+            "Product name sent to Plex during authentication. This is mostly display/identity metadata. You normally "
+            "do not need to change this unless you want Plex auth screens/logs to show a different application name."
+        ),
     ),
     _setting(
         "plex.version",
@@ -144,6 +158,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="1.0",
         env_aliases=("PLEX_VERSION",),
+        description=(
+            "Version string sent to Plex during authentication. This does not control the PlexIntel application "
+            "version. Most users should leave this alone unless you want Plex metadata to reflect a specific client "
+            "version."
+        ),
     ),
     _setting(
         "plex.redirect_uri",
@@ -152,6 +171,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="http://localhost:8489/api/auth/redirect",
         env_aliases=("PLEX_REDIRECT_URI",),
+        description=(
+            "URL Plex redirects users back to after login. Change this when your public URL, reverse proxy, host name, "
+            "or backend auth route changes. If Plex login redirects to the wrong place, this is one of the first "
+            "settings to check."
+        ),
     ),
     _setting(
         "plex.web_base_url",
@@ -177,6 +201,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         env_aliases=("PUBLIC_API_KEY",),
         secret=True,
+        description=(
+            "Secret key used by trusted scripts, agents, or external services that call PlexIntel's public API. This "
+            "is not a recommendation-tuning setting. Rotate it if it may have been exposed. Leave it stable if "
+            "external integrations already depend on it."
+        ),
     ),
     _setting(
         "agent.public_base_url",
@@ -238,6 +267,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="ollama",
         env_aliases=("LABEL_PROVIDER",),
         choices=("openai", "ollama"),
+        description=(
+            "Chooses which LLM provider PlexIntel uses for generated labels, themes, and explanation text. Use ollama "
+            "if you want local/private labeling and are comfortable with slower local inference. Use openai if you "
+            "want stronger labels and faster/more reliable language output, but are okay using a cloud API."
+        ),
     ),
     _setting(
         "labeling.openai_model",
@@ -246,6 +280,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="gpt-4",
         env_aliases=("OPENAI_LABEL_MODEL", "LABEL_MODEL"),
+        description=(
+            "OpenAI model used when labeling.provider is openai. Use a stronger model if labels feel vague, generic, "
+            "or miss obvious themes. Use a smaller/cheaper model if labeling cost or speed matters more than quality."
+        ),
     ),
     _setting(
         "labeling.ollama_model",
@@ -254,6 +292,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="gemma3",
         env_aliases=("OLLAMA_LABEL_MODEL", "LABEL_MODEL"),
+        description=(
+            "Ollama model used when labeling.provider is ollama. Use a larger/better local model if labels are too "
+            "shallow or inconsistent. Use a smaller model if your NAS/RPi is slow, CPU-bound, or timing out."
+        ),
     ),
     _setting(
         "openai.api_key",
@@ -262,6 +304,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         env_aliases=("OPENAI_API_KEY",),
         secret=True,
+        description=(
+            "Secret OpenAI API key used for OpenAI labeling. Required only if labeling.provider is set to openai. "
+            "Leave blank if using Ollama only. Treat this like a password."
+        ),
     ),
     _setting(
         "ollama.host",
@@ -270,6 +316,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="http://localhost:11434",
         env_aliases=("OLLAMA_HOST",),
+        description=(
+            "Network address of the Ollama server. Change this if Ollama moves to a different host, port, container, "
+            "or NAS. If local labeling fails immediately, verify this URL first."
+        ),
     ),
     _setting(
         "ollama.timeout_s",
@@ -279,6 +329,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=300,
         env_aliases=("OLLAMA_TIMEOUT_S",),
         minimum=1,
+        description=(
+            "Maximum number of seconds PlexIntel waits for Ollama to respond. Increase this if local labeling or "
+            "embedding calls time out, especially with larger models or CPU-only inference. Lower this if you want "
+            "failed Ollama calls to stop quickly instead of tying up the pipeline."
+        ),
     ),
     _setting(
         "ollama.threads",
@@ -288,6 +343,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=None,
         env_aliases=("OLLAMA_THREADS",),
         minimum=0,
+        description=(
+            "Number of CPU threads Ollama-related work may use. Increase this if the Ollama host has spare CPU and "
+            "you want faster local inference. Lower this if Ollama makes the machine sluggish or competes with Plex, "
+            "Postgres, Docker, or other services."
+        ),
     ),
     _setting(
         "ollama.embedding_model",
@@ -296,6 +356,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="embeddinggemma",
         env_aliases=("OLLAMA_MODEL",),
+        description=(
+            "Ollama model used to generate embeddings. Be careful changing this after embeddings already exist. "
+            "Different embedding models create different vector spaces, so old and new embeddings may not compare "
+            "cleanly. Change only when you plan to rebuild embeddings consistently."
+        ),
     ),
     _setting(
         "embeddings.batch_size",
@@ -305,6 +370,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=128,
         env_aliases=("EMBED_BATCH_SIZE",),
         minimum=1,
+        description=(
+            "Number of items embedded in one batch. Increase this to speed up embedding runs if the machine has "
+            "enough RAM and remains stable. Lower it if the pipeline runs out of memory, crashes, swaps heavily, or "
+            "slows down other services."
+        ),
     ),
     _setting(
         "embeddings.enable_media",
@@ -313,6 +383,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "boolean",
         default=True,
         env_aliases=("ENABLE_EMBED_MEDIA",),
+        description=(
+            "Controls whether PlexIntel creates embeddings for media items. Keep this enabled for normal "
+            "recommendation quality. Disable only temporarily if media embedding generation is broken, too slow, or "
+            "you want to isolate another pipeline issue."
+        ),
     ),
     _setting(
         "embeddings.enable_watches",
@@ -321,6 +396,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "boolean",
         default=True,
         env_aliases=("ENABLE_EMBED_WATCHES",),
+        description=(
+            "Controls whether PlexIntel creates embeddings for watch-history events. Keep enabled if watch-level "
+            "behavior is part of your model. Disable temporarily if watch embedding generation is slow, noisy, or "
+            "causing pipeline failures."
+        ),
     ),
     _setting(
         "embeddings.log_titles",
@@ -329,6 +409,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "boolean",
         default=True,
         env_aliases=("LOG_EMBED_TITLES",),
+        description=(
+            "Logs item titles as they are embedded. Enable this when debugging which items are being processed. "
+            "Disable it during normal operation if logs are too noisy or you do not want titles written into pipeline "
+            "logs."
+        ),
     ),
     _setting(
         "training.engagement_threshold",
@@ -338,6 +423,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=0.7,
         minimum=0.0,
         maximum=1.0,
+        description=(
+            "Completion ratio required for a watch to count as engaged during training. Raise this if the model is "
+            "treating casual sampling as a positive signal. Lower it if users often stop early but still liked the "
+            "item, or if you need more positive training examples."
+        ),
     ),
     _setting(
         "training.feedback_bonus",
@@ -345,6 +435,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "Feedback Bonus",
         "float",
         default=0.1,
+        description=(
+            "Extra influence given to explicit feedback. Increase this if thumbs up/down or training-page feedback "
+            "should override passive watch behavior more strongly. Lower it if explicit feedback is sparse, "
+            "inconsistent, or causing recommendations to swing too aggressively."
+        ),
     ),
     _setting(
         "training.enable_feedback",
@@ -352,6 +447,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "Enable Feedback Injection",
         "boolean",
         default=True,
+        description=(
+            "Includes explicit user feedback in the training data. Keep this enabled once users are giving meaningful "
+            "feedback. Turn it off only if you suspect feedback records are wrong, noisy, duplicated, or temporarily "
+            "corrupting model results."
+        ),
     ),
     _setting(
         "training.use_sample_weight",
@@ -359,6 +459,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "Use Sample Weights",
         "boolean",
         default=True,
+        description=(
+            "Lets PlexIntel weight some training examples more heavily than others. Keep this enabled when you want "
+            "strong signals - like dislikes, abandoned items, or confirmed likes - to matter more than weak signals. "
+            "Disable only for troubleshooting or if you want every training row treated equally."
+        ),
     ),
     _setting(
         "training.interested_sample_weight",
@@ -367,6 +472,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "float",
         default=0.75,
         minimum=0.0,
+        description=(
+            "Weight for \"interested\" or saved/curious feedback. Increase this if \"I'm interested\" should "
+            "meaningfully push similar items upward. Lower it if interested items are more like bookmarks and should "
+            "not be treated as strong preference signals."
+        ),
     ),
     _setting(
         "training.watched_like_sample_weight",
@@ -375,6 +485,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "float",
         default=3.0,
         minimum=0.0,
+        description=(
+            "Weight for strong positive watch behavior. Increase this if completed watches should dominate the "
+            "model's understanding of user taste. Lower it if completed watches are not always reliable likes - for "
+            "example, background watching, family viewing, or obligation viewing."
+        ),
     ),
     _setting(
         "training.negative_sample_weight",
@@ -383,6 +498,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "float",
         default=5.0,
         minimum=0.0,
+        description=(
+            "Weight for negative examples such as abandoned, disliked, or low-engagement items. Increase this if the "
+            "model keeps recommending things users appear to reject. Lower it if the model becomes too conservative "
+            "and starts suppressing too many potentially good recommendations."
+        ),
     ),
     _setting(
         "training.watch_embed_min_engagement",
@@ -393,6 +513,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("WATCH_EMBED_MIN_ENGAGEMENT",),
         minimum=0.0,
         maximum=1.0,
+        description=(
+            "Minimum engagement required before a watch contributes to watch embeddings. Raise this if partially "
+            "watched items are polluting user taste vectors. Lower it if you want more watch history included, "
+            "especially for users with limited history."
+        ),
     ),
     _setting(
         "training.movie_revisit_pending_days",
@@ -421,6 +546,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("ENGAGEMENT_THRESHOLD",),
         minimum=0.0,
         maximum=1.0,
+        description=(
+            "Completion ratio required for a watch to shape the user's preference embedding. Raise this to make user "
+            "profiles reflect only stronger likes. Lower it to make user profiles more inclusive, especially for users "
+            "with fewer watched items."
+        ),
     ),
     _setting(
         "scoring.watched_engagement_threshold",
@@ -431,6 +561,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("WATCHED_ENGAGEMENT_THRESHOLD",),
         minimum=0.0,
         maximum=1.0,
+        description=(
+            "Completion ratio used during scoring to decide whether an item is already meaningfully watched. Raise "
+            "this if partially watched items should still be eligible for recommendation. Lower it if you want to hide "
+            "anything the user has already sampled beyond a modest amount."
+        ),
     ),
     _setting(
         "recommendations.display_threshold",
@@ -451,6 +586,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=3,
         env_aliases=("SHAP_PRUNE_DAYS",),
         minimum=0,
+        description=(
+            "Number of days to keep old SHAP explanation rows. Lower this to control database growth and keep "
+            "explanations fresh. Raise it if you want to retain more explanation history for debugging, audits, or "
+            "trend analysis."
+        ),
     ),
     _setting(
         "scoring.shap_max_items",
@@ -460,6 +600,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=100,
         env_aliases=("SHAP_MAX_ITEMS",),
         minimum=1,
+        description=(
+            "Maximum number of scored recommendations that receive SHAP explanations per run. Increase this if more "
+            "recommendations need \"why this?\" explanations. Lower it if scoring is slow, SHAP storage is growing too "
+            "fast, or only top-ranked items need explanations."
+        ),
     ),
     _setting(
         "scoring.shap_raw_min_dims",
@@ -469,6 +614,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=5,
         env_aliases=("SHAP_RAW_MIN_DIMS",),
         minimum=0,
+        description=(
+            "Minimum number of raw embedding dimensions kept for each SHAP explanation. Raise this if explanations "
+            "are too thin or missing nuance. Lower it if explanations contain too many low-value dimensions."
+        ),
     ),
     _setting(
         "scoring.shap_raw_max_dims",
@@ -478,6 +627,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=20,
         env_aliases=("SHAP_RAW_MAX_DIMS",),
         minimum=0,
+        description=(
+            "Maximum number of raw embedding dimensions kept for each SHAP explanation. Lower this to reduce storage "
+            "and simplify explanations. Raise it if explanations feel incomplete or too many meaningful factors are "
+            "being cut off."
+        ),
     ),
     _setting(
         "scoring.shap_raw_cumabs_target",
@@ -488,6 +642,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("SHAP_RAW_CUMABS_TARGET",),
         minimum=0.0,
         maximum=1.0,
+        description=(
+            "Target share of total SHAP impact captured by retained raw dimensions. Raise this if you want "
+            "explanations to preserve more of the model's reasoning. Lower it if explanations are too large, too "
+            "noisy, or expensive to store."
+        ),
     ),
     _setting(
         "scoring.shap_agg_top_dims",
@@ -497,6 +656,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=50,
         env_aliases=("SHAP_AGG_TOP_DIMS",),
         minimum=0,
+        description=(
+            "Number of top dimensions used when rolling SHAP values into explanation themes. Raise this if themes "
+            "feel too narrow or repetitive. Lower it if themes feel noisy, diluted, or hard to understand."
+        ),
     ),
     _setting(
         "labeling.min_valid_items",
@@ -505,6 +668,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=6,
         minimum=1,
+        description=(
+            "Minimum number of usable examples required before labeling a dimension. Raise this if generated labels "
+            "are unreliable or based on too little evidence. Lower it if too many dimensions are skipped because "
+            "there are not enough valid examples."
+        ),
     ),
     _setting(
         "labeling.default_top_positive_items",
@@ -513,6 +681,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=6,
         minimum=1,
+        description=(
+            "Number of strongly positive example items included in labeling prompts. Increase this if labels are too "
+            "generic and need more evidence. Lower it if prompts are too long, slow, or expensive."
+        ),
     ),
     _setting(
         "labeling.default_top_negative_items",
@@ -521,6 +693,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=4,
         minimum=0,
+        description=(
+            "Number of negative/low-end example items included in labeling prompts. Increase this if labels need "
+            "better contrast between what a dimension is and is not. Lower it if negative examples confuse the model "
+            "or make labels less focused."
+        ),
     ),
     _setting(
         "labeling.default_fetch_items",
@@ -529,6 +706,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=10,
         minimum=1,
+        description=(
+            "Number of candidate items fetched before selecting examples for labeling. Increase this if prompts often "
+            "lack enough valid or diverse examples. Lower it if labeling queries are slow or retrieving too much data."
+        ),
     ),
     _setting(
         "labeling.summary_hint_chars",
@@ -537,6 +718,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=140,
         minimum=20,
+        description=(
+            "Maximum amount of summary text included per item. Increase this if the LLM needs more plot/context to "
+            "infer better labels. Lower it if prompts are too large, slow, costly, or overly influenced by long "
+            "summaries."
+        ),
     ),
     _setting(
         "labeling.max_genre_tags",
@@ -545,6 +731,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=3,
         minimum=1,
+        description=(
+            "Maximum number of genres included per item. Increase this if genre patterns are important but missing "
+            "from labels. Lower it if genre lists are cluttering prompts or making labels too genre-heavy."
+        ),
     ),
     _setting(
         "labeling.max_cast_names",
@@ -553,6 +743,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=2,
         minimum=1,
+        description=(
+            "Maximum number of cast members included per item. Increase this if actor-driven patterns matter. Lower "
+            "it if cast lists are noisy or causing the LLM to over-label dimensions around actors instead of broader "
+            "themes."
+        ),
     ),
     _setting(
         "labeling.max_director_names",
@@ -561,6 +756,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=2,
         minimum=1,
+        description=(
+            "Maximum number of directors included per item. Increase this if director/style patterns are important. "
+            "Lower it if director metadata is sparse or causing overly specific labels."
+        ),
     ),
     _setting(
         "labeling.max_items_per_user_in_prompt",
@@ -569,6 +768,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "integer",
         default=2,
         minimum=1,
+        description=(
+            "Maximum number of items per user included in a prompt. Lower this if one heavy user dominates labeling "
+            "context. Raise it if prompts need more user-specific evidence and token size is still manageable."
+        ),
     ),
     _setting(
         "smtp.server",
@@ -658,6 +861,11 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="weekly",
         env_aliases=("DIGEST_FREQUENCY",),
         choices=("daily", "weekly"),
+        description=(
+            "How often PlexIntel sends recommendation digest emails. Use weekly for a lower-noise digest that feels "
+            "more curated. Use daily only if users want frequent changes and the recommendation list updates "
+            "meaningfully each day."
+        ),
     ),
     _setting(
         "digest.weekly_day",
@@ -667,6 +875,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="monday",
         env_aliases=("DIGEST_WEEKLY_DAY",),
         choices=("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"),
+        description=(
+            "Day of week to send digest emails when frequency is weekly. Pick a day when users are most likely to "
+            "choose what to watch - for example, Friday for weekend planning. Ignored when digest frequency is daily."
+        ),
     ),
     _setting(
         "digest.send_time",
@@ -732,6 +944,12 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="daily",
         env_aliases=("PIPELINE_FREQUENCY",),
         choices=("daily", "weekly"),
+        description=(
+            "How often PlexIntel runs the automated sync, embedding, training, scoring, and labeling process. Use "
+            "daily for fresher recommendations. Use weekly if the machine is resource-constrained, the library "
+            "changes slowly, or training/scoring takes too long. Do not run both the in-app scheduler and a separate "
+            "cron job for the same pipeline, or you may double-run it."
+        ),
     ),
     _setting(
         "pipeline.weekly_day",
@@ -741,6 +959,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="sunday",
         env_aliases=("PIPELINE_WEEKLY_DAY",),
         choices=("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"),
+        description=(
+            "Day of week to run the pipeline when frequency is weekly. Pick a low-usage day or overnight window before "
+            "digest emails are sent. Ignored when pipeline frequency is daily."
+        ),
     ),
     _setting(
         "pipeline.run_time",
