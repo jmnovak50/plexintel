@@ -158,6 +158,13 @@ from sklearn.model_selection import train_test_split
 def train_and_evaluate(X, y, sample_weight):
     from sklearn.model_selection import train_test_split
 
+    def class_balanced_sample_weights(labels, base_weights):
+        neg_count = (labels == 0).sum()
+        pos_count = (labels == 1).sum()
+        if neg_count > 0 and pos_count > 0:
+            return base_weights * np.where(labels == 0, pos_count / neg_count, 1.0), neg_count, pos_count
+        return None, neg_count, pos_count
+
     X_train, X_test, y_train, y_test, train_idx, test_idx = train_test_split(
         X, y, np.arange(len(y)), test_size=0.2, stratify=y, random_state=42
     )
@@ -173,16 +180,11 @@ def train_and_evaluate(X, y, sample_weight):
         random_state=42
     )
 
-    neg_count = (y_train == 0).sum()
-    pos_count = (y_train == 1).sum()
-
-    if neg_count > 0 and pos_count > 0:
-        class_sample_weights = np.where(
-            y_train == 0,
-            pos_count / neg_count,
-            1.0
-        )
-        sample_weights = sample_weight[train_idx] * class_sample_weights
+    sample_weights, neg_count, pos_count = class_balanced_sample_weights(
+        y_train,
+        sample_weight[train_idx],
+    )
+    if sample_weights is not None:
         print(
             "📊 Class-balanced sample weights: "
             f"neg={neg_count}, pos={pos_count}, neg_weight={pos_count / neg_count:.2f}"
@@ -248,6 +250,18 @@ def train_and_evaluate(X, y, sample_weight):
     plt.title(f"XGBoost Confusion Matrix (threshold {recommended_threshold:.2f})")
     plt.show()
 
+    final_sample_weights, full_neg_count, full_pos_count = class_balanced_sample_weights(
+        y,
+        sample_weight,
+    )
+    if final_sample_weights is not None:
+        print(
+            "📦 Re-training final model on all rows before saving: "
+            f"neg={full_neg_count}, pos={full_pos_count}, neg_weight={full_pos_count / full_neg_count:.2f}"
+        )
+    else:
+        print("⚠️ Saving split-trained model because one class is missing from the full dataset.")
+    model.fit(X, y, sample_weight=final_sample_weights)
     model.get_booster().feature_names = feature_names
 
     # 📝 Log top N features to file

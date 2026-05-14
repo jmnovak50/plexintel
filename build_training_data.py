@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 from collections import Counter
+from datetime import datetime
 import numpy as np
 from psycopg2.extras import RealDictCursor
 from pgvector.psycopg2 import register_vector
@@ -54,6 +55,8 @@ WATCH_ABANDONED_MAX_RATIO = 0.35
 WATCH_MIN_SECONDS = 120
 WATCH_ABANDONED_MIN_SECONDS = 600
 WATCH_ABANDONED_MIN_RATIO = 0.05
+MOVIE_REVISIT_PENDING_DAYS = get_setting_value("training.movie_revisit_pending_days", default=21)
+TV_REVISIT_PENDING_DAYS = get_setting_value("training.tv_revisit_pending_days", default=14)
 
 
 def connect():
@@ -124,6 +127,16 @@ def skipped_watch_row(engagement_type):
         "include_training": False,
         "engagement_type": engagement_type,
     }
+
+
+def past_revisit_pending_window(last_watched_at, pending_days):
+    if pending_days <= 0:
+        return True
+    if not last_watched_at:
+        return False
+
+    now = datetime.now(last_watched_at.tzinfo) if getattr(last_watched_at, "tzinfo", None) else datetime.now()
+    return (now - last_watched_at).days >= pending_days
 
 
 def build_user_watch_vectors(conn):
@@ -220,11 +233,14 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
     if not media_duration_seconds or float(media_duration_seconds) <= 0:
         return skipped_watch_row("invalid_duration")
 
+    media_type = row.get("media_type")
     played_duration = int(row.get("total_played_seconds") or 0)
     engagement_ratio = float(row["total_engagement_ratio"])
     max_session_engagement_ratio = float(row.get("max_session_engagement_ratio") or 0.0)
     max_single_session_seconds = int(row.get("max_single_session_seconds") or 0)
     watch_count = int(row.get("watch_count") or 0)
+    last_watched_at = row.get("last_watched_at")
+    revisit_pending_days = TV_REVISIT_PENDING_DAYS if media_type == "episode" else MOVIE_REVISIT_PENDING_DAYS
 
     label_source = "watch_history"
     feedback_value = feedback
@@ -260,18 +276,21 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
     # Label the user's aggregate behavior for this item. Completed-over-time
     # viewing is positive; abandonment is negative only after a real start.
     # Middle cases are too noisy for now and are counted, not trained.
-    if engagement_ratio >= WATCH_ENGAGED_THRESHOLD:
-        label = 1
-        engagement_type = "engaged"
-        sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
-    elif (
+    meaningful_partial = (
         max_single_session_seconds >= WATCH_MIN_SECONDS
         and engagement_ratio <= WATCH_ABANDONED_MAX_RATIO
         and (
             max_single_session_seconds >= WATCH_ABANDONED_MIN_SECONDS
             or max_session_engagement_ratio >= WATCH_ABANDONED_MIN_RATIO
         )
-    ):
+    )
+    if engagement_ratio >= WATCH_ENGAGED_THRESHOLD:
+        label = 1
+        engagement_type = "engaged"
+        sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
+    elif meaningful_partial and not past_revisit_pending_window(last_watched_at, revisit_pending_days):
+        return skipped_watch_row("revisit_pending")
+    elif meaningful_partial:
         label = 0
         engagement_type = "abandoned"
         sample_weight = min(1.0 + 0.5 * rewatch_count, 5.0)
@@ -332,6 +351,8 @@ def build_training_data():
                 SUM(t.played_duration)::integer AS total_played_seconds,
                 MAX(t.played_duration)::integer AS max_single_session_seconds,
                 l.duration AS media_duration,
+                l.media_type,
+                MAX(t.watched_at) AS last_watched_at,
                 CASE
                     WHEN l.duration IS NOT NULL AND l.duration > 0
                         THEN l.duration / 1000.0
@@ -353,7 +374,7 @@ def build_training_data():
             FROM watch_history t
             LEFT JOIN library l ON t.rating_key = l.rating_key
             WHERE t.played_duration IS NOT NULL
-            GROUP BY t.username, t.rating_key, l.duration, l.year,
+            GROUP BY t.username, t.rating_key, l.duration, l.media_type, l.year,
                      l.season_number, l.episode_number
         )
         SELECT
@@ -364,6 +385,8 @@ def build_training_data():
     t.total_played_seconds,
     t.max_single_session_seconds,
     t.media_duration,
+    t.media_type,
+    t.last_watched_at,
     t.media_duration_seconds,
     t.total_engagement_ratio,
     t.max_session_engagement_ratio,
