@@ -65,6 +65,7 @@ class EffectiveSetting:
     updated_at: datetime | None
     updated_by: str | None
     has_value: bool
+    description: str = ""
 
 
 def _setting(
@@ -784,8 +785,15 @@ def ensure_settings_schema(conn) -> None:
                 raw_value text,
                 source text NOT NULL,
                 updated_at timestamp with time zone NOT NULL DEFAULT now(),
-                updated_by text
+                updated_by text,
+                description text
             )
+            """
+        )
+        cur.execute(
+            f"""
+            ALTER TABLE {SETTINGS_TABLE}
+            ADD COLUMN IF NOT EXISTS description text
             """
         )
 
@@ -939,6 +947,7 @@ def _read_env_value(definition: SettingDefinition) -> tuple[Any, str | None]:
 
 
 def _fetch_setting_rows(keys: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
+    key_list = list(keys) if keys else None
     try:
         conn = connect_db(cursor_factory=RealDictCursor)
     except Exception:
@@ -946,38 +955,90 @@ def _fetch_setting_rows(keys: Iterable[str] | None = None) -> dict[str, dict[str
 
     try:
         with conn.cursor() as cur:
-            if keys:
+            if key_list:
                 cur.execute(
                     f"""
-                    SELECT key, raw_value, source, updated_at, updated_by
+                    SELECT key, raw_value, source, updated_at, updated_by, description
                     FROM {SETTINGS_TABLE}
                     WHERE key = ANY(%s)
                     """,
-                    (list(keys),),
+                    (key_list,),
                 )
             else:
                 cur.execute(
                     f"""
-                    SELECT key, raw_value, source, updated_at, updated_by
+                    SELECT key, raw_value, source, updated_at, updated_by, description
                     FROM {SETTINGS_TABLE}
                     """
                 )
             rows = cur.fetchall()
     except Exception:
-        return {}
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            with conn.cursor() as cur:
+                if key_list:
+                    cur.execute(
+                        f"""
+                        SELECT key, raw_value, source, updated_at, updated_by
+                        FROM {SETTINGS_TABLE}
+                        WHERE key = ANY(%s)
+                        """,
+                        (key_list,),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        SELECT key, raw_value, source, updated_at, updated_by
+                        FROM {SETTINGS_TABLE}
+                        """
+                    )
+                rows = cur.fetchall()
+        except Exception:
+            return {}
     finally:
         conn.close()
 
+    for row in rows:
+        row.setdefault("description", "")
     return {row["key"]: row for row in rows}
+
+
+def sync_setting_descriptions(conn) -> None:
+    ensure_settings_schema(conn)
+    with conn.cursor() as cur:
+        for definition in SETTING_DEFINITIONS:
+            cur.execute(
+                f"""
+                INSERT INTO {SETTINGS_TABLE} (key, raw_value, source, description)
+                VALUES (%s, NULL, %s, %s)
+                ON CONFLICT (key) DO UPDATE SET
+                    description = CASE
+                        WHEN {SETTINGS_TABLE}.description IS NULL
+                             OR BTRIM({SETTINGS_TABLE}.description) = ''
+                            THEN EXCLUDED.description
+                        ELSE {SETTINGS_TABLE}.description
+                    END
+                """,
+                (definition.key, DEFAULT_SOURCE, definition.description or ""),
+            )
 
 
 def bootstrap_settings_from_env(conn) -> None:
     ensure_settings_schema(conn)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(f"SELECT key FROM {SETTINGS_TABLE}")
-        existing_keys = {row["key"] for row in cur.fetchall()}
+        cur.execute(f"SELECT key, raw_value, source FROM {SETTINGS_TABLE}")
+        existing_rows = {row["key"]: row for row in cur.fetchall()}
         for definition in SETTING_DEFINITIONS:
-            if definition.key in existing_keys:
+            existing_row = existing_rows.get(definition.key)
+            existing_is_metadata_only = (
+                existing_row is not None
+                and existing_row.get("raw_value") is None
+                and existing_row.get("source") == DEFAULT_SOURCE
+            )
+            if existing_row is not None and not existing_is_metadata_only:
                 continue
             env_value, _env_name = _read_env_value(definition)
             if env_value is None:
@@ -986,9 +1047,14 @@ def bootstrap_settings_from_env(conn) -> None:
                 f"""
                 INSERT INTO {SETTINGS_TABLE} (key, raw_value, source)
                 VALUES (%s, %s, %s)
-                ON CONFLICT (key) DO NOTHING
+                ON CONFLICT (key) DO UPDATE SET
+                    raw_value = EXCLUDED.raw_value,
+                    source = EXCLUDED.source,
+                    updated_at = now()
+                WHERE {SETTINGS_TABLE}.raw_value IS NULL
+                  AND {SETTINGS_TABLE}.source = %s
                 """,
-                (definition.key, format_raw_value(definition, env_value), ENV_SOURCE),
+                (definition.key, format_raw_value(definition, env_value), ENV_SOURCE, DEFAULT_SOURCE),
             )
     conn.commit()
 
@@ -1020,6 +1086,8 @@ def resolve_settings(
     resolved: dict[str, EffectiveSetting] = {}
 
     for definition in selected_definitions:
+        row = rows.get(definition.key)
+        description = (row.get("description") if row else None) or definition.description
         if definition.key in override_map:
             override_value = parse_value(definition, override_map[definition.key])
             resolved[definition.key] = EffectiveSetting(
@@ -1030,11 +1098,18 @@ def resolve_settings(
                 updated_at=None,
                 updated_by=None,
                 has_value=override_value is not None,
+                description=description,
             )
             continue
 
-        row = rows.get(definition.key)
-        if row:
+        row_has_stored_value = (
+            row is not None
+            and not (
+                row.get("raw_value") is None
+                and row.get("source") == DEFAULT_SOURCE
+            )
+        )
+        if row_has_stored_value:
             if row["raw_value"] is None:
                 resolved_value = definition.default
                 has_value = definition.default is not None
@@ -1049,6 +1124,7 @@ def resolve_settings(
                 updated_at=row.get("updated_at"),
                 updated_by=row.get("updated_by"),
                 has_value=has_value,
+                description=description,
             )
             continue
 
@@ -1062,6 +1138,7 @@ def resolve_settings(
                 updated_at=None,
                 updated_by=None,
                 has_value=True,
+                description=description,
             )
             continue
 
@@ -1073,6 +1150,7 @@ def resolve_settings(
             updated_at=None,
             updated_by=None,
             has_value=definition.default is not None,
+            description=description,
         )
 
     return resolved
@@ -1093,7 +1171,7 @@ def get_settings_payload() -> list[dict[str, Any]]:
         field_payload = {
             "key": definition.key,
             "label": definition.label,
-            "description": definition.description,
+            "description": effective.description,
             "type": definition.value_type,
             "secret": definition.secret,
             "default_value": None if definition.secret else definition.default,

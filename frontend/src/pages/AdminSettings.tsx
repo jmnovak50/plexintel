@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CircleHelp } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 
 interface AdminMe {
@@ -92,6 +93,31 @@ function choiceLabel(field: SettingField, choice: string) {
     return `${choice.charAt(0).toUpperCase()}${choice.slice(1)}`;
   }
   return choice;
+}
+
+function SettingHelp({ field }: { field: SettingField }) {
+  const helpText = field.description?.trim() || "No guidance has been written for this setting yet.";
+
+  return (
+    <span className="group/help relative inline-flex shrink-0">
+      <button
+        type="button"
+        aria-label={`Help for ${field.label}`}
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500 transition hover:border-slate-400 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300"
+      >
+        <CircleHelp aria-hidden="true" size={14} strokeWidth={2} />
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-7 z-20 hidden w-72 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-normal leading-5 text-slate-700 shadow-lg group-hover/help:block group-focus-within/help:block"
+      >
+        <span className="block">{helpText}</span>
+        <span className="mt-2 block border-t border-slate-100 pt-2 font-mono text-[11px] text-slate-500">
+          {field.key}
+        </span>
+      </span>
+    </span>
+  );
 }
 
 export default function AdminSettings() {
@@ -424,16 +450,13 @@ export default function AdminSettings() {
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <h3 className="text-sm font-semibold text-slate-900">{field.label}</h3>
+                              <SettingHelp field={field} />
                               {field.secret && (
                                 <span className="rounded-full bg-slate-900 px-2 py-0.5 text-[10px] uppercase tracking-wide text-white">
                                   Secret
                                 </span>
                               )}
                             </div>
-                            <p className="mt-1 text-xs text-slate-500">{field.key}</p>
-                            {field.description && (
-                              <p className="mt-2 text-sm text-slate-600">{field.description}</p>
-                            )}
                           </div>
                           <span
                             className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${sourceClassName}`}

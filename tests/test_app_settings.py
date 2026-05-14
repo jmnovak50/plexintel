@@ -104,9 +104,36 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(len(inserts), 1)
         self.assertEqual(
             inserts[0][1],
-            ("tautulli.api_url", "https://tautulli.example.com/api/v2", app_settings.ENV_SOURCE),
+            (
+                "tautulli.api_url",
+                "https://tautulli.example.com/api/v2",
+                app_settings.ENV_SOURCE,
+                app_settings.DEFAULT_SOURCE,
+            ),
         )
         self.assertEqual(conn.commit_count, 1)
+
+    def test_metadata_only_rows_do_not_block_env_fallback(self):
+        with patch.dict(os.environ, {"OLLAMA_HOST": "http://env-host:11434"}, clear=True):
+            with patch.object(
+                app_settings,
+                "_fetch_setting_rows",
+                return_value={
+                    "ollama.host": {
+                        "key": "ollama.host",
+                        "raw_value": None,
+                        "source": app_settings.DEFAULT_SOURCE,
+                        "updated_at": None,
+                        "updated_by": None,
+                        "description": "Database help text.",
+                    },
+                },
+            ):
+                resolved = app_settings.resolve_settings(keys=["ollama.host"])
+
+        self.assertEqual(resolved["ollama.host"].value, "http://env-host:11434")
+        self.assertEqual(resolved["ollama.host"].source, app_settings.RUNTIME_ENV_SOURCE)
+        self.assertEqual(resolved["ollama.host"].description, "Database help text.")
 
     def test_get_settings_payload_masks_secret(self):
         definition = app_settings.get_setting_definition("public_api.api_key")
@@ -135,6 +162,34 @@ class AppSettingsTests(unittest.TestCase):
 
         self.assertIsNone(payload[0]["fields"][0]["value"])
         self.assertTrue(payload[0]["fields"][0]["masked_value"].endswith("1111"))
+
+    def test_get_settings_payload_uses_database_description(self):
+        definition = app_settings.get_setting_definition("tautulli.api_url")
+        with patch.object(
+            app_settings,
+            "resolve_settings",
+            return_value={
+                "tautulli.api_url": app_settings.EffectiveSetting(
+                    definition=definition,
+                    value="https://tautulli.example.com/api/v2",
+                    raw_value="https://tautulli.example.com/api/v2",
+                    source="admin_ui",
+                    updated_at=None,
+                    updated_by="admin",
+                    has_value=True,
+                    description="Database-managed help text.",
+                )
+            },
+        ):
+            with patch.object(app_settings, "SETTING_DEFINITIONS", (definition,)):
+                with patch.object(
+                    app_settings,
+                    "SECTION_DEFINITIONS",
+                    ({"key": "connectivity", "label": "Connectivity"},),
+                ):
+                    payload = app_settings.get_settings_payload()
+
+        self.assertEqual(payload[0]["fields"][0]["description"], "Database-managed help text.")
 
     def test_save_settings_upserts_updates_and_clears(self):
         conn = FakeConnection()

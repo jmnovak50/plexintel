@@ -3,7 +3,7 @@ import os
 import psycopg2
 
 from api.db.connection import connect_db, get_database_url
-from api.services.app_settings import bootstrap_settings_from_env, ensure_settings_schema
+from api.services.app_settings import bootstrap_settings_from_env, ensure_settings_schema, sync_setting_descriptions
 
 CANONICAL_FEEDBACK_VALUES = (
     "interested",
@@ -16,6 +16,7 @@ CANONICAL_FEEDBACK_VALUES = (
 def apply_schema_updates(conn) -> None:
     with conn.cursor() as cur:
         ensure_settings_schema(conn)
+        sync_setting_descriptions(conn)
         cur.execute(
             """
             ALTER TABLE IF EXISTS public.users
