@@ -70,7 +70,7 @@ CREATE VIEW public.expanded_recs_w_label_v AS
              JOIN public.genres g ON (mg.genre_id = g.id)
           GROUP BY mg.media_id) g ON (g.media_id = m.rating_key)
      LEFT JOIN ( SELECT ma.media_id,
-            string_agg(DISTINCT a.name, ', '::text) AS actors
+            string_agg(a.name, ', '::text ORDER BY ma.cast_order NULLS LAST, a.name) AS actors
            FROM public.media_actors ma
              JOIN public.actors a ON (ma.actor_id = a.id)
           GROUP BY ma.media_id) a ON (a.media_id = m.rating_key)

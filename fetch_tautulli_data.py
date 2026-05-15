@@ -614,17 +614,21 @@ def store_actors(conn, cursor, rating_key, actors):
         ON CONFLICT (name) DO NOTHING;
     """
     insert_media_actor = """
-        INSERT INTO media_actors (media_id, actor_id) 
-        SELECT %s, id FROM actors WHERE name = %s
-        ON CONFLICT DO NOTHING;
+        INSERT INTO media_actors (media_id, actor_id, cast_order)
+        SELECT %s, id, %s FROM actors WHERE name = %s
+        ON CONFLICT (media_id, actor_id) DO UPDATE SET
+            cast_order = EXCLUDED.cast_order;
     """
 
-    for actor in actors:
+    for cast_order, actor in enumerate(actors):
+        actor_name = str(actor).strip()
+        if not actor_name:
+            continue
         try:
-            cursor.execute(insert_actor, (actor,))  # Ensure actor exists
-            cursor.execute(insert_media_actor, (rating_key, actor))  # Link to media
+            cursor.execute(insert_actor, (actor_name,))  # Ensure actor exists
+            cursor.execute(insert_media_actor, (rating_key, cast_order, actor_name))  # Link to media
         except Exception as e:
-            print(f"⚠️ ERROR inserting actor '{actor}' for rating_key={rating_key}: {e}")
+            print(f"⚠️ ERROR inserting actor '{actor_name}' for rating_key={rating_key}: {e}")
             conn.rollback()
 
     conn.commit()
@@ -923,6 +927,51 @@ def backfill_missing_plex_guids(conn, cursor):
 
     store_library_data(conn, cursor, recovered_items)
     print(f"✅ Backfilled plex_guid metadata for {len(recovered_items)} library rows.")
+
+
+def backfill_actor_cast_order():
+    print("🎭 Checking for actor links missing cast_order...")
+    conn, cursor = connect_to_db()
+    if not conn:
+        print("❌ ERROR: Could not connect to database.")
+        return
+
+    try:
+        cursor.execute(
+            """
+            SELECT DISTINCT l.rating_key
+            FROM library l
+            JOIN media_actors ma ON ma.media_id = l.rating_key
+            WHERE ma.cast_order IS NULL
+            ORDER BY l.rating_key
+            """
+        )
+        rating_keys = [row[0] for row in cursor.fetchall()]
+
+        if not rating_keys:
+            print("✅ No actor cast_order backfill needed.")
+            return
+
+        print(f"🎭 Backfilling actor cast_order for {len(rating_keys)} media item(s)...")
+        updated = 0
+        skipped = 0
+        for rating_key in rating_keys:
+            metadata = get_metadata(rating_key)
+            actors = metadata.get("actors", []) if metadata else []
+            if actors:
+                store_actors(conn, cursor, rating_key, actors)
+                updated += 1
+            else:
+                print(f"⚠️ No recoverable actor order for rating_key={rating_key}")
+                skipped += 1
+
+        conn.commit()
+        print(f"✅ Actor cast_order backfill complete. Updated {updated}, skipped {skipped}.")
+    except Exception as e:
+        print(f"❌ ERROR backfilling actor cast_order: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 
 def recover_missing_media(dry_run=False):
@@ -1296,7 +1345,7 @@ def generate_watch_embeddings(batch_size: int | None = None):
             GROUP BY mg.media_id
         ) g ON g.media_id = l.rating_key
         LEFT JOIN (
-            SELECT ma.media_id, STRING_AGG(a.name, ', ') AS actor_tags
+            SELECT ma.media_id, STRING_AGG(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name) AS actor_tags
             FROM media_actors ma
             JOIN actors a ON ma.actor_id = a.id
             GROUP BY ma.media_id
@@ -1420,9 +1469,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plex/Tautulli Media Metadata Importer")
     parser.add_argument(
         "--mode",
-        choices=["full", "incremental", "recover", "embeddings", "watch_embeddings"],
+        choices=["full", "incremental", "recover", "embeddings", "watch_embeddings", "backfill_cast_order"],
         default="full",
-        help="Select run mode: full (default), incremental, recover missing items, generate embeddings, or generate watch history embeddings",
+        help="Select run mode: full (default), incremental, recover missing items, generate embeddings, generate watch history embeddings, or backfill actor cast order",
     )
     parser.add_argument(
         "--dry-run",
@@ -1445,3 +1494,5 @@ if __name__ == "__main__":
     elif args.mode == "watch_embeddings":
         # Watch embeddings via Ollama + VectorChord
         generate_watch_embeddings()
+    elif args.mode == "backfill_cast_order":
+        backfill_actor_cast_order()

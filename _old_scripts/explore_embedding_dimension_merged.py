@@ -32,7 +32,7 @@ def fetch_embeddings_with_metadata(cur, dim):
         ) g ON g.media_id = m.rating_key
 
         LEFT JOIN (
-            SELECT ma.media_id, STRING_AGG(a.name, ', ') AS actor_names
+            SELECT ma.media_id, STRING_AGG(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name) AS actor_names
             FROM media_actors ma
             JOIN actors a ON ma.actor_id = a.id
             GROUP BY ma.media_id

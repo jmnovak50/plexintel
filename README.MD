@@ -14,6 +14,8 @@ Embeddings: SentenceTransformers (768-dim vectors)
 
 Modeling: XGBoost with SHAP explainability
 
+Production training excludes direct `actor_*` binary model features by default because actor rows can behave like TV/show proxy signals. Actor metadata is still retained for UI, labels, prompts, and analytics. Use `python train_model.py --include-actors` only for actor-feature experiments.
+
 Auth: Plex OAuth PIN-based login
 
 Hosting: Raspberry Pi (or any Linux system)

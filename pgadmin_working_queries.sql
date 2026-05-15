@@ -22,7 +22,7 @@ LEFT JOIN (
     GROUP BY mg.media_id
 ) g ON g.media_id = m.rating_key
 LEFT JOIN (
-    SELECT ma.media_id, STRING_AGG(a.name, ', ') AS actor_tags
+    SELECT ma.media_id, STRING_AGG(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name) AS actor_tags
     FROM media_actors ma
     JOIN actors a ON ma.actor_id = a.id
     GROUP BY ma.media_id
@@ -227,4 +227,3 @@ WHERE dimension NOT IN (SELECT dimension FROM embedding_labels)
 GROUP BY dimension
 ORDER BY usage_count DESC
 LIMIT 10;
-

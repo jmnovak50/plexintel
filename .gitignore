@@ -20,10 +20,17 @@ frontend/build/
 
 # install-specific or generated data
 *.csv
+*.dump
+*.backup
+*.sql.gz
+*.bak
 feature_importance.*
 plexenv/
 
 # ML artifacts
+feature_importance_log*.txt
+feature_importance_plot*.png
+xgb_model*.pkl
 feature_importance_log.txt
 feature_importance_plot.png
 xgb_model.pkl

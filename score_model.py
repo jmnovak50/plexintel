@@ -247,7 +247,7 @@ def get_unwatched_media(username):
             GROUP BY mg.media_id
         ) g ON g.media_id = m.rating_key
         LEFT JOIN (
-            SELECT ma.media_id, STRING_AGG(a.name, ',') AS actor_tags
+            SELECT ma.media_id, STRING_AGG(a.name, ',' ORDER BY ma.cast_order NULLS LAST, a.name) AS actor_tags
             FROM media_actors ma
             JOIN actors a ON ma.actor_id = a.id
             GROUP BY ma.media_id

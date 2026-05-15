@@ -413,7 +413,7 @@ LEFT JOIN LATERAL (
 ) genre_tags ON true
 
 LEFT JOIN LATERAL (
-    SELECT string_agg(a.name, ', ') AS actor_tags
+    SELECT string_agg(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name) AS actor_tags
     FROM media_actors ma
     JOIN actors a ON ma.actor_id = a.id
     WHERE ma.media_id = t.rating_key
@@ -451,7 +451,7 @@ LEFT JOIN LATERAL (
                 WHERE mg.media_id = l.rating_key
             ) AS genre_tags,
             (
-                SELECT string_agg(a.name, ', ')
+                SELECT string_agg(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name)
                 FROM media_actors ma
                 JOIN actors a ON ma.actor_id = a.id
                 WHERE ma.media_id = l.rating_key
