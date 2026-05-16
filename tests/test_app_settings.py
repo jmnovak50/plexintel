@@ -233,6 +233,23 @@ class AppSettingsTests(unittest.TestCase):
         with self.assertRaises(app_settings.SettingsValidationError):
             app_settings.parse_value(app_settings.get_setting_definition("smtp.from_email"), "Example <alerts@example.com>")
 
+    def test_label_coverage_setting_metadata_and_validation(self):
+        definition = app_settings.get_setting_definition("labeling.minimum_label_coverage_percent")
+
+        self.assertEqual(definition.label, "Minimum Label Coverage Percent")
+        self.assertEqual(definition.value_type, "integer")
+        self.assertEqual(definition.default, 70)
+        self.assertEqual(definition.minimum, 50)
+        self.assertEqual(definition.maximum, 100)
+        self.assertEqual(definition.step, 5)
+        self.assertEqual(app_settings.parse_value(definition, "80"), 80)
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(definition, "45")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(definition, "105")
+
     def test_consumer_defaults_and_overrides(self):
         settings_map = {
             "labeling.provider": "ollama",
@@ -241,6 +258,7 @@ class AppSettingsTests(unittest.TestCase):
             "ollama.host": "http://ollama.internal:11434",
             "ollama.timeout_s": 55,
             "labeling.default_fetch_items": 22,
+            "labeling.minimum_label_coverage_percent": 85,
             "scoring.shap_max_items": 321,
             "scoring.shap_raw_min_dims": 7,
             "scoring.shap_raw_max_dims": 17,
@@ -261,6 +279,7 @@ class AppSettingsTests(unittest.TestCase):
                 fetch_tautulli_data = importlib.reload(importlib.import_module("fetch_tautulli_data"))
 
         self.assertEqual(gpt_utils.DEFAULT_FETCH_ITEMS, 22)
+        self.assertEqual(gpt_utils.MINIMUM_LABEL_COVERAGE_PERCENT, 85)
         self.assertEqual(gpt_utils.resolve_label_backend(), ("ollama", "gemma3:12b"))
         self.assertEqual(gpt_utils.resolve_label_backend("openai", "gpt-4.1-mini"), ("openai", "gpt-4.1-mini"))
         self.assertEqual(score_model.SHAP_MAX_ITEMS, 321)

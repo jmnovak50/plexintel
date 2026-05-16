@@ -54,6 +54,7 @@ class SettingDefinition:
     choices: tuple[str, ...] = ()
     minimum: float | int | None = None
     maximum: float | int | None = None
+    step: float | int | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def _setting(
     choices: Iterable[str] = (),
     minimum: float | int | None = None,
     maximum: float | int | None = None,
+    step: float | int | None = None,
 ) -> SettingDefinition:
     return SettingDefinition(
         key=key,
@@ -94,6 +96,7 @@ def _setting(
         choices=tuple(choices),
         minimum=minimum,
         maximum=maximum,
+        step=step,
     )
 
 
@@ -709,6 +712,20 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         description=(
             "Number of candidate items fetched before selecting examples for labeling. Increase this if prompts often "
             "lack enough valid or diverse examples. Lower it if labeling queries are slow or retrieving too much data."
+        ),
+    ),
+    _setting(
+        "labeling.minimum_label_coverage_percent",
+        "advanced_labeling",
+        "Minimum Label Coverage Percent",
+        "integer",
+        default=70,
+        minimum=50,
+        maximum=100,
+        step=5,
+        description=(
+            "Minimum percentage of HIGH examples that must support a proposed semantic label. If coverage is below "
+            "this threshold, the labeler should return UNCLEAR / MIXED SIGNAL or a low-confidence cluster label."
         ),
     ),
     _setting(
@@ -1406,6 +1423,7 @@ def get_settings_payload() -> list[dict[str, Any]]:
             "choices": list(definition.choices),
             "minimum": definition.minimum,
             "maximum": definition.maximum,
+            "step": definition.step,
         }
         section["fields"].append(field_payload)
     return [sections_by_key[section["key"]] for section in SECTION_DEFINITIONS]

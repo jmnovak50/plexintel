@@ -28,6 +28,32 @@ def _should_persist_label(label: str) -> bool:
     return bool(label and label != UNCLEAR_LABEL)
 
 
+def _format_result_metadata(result: dict) -> str:
+    details = []
+    confidence = result.get("label_confidence")
+    label_type = result.get("label_type")
+    if confidence:
+        details.append(f"confidence={confidence}")
+    if label_type:
+        details.append(f"type={label_type}")
+
+    high_count = result.get("coverage_high_count")
+    high_total = result.get("coverage_high_total")
+    high_percent = result.get("coverage_high_percent")
+    if high_count is not None and high_total is not None:
+        coverage = f"HIGH coverage={high_count}/{high_total}"
+        if high_percent is not None:
+            coverage += f" ({high_percent}%)"
+        details.append(coverage)
+
+    low_count = result.get("coverage_low_overlap_count")
+    low_total = result.get("coverage_low_total")
+    if low_count is not None and low_total is not None:
+        details.append(f"LOW overlap={low_count}/{low_total}")
+
+    return " | ".join(details)
+
+
 def _fetch_dimension_samples(dimension: int, top_n: int):
     if get_dimension_mode(dimension) == "media":
         positive_ids = get_top_media_for_dimension(dimension, top_n=top_n)
@@ -70,6 +96,9 @@ def label_single_dimension(
             model=model_name,
         )
         print(f"🧠 Suggested label for dim {dimension} via {provider_name}:{model_name}: {result['label']}")
+        result_metadata = _format_result_metadata(result)
+        if result_metadata:
+            print(f"   {result_metadata}")
         if result.get("explanation"):
             print(f"   {result['explanation']}")
         for evidence in result.get("evidence", []):

@@ -25,6 +25,7 @@ interface SettingField {
   choices: string[];
   minimum: number | null;
   maximum: number | null;
+  step: number | null;
 }
 
 interface SettingSection {
@@ -490,7 +491,7 @@ export default function AdminSettings() {
                           ) : (
                             <input
                               type={field.type === "integer" || field.type === "float" ? "number" : field.secret ? "password" : "text"}
-                              step={field.type === "float" ? "any" : field.type === "integer" ? "1" : undefined}
+                              step={field.step ?? (field.type === "float" ? "any" : field.type === "integer" ? "1" : undefined)}
                               min={field.minimum ?? undefined}
                               max={field.maximum ?? undefined}
                               value={drafts[field.key] ?? ""}

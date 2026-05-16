@@ -6,6 +6,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 try:
     import pgvector.psycopg2  # noqa: F401
 except ModuleNotFoundError:
@@ -143,6 +145,66 @@ class PositiveLabelSelectionTests(unittest.TestCase):
         self.assertIn("LIMIT 3", sql)
         self.assertNotIn("abs(si.shap_value)", sql.lower())
         self.assertNotIn("LIMIT 5", sql)
+
+
+class LabelCoveragePromptTests(unittest.TestCase):
+    def test_prompt_includes_configured_coverage_gate_and_json_fields(self):
+        positive_df = pd.DataFrame(
+            [
+                {"title": "Spy One", "year": 2001, "media_type": "movie", "genre_tags": "Action, Spy"},
+                {"title": "Spy Two", "year": 2002, "media_type": "movie", "genre_tags": "Action, Spy"},
+                {"title": "Spy Three", "year": 2003, "media_type": "movie", "genre_tags": "Action, Spy"},
+            ]
+        )
+        negative_df = pd.DataFrame(
+            [
+                {"title": "Quiet Drama", "year": 2004, "media_type": "movie", "genre_tags": "Drama"},
+                {"title": "Slow Romance", "year": 2005, "media_type": "movie", "genre_tags": "Romance"},
+            ]
+        )
+
+        prompt_bundle = gpt_utils.build_dimension_prompt(
+            12,
+            positive_df,
+            negative_df,
+            min_valid_items=1,
+            minimum_label_coverage_percent=80,
+        )
+        prompt_text = prompt_bundle["prompt_text"]
+
+        self.assertIn("Minimum Label Coverage Percent = 80", prompt_text)
+        self.assertIn("If fewer than 80% of HIGH examples clearly support", prompt_text)
+        self.assertIn("return UNCLEAR / MIXED SIGNAL", prompt_text)
+        self.assertIn('"coverage_high_count": 0', prompt_text)
+        self.assertIn('"coverage_low_overlap_count": 0', prompt_text)
+        self.assertIn('"label_confidence": "high, medium, low, or unclear"', prompt_text)
+        self.assertEqual(prompt_bundle["minimum_label_coverage_percent"], 80)
+
+    def test_json_label_response_normalizes_coverage_fields(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "spy action movies",
+              "label_confidence": "medium",
+              "label_type": "semantic",
+              "coverage_high_count": 7,
+              "coverage_high_total": 10,
+              "coverage_low_overlap_count": 2,
+              "coverage_low_total": 8,
+              "explanation": "Most high examples are spy action movies while low examples are not.",
+              "evidence": ["Spy titles repeat", "Action genre repeats", "LOW examples are dramas"]
+            }
+            """
+        )
+
+        self.assertEqual(result["label"], "spy action movies")
+        self.assertEqual(result["label_confidence"], "medium")
+        self.assertEqual(result["label_type"], "semantic")
+        self.assertEqual(result["coverage_high_count"], 7)
+        self.assertEqual(result["coverage_high_total"], 10)
+        self.assertEqual(result["coverage_high_percent"], 70)
+        self.assertEqual(result["coverage_low_overlap_count"], 2)
+        self.assertEqual(result["coverage_low_total"], 8)
 
 
 if __name__ == "__main__":

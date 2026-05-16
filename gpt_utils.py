@@ -15,6 +15,7 @@ MIN_VALID_ITEMS = get_setting_value("labeling.min_valid_items", default=6)
 DEFAULT_TOP_POSITIVE_ITEMS = get_setting_value("labeling.default_top_positive_items", default=6)
 DEFAULT_TOP_NEGATIVE_ITEMS = get_setting_value("labeling.default_top_negative_items", default=4)
 DEFAULT_FETCH_ITEMS = get_setting_value("labeling.default_fetch_items", default=10)
+MINIMUM_LABEL_COVERAGE_PERCENT = get_setting_value("labeling.minimum_label_coverage_percent", default=70)
 SUMMARY_HINT_CHARS = get_setting_value("labeling.summary_hint_chars", default=140)
 MAX_GENRE_TAGS = get_setting_value("labeling.max_genre_tags", default=3)
 MAX_CAST_NAMES = get_setting_value("labeling.max_cast_names", default=2)
@@ -78,6 +79,14 @@ Rules:
 - Each evidence bullet must cite repeated patterns from the items, not vague themes.
 - If LOW items are present, explain what separates HIGH from LOW.
 - If fewer than {min_valid_items} valid HIGH items remain, output UNCLEAR / MIXED SIGNAL.
+- Before assigning a label, estimate how many HIGH examples support the proposed label.
+- Use Minimum Label Coverage Percent = {minimum_label_coverage_percent}.
+- HIGH examples in this prompt = {high_item_count}; LOW examples in this prompt = {low_item_count}.
+- If fewer than {minimum_label_coverage_percent}% of HIGH examples clearly support the proposed label, do not assign a confident semantic label.
+- When coverage is below the threshold, return UNCLEAR / MIXED SIGNAL unless there is an obvious narrow cluster label such as "Gossip Girl episode cluster" or "mostly short episodic titles"; narrow cluster labels should be low or medium confidence.
+- Do not claim broad labels based on only a minority of examples.
+- Prefer boring, mechanical labels over creative vibe labels.
+- Report coverage as counts: coverage_high_count / coverage_high_total and coverage_low_overlap_count / coverage_low_total, such as 7/10 and 2/8.
 - Also output UNCLEAR / MIXED SIGNAL if:
   1. HIGH items split into unrelated clusters,
   2. malformed or truncated titles dominate,
@@ -87,6 +96,13 @@ Rules:
 Return ONLY this JSON shape:
 {{
   "label": "short label or UNCLEAR / MIXED SIGNAL",
+  "label_confidence": "high, medium, low, or unclear",
+  "label_type": "semantic, cluster, mechanical, or unclear",
+  "coverage_high_count": 0,
+  "coverage_high_total": 0,
+  "coverage_high_percent": 0,
+  "coverage_low_overlap_count": 0,
+  "coverage_low_total": 0,
   "explanation": "One sentence explaining the separator.",
   "evidence": [
     "bullet 1",
@@ -248,9 +264,56 @@ def _coerce_evidence(evidence) -> list[str]:
     return cleaned[:3]
 
 
-def _normalize_label_result(label: str, explanation: str = "", evidence=None) -> dict:
+def _coerce_optional_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_label_confidence(value) -> str:
+    cleaned = _clean_whitespace(value).lower()
+    return cleaned if cleaned in {"high", "medium", "low", "unclear"} else ""
+
+
+def _coerce_label_type(value) -> str:
+    cleaned = _clean_whitespace(value).lower()
+    return cleaned if cleaned in {"semantic", "cluster", "mechanical", "unclear"} else ""
+
+
+def _normalize_label_result(
+    label: str,
+    explanation: str = "",
+    evidence=None,
+    coverage_high_count=None,
+    coverage_high_total=None,
+    coverage_high_percent=None,
+    coverage_low_overlap_count=None,
+    coverage_low_total=None,
+    label_confidence=None,
+    label_type=None,
+) -> dict:
+    normalized_high_count = _coerce_optional_int(coverage_high_count)
+    normalized_high_total = _coerce_optional_int(coverage_high_total)
+    normalized_high_percent = _coerce_optional_int(coverage_high_percent)
+    if (
+        normalized_high_percent is None
+        and normalized_high_count is not None
+        and normalized_high_total
+    ):
+        normalized_high_percent = round((normalized_high_count / normalized_high_total) * 100)
+
     return {
         "label": _coerce_label(label),
+        "label_confidence": _coerce_label_confidence(label_confidence),
+        "label_type": _coerce_label_type(label_type),
+        "coverage_high_count": normalized_high_count,
+        "coverage_high_total": normalized_high_total,
+        "coverage_high_percent": normalized_high_percent,
+        "coverage_low_overlap_count": _coerce_optional_int(coverage_low_overlap_count),
+        "coverage_low_total": _coerce_optional_int(coverage_low_total),
         "explanation": _coerce_explanation(explanation),
         "evidence": _coerce_evidence(evidence),
     }
@@ -507,6 +570,7 @@ def build_dimension_prompt(
     negative_df: pd.DataFrame | None = None,
     dimension_mode: str = "media",
     min_valid_items: int = MIN_VALID_ITEMS,
+    minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
 ) -> dict:
     positive_bundle = prepare_dimension_items(
         positive_df,
@@ -548,6 +612,9 @@ def build_dimension_prompt(
         dimension_scope=_get_dimension_scope_text(dimension_mode),
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
         min_valid_items=min_valid_items,
+        minimum_label_coverage_percent=minimum_label_coverage_percent,
+        high_item_count=len(positive_items),
+        low_item_count=len(negative_items),
         top_positive_block=_format_item_block(positive_items, "No valid high items available."),
         top_negative_block=_format_item_block(negative_items, "No valid low items available."),
     )
@@ -559,6 +626,7 @@ def build_dimension_prompt(
         "negative_items": negative_items,
         "valid_positive_count": valid_positive,
         "valid_negative_count": len(negative_bundle["valid_items"]),
+        "minimum_label_coverage_percent": minimum_label_coverage_percent,
         "flagged_item_count": flagged_positive + len(negative_bundle["flagged_items"]),
         "skipped_reason": skipped_reason,
     }
@@ -582,12 +650,18 @@ def _build_user_prompt(
     top_negative_block: str,
     dimension_mode: str = "media",
     min_valid_items: int = MIN_VALID_ITEMS,
+    minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
+    high_item_count: int = DEFAULT_TOP_POSITIVE_ITEMS,
+    low_item_count: int = DEFAULT_TOP_NEGATIVE_ITEMS,
 ) -> str:
     return USER_PROMPT_TEMPLATE.format(
         dimension=dimension,
         dimension_scope=_get_dimension_scope_text(dimension_mode),
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
         min_valid_items=min_valid_items,
+        minimum_label_coverage_percent=minimum_label_coverage_percent,
+        high_item_count=high_item_count,
+        low_item_count=low_item_count,
         top_positive_block=top_positive_block,
         top_negative_block=top_negative_block,
     )
@@ -614,6 +688,13 @@ def _extract_label_result_from_response(response_text: str) -> dict:
                 data.get("label", ""),
                 data.get("explanation", ""),
                 data.get("evidence", []),
+                coverage_high_count=data.get("coverage_high_count"),
+                coverage_high_total=data.get("coverage_high_total"),
+                coverage_high_percent=data.get("coverage_high_percent"),
+                coverage_low_overlap_count=data.get("coverage_low_overlap_count"),
+                coverage_low_total=data.get("coverage_low_total"),
+                label_confidence=data.get("label_confidence", data.get("confidence")),
+                label_type=data.get("label_type"),
             )
 
     first_line = raw.splitlines()[0]
@@ -632,7 +713,7 @@ def _call_openai_for_label_result(prompt_text: str, model: str) -> dict:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt_text},
         ],
-        max_tokens=220,
+        max_tokens=420,
         temperature=0.1,
     )
     content = response.choices[0].message.content or ""
