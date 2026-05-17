@@ -729,6 +729,21 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         ),
     ),
     _setting(
+        "labeling.maximum_low_overlap_percent",
+        "advanced_labeling",
+        "Maximum Low Overlap Percent",
+        "integer",
+        default=40,
+        minimum=0,
+        maximum=100,
+        step=5,
+        description=(
+            "Maximum percentage of LOW examples that may also match the proposed label. If LOW overlap exceeds this "
+            "threshold, the label should be downgraded or returned as UNCLEAR / MIXED SIGNAL because it does not "
+            "clearly separate HIGH from LOW."
+        ),
+    ),
+    _setting(
         "labeling.summary_hint_chars",
         "advanced_labeling",
         "Summary Hint Characters",

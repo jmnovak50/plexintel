@@ -250,6 +250,23 @@ class AppSettingsTests(unittest.TestCase):
         with self.assertRaises(app_settings.SettingsValidationError):
             app_settings.parse_value(definition, "105")
 
+    def test_low_overlap_setting_metadata_and_validation(self):
+        definition = app_settings.get_setting_definition("labeling.maximum_low_overlap_percent")
+
+        self.assertEqual(definition.label, "Maximum Low Overlap Percent")
+        self.assertEqual(definition.value_type, "integer")
+        self.assertEqual(definition.default, 40)
+        self.assertEqual(definition.minimum, 0)
+        self.assertEqual(definition.maximum, 100)
+        self.assertEqual(definition.step, 5)
+        self.assertEqual(app_settings.parse_value(definition, "50"), 50)
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(definition, "-1")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(definition, "105")
+
     def test_consumer_defaults_and_overrides(self):
         settings_map = {
             "labeling.provider": "ollama",
@@ -259,6 +276,7 @@ class AppSettingsTests(unittest.TestCase):
             "ollama.timeout_s": 55,
             "labeling.default_fetch_items": 22,
             "labeling.minimum_label_coverage_percent": 85,
+            "labeling.maximum_low_overlap_percent": 35,
             "scoring.shap_max_items": 321,
             "scoring.shap_raw_min_dims": 7,
             "scoring.shap_raw_max_dims": 17,
@@ -280,6 +298,7 @@ class AppSettingsTests(unittest.TestCase):
 
         self.assertEqual(gpt_utils.DEFAULT_FETCH_ITEMS, 22)
         self.assertEqual(gpt_utils.MINIMUM_LABEL_COVERAGE_PERCENT, 85)
+        self.assertEqual(gpt_utils.MAXIMUM_LOW_OVERLAP_PERCENT, 35)
         self.assertEqual(gpt_utils.resolve_label_backend(), ("ollama", "gemma3:12b"))
         self.assertEqual(gpt_utils.resolve_label_backend("openai", "gpt-4.1-mini"), ("openai", "gpt-4.1-mini"))
         self.assertEqual(score_model.SHAP_MAX_ITEMS, 321)

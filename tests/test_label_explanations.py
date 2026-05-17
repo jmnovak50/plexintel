@@ -169,16 +169,22 @@ class LabelCoveragePromptTests(unittest.TestCase):
             negative_df,
             min_valid_items=1,
             minimum_label_coverage_percent=80,
+            maximum_low_overlap_percent=35,
         )
         prompt_text = prompt_bundle["prompt_text"]
 
         self.assertIn("Minimum Label Coverage Percent = 80", prompt_text)
+        self.assertIn("Maximum Low Overlap Percent = 35", prompt_text)
         self.assertIn("If fewer than 80% of HIGH examples clearly support", prompt_text)
+        self.assertIn("LOW overlap is above 35%", prompt_text)
+        self.assertIn("labels that separate HIGH from LOW", prompt_text)
         self.assertIn("return UNCLEAR / MIXED SIGNAL", prompt_text)
         self.assertIn('"coverage_high_count": 0', prompt_text)
         self.assertIn('"coverage_low_overlap_count": 0', prompt_text)
+        self.assertIn('"coverage_low_overlap_percent": 0', prompt_text)
         self.assertIn('"label_confidence": "high, medium, low, or unclear"', prompt_text)
         self.assertEqual(prompt_bundle["minimum_label_coverage_percent"], 80)
+        self.assertEqual(prompt_bundle["maximum_low_overlap_percent"], 35)
 
     def test_json_label_response_normalizes_coverage_fields(self):
         result = gpt_utils._extract_label_result_from_response(
@@ -191,10 +197,13 @@ class LabelCoveragePromptTests(unittest.TestCase):
               "coverage_high_total": 10,
               "coverage_low_overlap_count": 2,
               "coverage_low_total": 8,
+              "coverage_low_overlap_percent": 25,
               "explanation": "Most high examples are spy action movies while low examples are not.",
               "evidence": ["Spy titles repeat", "Action genre repeats", "LOW examples are dramas"]
             }
-            """
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
         )
 
         self.assertEqual(result["label"], "spy action movies")
@@ -205,6 +214,139 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(result["coverage_high_percent"], 70)
         self.assertEqual(result["coverage_low_overlap_count"], 2)
         self.assertEqual(result["coverage_low_total"], 8)
+        self.assertEqual(result["coverage_low_overlap_percent"], 25)
+        self.assertEqual(result["validation_status"], "valid")
+
+    def test_low_overlap_above_fifty_invalidates_broad_label(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "Comedy genre",
+              "label_confidence": "high",
+              "label_type": "semantic",
+              "coverage_high_count": 5,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 3,
+              "coverage_low_total": 4,
+              "explanation": "Most high examples are comedies.",
+              "evidence": ["Comedy appears repeatedly", "Genres mention comedy", "LOW examples overlap"]
+            }
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
+        )
+
+        self.assertEqual(result["coverage_high_percent"], 83)
+        self.assertEqual(result["coverage_low_overlap_percent"], 75)
+        self.assertEqual(result["label"], gpt_utils.UNCLEAR_LABEL)
+        self.assertEqual(result["label_confidence"], "unclear")
+        self.assertEqual(result["label_type"], "unclear")
+        self.assertEqual(result["validation_status"], "invalid")
+        self.assertIn("LOW-side overlap was 75%", " ".join(result["validation_notes"]))
+
+    def test_low_overlap_above_threshold_downgrades_high_confidence(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "crime comedies",
+              "label_confidence": "high",
+              "label_type": "semantic",
+              "coverage_high_count": 5,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 2,
+              "coverage_low_total": 5,
+              "explanation": "High examples are mostly crime comedies.",
+              "evidence": ["Crime repeats", "Comedy repeats", "LOW overlap exists"]
+            }
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
+        )
+
+        self.assertEqual(result["coverage_low_overlap_percent"], 40)
+        self.assertEqual(result["label"], "crime comedies")
+        self.assertEqual(result["label_confidence"], "high")
+        self.assertEqual(result["validation_status"], "valid")
+
+        stricter = gpt_utils.validate_label_result(
+            result,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=35,
+        )
+
+        self.assertEqual(stricter["label"], "crime comedies")
+        self.assertEqual(stricter["label_confidence"], "medium")
+        self.assertEqual(stricter["validation_status"], "downgraded")
+
+    def test_missing_coverage_fields_are_marked_for_review(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "spy action movies",
+              "label_confidence": "medium",
+              "label_type": "semantic",
+              "explanation": "The high examples seem similar.",
+              "evidence": ["Spy title", "Action metadata", "LOW contrast unclear"]
+            }
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
+        )
+
+        self.assertEqual(result["label"], "spy action movies")
+        self.assertEqual(result["validation_status"], "needs_review")
+        self.assertIn("HIGH coverage percent was missing", " ".join(result["validation_notes"]))
+        self.assertIn("LOW overlap percent was missing", " ".join(result["validation_notes"]))
+
+    def test_low_high_coverage_invalidates_broad_label(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "prestige dramas",
+              "label_confidence": "medium",
+              "label_type": "semantic",
+              "coverage_high_count": 3,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 0,
+              "coverage_low_total": 4,
+              "explanation": "Some high examples are dramas.",
+              "evidence": ["Drama appears", "Only some HIGH examples match", "LOW examples do not overlap"]
+            }
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
+        )
+
+        self.assertEqual(result["coverage_high_percent"], 50)
+        self.assertEqual(result["label"], gpt_utils.UNCLEAR_LABEL)
+        self.assertEqual(result["label_confidence"], "unclear")
+        self.assertEqual(result["validation_status"], "invalid")
+        self.assertIn("HIGH coverage was 50%", " ".join(result["validation_notes"]))
+
+    def test_unclear_with_strong_high_and_low_separation_needs_review(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "UNCLEAR / MIXED SIGNAL",
+              "label_confidence": "unclear",
+              "label_type": "unclear",
+              "coverage_high_count": 5,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 0,
+              "coverage_low_total": 4,
+              "explanation": "The pattern is unclear.",
+              "evidence": ["Some HIGH examples match", "LOW examples do not match", "Review needed"]
+            }
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
+        )
+
+        self.assertEqual(result["coverage_high_percent"], 83)
+        self.assertEqual(result["coverage_low_overlap_percent"], 0)
+        self.assertEqual(result["label"], gpt_utils.UNCLEAR_LABEL)
+        self.assertEqual(result["validation_status"], "needs_review")
+        self.assertIn("Label marked unclear despite meeting HIGH coverage threshold", " ".join(result["validation_notes"]))
 
 
 if __name__ == "__main__":

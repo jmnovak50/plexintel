@@ -48,10 +48,24 @@ def _format_result_metadata(result: dict) -> str:
 
     low_count = result.get("coverage_low_overlap_count")
     low_total = result.get("coverage_low_total")
+    low_percent = result.get("coverage_low_overlap_percent")
     if low_count is not None and low_total is not None:
-        details.append(f"LOW overlap={low_count}/{low_total}")
+        overlap = f"LOW overlap={low_count}/{low_total}"
+        if low_percent is not None:
+            overlap += f" ({low_percent}%)"
+        details.append(overlap)
+
+    validation_status = result.get("validation_status")
+    if validation_status:
+        details.append(f"validation={validation_status}")
 
     return " | ".join(details)
+
+
+def _format_validation_notes(notes) -> str:
+    if isinstance(notes, list):
+        return " | ".join(str(note) for note in notes if str(note).strip())
+    return str(notes or "")
 
 
 def _fetch_dimension_samples(dimension: int, top_n: int):
@@ -99,6 +113,9 @@ def label_single_dimension(
         result_metadata = _format_result_metadata(result)
         if result_metadata:
             print(f"   {result_metadata}")
+        validation_notes = _format_validation_notes(result.get("validation_notes", []))
+        if validation_notes:
+            print(f"   Validation: {validation_notes}")
         if result.get("explanation"):
             print(f"   {result['explanation']}")
         for evidence in result.get("evidence", []):

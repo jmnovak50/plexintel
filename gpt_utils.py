@@ -16,6 +16,7 @@ DEFAULT_TOP_POSITIVE_ITEMS = get_setting_value("labeling.default_top_positive_it
 DEFAULT_TOP_NEGATIVE_ITEMS = get_setting_value("labeling.default_top_negative_items", default=4)
 DEFAULT_FETCH_ITEMS = get_setting_value("labeling.default_fetch_items", default=10)
 MINIMUM_LABEL_COVERAGE_PERCENT = get_setting_value("labeling.minimum_label_coverage_percent", default=70)
+MAXIMUM_LOW_OVERLAP_PERCENT = get_setting_value("labeling.maximum_low_overlap_percent", default=40)
 SUMMARY_HINT_CHARS = get_setting_value("labeling.summary_hint_chars", default=140)
 MAX_GENRE_TAGS = get_setting_value("labeling.max_genre_tags", default=3)
 MAX_CAST_NAMES = get_setting_value("labeling.max_cast_names", default=2)
@@ -79,14 +80,20 @@ Rules:
 - Each evidence bullet must cite repeated patterns from the items, not vague themes.
 - If LOW items are present, explain what separates HIGH from LOW.
 - If fewer than {min_valid_items} valid HIGH items remain, output UNCLEAR / MIXED SIGNAL.
-- Before assigning a label, estimate how many HIGH examples support the proposed label.
+- Before assigning a label, estimate how many HIGH examples support the proposed label and how many LOW examples also match it.
 - Use Minimum Label Coverage Percent = {minimum_label_coverage_percent}.
+- Use Maximum Low Overlap Percent = {maximum_low_overlap_percent}.
 - HIGH examples in this prompt = {high_item_count}; LOW examples in this prompt = {low_item_count}.
+- A proposed label is only strong if HIGH coverage is at or above {minimum_label_coverage_percent}% and LOW overlap is at or below {maximum_low_overlap_percent}%.
 - If fewer than {minimum_label_coverage_percent}% of HIGH examples clearly support the proposed label, do not assign a confident semantic label.
 - When coverage is below the threshold, return UNCLEAR / MIXED SIGNAL unless there is an obvious narrow cluster label such as "Gossip Girl episode cluster" or "mostly short episodic titles"; narrow cluster labels should be low or medium confidence.
+- If LOW overlap is above {maximum_low_overlap_percent}%, the label cannot be high confidence.
+- If LOW overlap is 50% or higher, return UNCLEAR / MIXED SIGNAL unless the label is a very narrow mechanical label that is still clearly useful.
 - Do not claim broad labels based on only a minority of examples.
+- Do not assign broad semantic labels that apply equally well to HIGH and LOW examples.
+- Prefer labels that separate HIGH from LOW, not merely labels that describe HIGH.
 - Prefer boring, mechanical labels over creative vibe labels.
-- Report coverage as counts: coverage_high_count / coverage_high_total and coverage_low_overlap_count / coverage_low_total, such as 7/10 and 2/8.
+- Report coverage as counts and percents: coverage_high_count / coverage_high_total and coverage_low_overlap_count / coverage_low_total, such as 7/10 and 2/8.
 - Also output UNCLEAR / MIXED SIGNAL if:
   1. HIGH items split into unrelated clusters,
   2. malformed or truncated titles dominate,
@@ -103,6 +110,7 @@ Return ONLY this JSON shape:
   "coverage_high_percent": 0,
   "coverage_low_overlap_count": 0,
   "coverage_low_total": 0,
+  "coverage_low_overlap_percent": 0,
   "explanation": "One sentence explaining the separator.",
   "evidence": [
     "bullet 1",
@@ -283,6 +291,138 @@ def _coerce_label_type(value) -> str:
     return cleaned if cleaned in {"semantic", "cluster", "mechanical", "unclear"} else ""
 
 
+def _calculate_percent(count: int | None, total: int | None) -> int | None:
+    if count is None or total is None:
+        return None
+    if total == 0:
+        return 0
+    return round((count / total) * 100)
+
+
+def _is_unclear_label(label: str) -> bool:
+    return _clean_whitespace(label).lower() == UNCLEAR_LABEL.lower()
+
+
+def _set_validation_status(result: dict, status: str) -> None:
+    status_order = {
+        "valid": 0,
+        "needs_review": 1,
+        "downgraded": 2,
+        "invalid": 3,
+    }
+    current = result.get("validation_status", "valid")
+    if status_order.get(status, 0) > status_order.get(current, 0):
+        result["validation_status"] = status
+
+
+def _add_validation_note(result: dict, status: str, note: str) -> None:
+    _set_validation_status(result, status)
+    notes = result.setdefault("validation_notes", [])
+    if note and note not in notes:
+        notes.append(note)
+
+
+def validate_label_result(
+    result: dict,
+    minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
+) -> dict:
+    validated = dict(result)
+    validated["validation_status"] = "valid"
+    validated["validation_notes"] = list(result.get("validation_notes") or [])
+
+    high_percent = validated.get("coverage_high_percent")
+    low_overlap_percent = validated.get("coverage_low_overlap_percent")
+
+    if high_percent is None:
+        _add_validation_note(
+            validated,
+            "needs_review",
+            "HIGH coverage percent was missing or unparsable; review recommended.",
+        )
+    if low_overlap_percent is None:
+        _add_validation_note(
+            validated,
+            "needs_review",
+            "LOW overlap percent was missing or unparsable; review recommended.",
+        )
+
+    if low_overlap_percent is not None and low_overlap_percent > maximum_low_overlap_percent:
+        if low_overlap_percent >= 50:
+            validated["label"] = UNCLEAR_LABEL
+            validated["label_confidence"] = "unclear"
+            validated["label_type"] = "unclear"
+            _add_validation_note(
+                validated,
+                "invalid",
+                (
+                    f"LOW-side overlap was {low_overlap_percent}%, above the "
+                    f"{maximum_low_overlap_percent}% maximum; label does not clearly separate HIGH from LOW."
+                ),
+            )
+        else:
+            if validated.get("label_confidence") == "high":
+                validated["label_confidence"] = "medium"
+            elif not validated.get("label_confidence"):
+                validated["label_confidence"] = "low"
+            _add_validation_note(
+                validated,
+                "downgraded",
+                (
+                    f"LOW-side overlap was {low_overlap_percent}%, above the "
+                    f"{maximum_low_overlap_percent}% maximum; confidence was downgraded."
+                ),
+            )
+
+    if (
+        high_percent is not None
+        and high_percent < minimum_label_coverage_percent
+        and not _is_unclear_label(validated.get("label", ""))
+    ):
+        if validated.get("label_type") in {"cluster", "mechanical"}:
+            validated["label_confidence"] = "low"
+            _add_validation_note(
+                validated,
+                "downgraded",
+                (
+                    f"HIGH coverage was {high_percent}%, below the "
+                    f"{minimum_label_coverage_percent}% minimum; kept only as a low-confidence narrow label."
+                ),
+            )
+        else:
+            validated["label"] = UNCLEAR_LABEL
+            validated["label_confidence"] = "unclear"
+            validated["label_type"] = "unclear"
+            _add_validation_note(
+                validated,
+                "invalid",
+                (
+                    f"HIGH coverage was {high_percent}%, below the "
+                    f"{minimum_label_coverage_percent}% minimum; label was downgraded to UNCLEAR / MIXED SIGNAL."
+                ),
+            )
+
+    low_overlap_blocks_unclear_review = (
+        low_overlap_percent is not None and low_overlap_percent > maximum_low_overlap_percent
+    )
+    if (
+        _is_unclear_label(validated.get("label", ""))
+        and high_percent is not None
+        and high_percent >= minimum_label_coverage_percent
+        and not low_overlap_blocks_unclear_review
+    ):
+        _add_validation_note(
+            validated,
+            "needs_review",
+            (
+                "Label marked unclear despite meeting HIGH coverage threshold; "
+                "review recommended."
+            ),
+        )
+
+    return validated
+
+
 def _normalize_label_result(
     label: str,
     explanation: str = "",
@@ -292,31 +432,42 @@ def _normalize_label_result(
     coverage_high_percent=None,
     coverage_low_overlap_count=None,
     coverage_low_total=None,
+    coverage_low_overlap_percent=None,
     label_confidence=None,
     label_type=None,
+    minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
 ) -> dict:
     normalized_high_count = _coerce_optional_int(coverage_high_count)
     normalized_high_total = _coerce_optional_int(coverage_high_total)
     normalized_high_percent = _coerce_optional_int(coverage_high_percent)
-    if (
-        normalized_high_percent is None
-        and normalized_high_count is not None
-        and normalized_high_total
-    ):
-        normalized_high_percent = round((normalized_high_count / normalized_high_total) * 100)
+    if normalized_high_percent is None:
+        normalized_high_percent = _calculate_percent(normalized_high_count, normalized_high_total)
 
-    return {
+    normalized_low_count = _coerce_optional_int(coverage_low_overlap_count)
+    normalized_low_total = _coerce_optional_int(coverage_low_total)
+    normalized_low_percent = _coerce_optional_int(coverage_low_overlap_percent)
+    if normalized_low_percent is None:
+        normalized_low_percent = _calculate_percent(normalized_low_count, normalized_low_total)
+
+    normalized = {
         "label": _coerce_label(label),
         "label_confidence": _coerce_label_confidence(label_confidence),
         "label_type": _coerce_label_type(label_type),
         "coverage_high_count": normalized_high_count,
         "coverage_high_total": normalized_high_total,
         "coverage_high_percent": normalized_high_percent,
-        "coverage_low_overlap_count": _coerce_optional_int(coverage_low_overlap_count),
-        "coverage_low_total": _coerce_optional_int(coverage_low_total),
+        "coverage_low_overlap_count": normalized_low_count,
+        "coverage_low_total": normalized_low_total,
+        "coverage_low_overlap_percent": normalized_low_percent,
         "explanation": _coerce_explanation(explanation),
         "evidence": _coerce_evidence(evidence),
     }
+    return validate_label_result(
+        normalized,
+        minimum_label_coverage_percent=minimum_label_coverage_percent,
+        maximum_low_overlap_percent=maximum_low_overlap_percent,
+    )
 
 
 def normalize_display_title(row) -> str:
@@ -571,6 +722,7 @@ def build_dimension_prompt(
     dimension_mode: str = "media",
     min_valid_items: int = MIN_VALID_ITEMS,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
 ) -> dict:
     positive_bundle = prepare_dimension_items(
         positive_df,
@@ -613,6 +765,7 @@ def build_dimension_prompt(
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
         min_valid_items=min_valid_items,
         minimum_label_coverage_percent=minimum_label_coverage_percent,
+        maximum_low_overlap_percent=maximum_low_overlap_percent,
         high_item_count=len(positive_items),
         low_item_count=len(negative_items),
         top_positive_block=_format_item_block(positive_items, "No valid high items available."),
@@ -627,6 +780,7 @@ def build_dimension_prompt(
         "valid_positive_count": valid_positive,
         "valid_negative_count": len(negative_bundle["valid_items"]),
         "minimum_label_coverage_percent": minimum_label_coverage_percent,
+        "maximum_low_overlap_percent": maximum_low_overlap_percent,
         "flagged_item_count": flagged_positive + len(negative_bundle["flagged_items"]),
         "skipped_reason": skipped_reason,
     }
@@ -651,6 +805,7 @@ def _build_user_prompt(
     dimension_mode: str = "media",
     min_valid_items: int = MIN_VALID_ITEMS,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
     high_item_count: int = DEFAULT_TOP_POSITIVE_ITEMS,
     low_item_count: int = DEFAULT_TOP_NEGATIVE_ITEMS,
 ) -> str:
@@ -660,6 +815,7 @@ def _build_user_prompt(
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
         min_valid_items=min_valid_items,
         minimum_label_coverage_percent=minimum_label_coverage_percent,
+        maximum_low_overlap_percent=maximum_low_overlap_percent,
         high_item_count=high_item_count,
         low_item_count=low_item_count,
         top_positive_block=top_positive_block,
@@ -667,7 +823,11 @@ def _build_user_prompt(
     )
 
 
-def _extract_label_result_from_response(response_text: str) -> dict:
+def _extract_label_result_from_response(
+    response_text: str,
+    minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
+) -> dict:
     raw = (response_text or "").strip()
     if not raw:
         raise ValueError("LLM returned an empty response")
@@ -693,12 +853,21 @@ def _extract_label_result_from_response(response_text: str) -> dict:
                 coverage_high_percent=data.get("coverage_high_percent"),
                 coverage_low_overlap_count=data.get("coverage_low_overlap_count"),
                 coverage_low_total=data.get("coverage_low_total"),
+                coverage_low_overlap_percent=data.get("coverage_low_overlap_percent", data.get("coverage_low_percent")),
                 label_confidence=data.get("label_confidence", data.get("confidence")),
                 label_type=data.get("label_type"),
+                minimum_label_coverage_percent=minimum_label_coverage_percent,
+                maximum_low_overlap_percent=maximum_low_overlap_percent,
             )
 
     first_line = raw.splitlines()[0]
-    return _normalize_label_result(first_line, "", [])
+    return _normalize_label_result(
+        first_line,
+        "",
+        [],
+        minimum_label_coverage_percent=minimum_label_coverage_percent,
+        maximum_low_overlap_percent=maximum_low_overlap_percent,
+    )
 
 
 def _extract_label_from_response(response_text: str) -> str:

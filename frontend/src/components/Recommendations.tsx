@@ -1282,6 +1282,11 @@ export default function Recommendations() {
       <h1 className="mb-2 text-2xl font-bold md:text-3xl">
         Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}
       </h1>
+      {lastUpdated && (
+        <div className={`mb-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+          Last updated: {new Date(lastUpdated).toLocaleString()}
+        </div>
+      )}
 
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-3">
@@ -1471,11 +1476,6 @@ export default function Recommendations() {
         </>
       )}
 
-      {lastUpdated && (
-        <div className="mt-4 text-right text-sm text-gray-500">
-          Last updated: {new Date(lastUpdated).toLocaleString()}
-        </div>
-      )}
     </div>
   );
 }

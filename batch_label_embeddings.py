@@ -42,6 +42,9 @@ CSV_FIELDNAMES = [
     "coverage_high_percent",
     "coverage_low_overlap_count",
     "coverage_low_total",
+    "coverage_low_overlap_percent",
+    "validation_status",
+    "validation_notes",
     "label_explanation",
     "label_evidence_1",
     "label_evidence_2",
@@ -182,6 +185,9 @@ def _default_label_result(skipped_reason: str = "") -> dict:
             "coverage_high_percent": None,
             "coverage_low_overlap_count": None,
             "coverage_low_total": None,
+            "coverage_low_overlap_percent": None,
+            "validation_status": "invalid",
+            "validation_notes": [skipped_reason],
             "explanation": skipped_reason,
             "evidence": ["", "", ""],
         }
@@ -194,9 +200,26 @@ def _default_label_result(skipped_reason: str = "") -> dict:
         "coverage_high_percent": None,
         "coverage_low_overlap_count": None,
         "coverage_low_total": None,
+        "coverage_low_overlap_percent": None,
+        "validation_status": "",
+        "validation_notes": [],
         "explanation": "",
         "evidence": ["", "", ""],
     }
+
+
+def _format_validation_notes(notes) -> str:
+    if isinstance(notes, list):
+        return " | ".join(str(note) for note in notes if str(note).strip())
+    return str(notes or "")
+
+
+def _format_result_validation(result: dict) -> str:
+    status = result.get("validation_status")
+    notes = _format_validation_notes(result.get("validation_notes", []))
+    if status and notes:
+        return f"{status}: {notes}"
+    return status or notes
 
 
 def main():
@@ -269,6 +292,9 @@ def main():
                     f"{provider_name}:{model_name} as: {label_result['label']}",
                     flush=True,
                 )
+                validation_message = _format_result_validation(label_result)
+                if validation_message:
+                    print(f"   validation={validation_message}", flush=True)
             except Exception as exc:
                 skipped_reason = f"LLM error: {str(exc).strip()}"
                 label_result = _default_label_result(skipped_reason)
@@ -295,6 +321,9 @@ def main():
                     "coverage_high_percent": label_result.get("coverage_high_percent"),
                     "coverage_low_overlap_count": label_result.get("coverage_low_overlap_count"),
                     "coverage_low_total": label_result.get("coverage_low_total"),
+                    "coverage_low_overlap_percent": label_result.get("coverage_low_overlap_percent"),
+                    "validation_status": label_result.get("validation_status", ""),
+                    "validation_notes": _format_validation_notes(label_result.get("validation_notes", [])),
                     "label_explanation": label_result.get("explanation", ""),
                     "label_evidence_1": evidence[0] if len(evidence) > 0 else "",
                     "label_evidence_2": evidence[1] if len(evidence) > 1 else "",
