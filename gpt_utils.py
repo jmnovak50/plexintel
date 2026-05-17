@@ -17,7 +17,7 @@ DEFAULT_TOP_NEGATIVE_ITEMS = get_setting_value("labeling.default_top_negative_it
 DEFAULT_FETCH_ITEMS = get_setting_value("labeling.default_fetch_items", default=10)
 MINIMUM_LABEL_COVERAGE_PERCENT = get_setting_value("labeling.minimum_label_coverage_percent", default=70)
 MAXIMUM_LOW_OVERLAP_PERCENT = get_setting_value("labeling.maximum_low_overlap_percent", default=40)
-SUMMARY_HINT_CHARS = get_setting_value("labeling.summary_hint_chars", default=140)
+SUMMARY_HINT_CHARS = get_setting_value("labeling.summary_hint_chars", default=220)
 MAX_GENRE_TAGS = get_setting_value("labeling.max_genre_tags", default=3)
 MAX_CAST_NAMES = get_setting_value("labeling.max_cast_names", default=2)
 MAX_DIRECTOR_NAMES = get_setting_value("labeling.max_director_names", default=2)
@@ -34,28 +34,32 @@ OLLAMA_TIMEOUT_S = get_setting_value("ollama.timeout_s", default=300)
 SYSTEM_PROMPT = """
 You label one embedding dimension for film and TV data.
 
-Use repeated patterns across the item metadata first.
-Use plot hints only as secondary support, never as the sole basis for the label.
+Find the strongest reusable semantic separator between HIGH and LOW examples.
+Use all available evidence: titles, genres, media type, plot hints, and cast/director only
+when they reveal an obvious cluster.
+Genres are often broad and noisy. Plot hints may contain the clearest signal for story/entity
+dimensions, so a repeated plot concept can be the primary basis for the label.
 
 For media dimensions, identify a concrete item-side separator.
 For user dimensions, infer a viewing-preference or taste separator from the representative watches
 associated with HIGH versus LOW users.
 
-Prefer concrete separators such as:
-- genre blend
-- tone
-- setting or era
-- format or franchise pattern
-- cast/director cohort
-- runtime or rating pattern
-- what HIGH items have that LOW items usually do not
+Prefer concrete story/entity separators over broad genre labels.
+Good labels are specific, such as "cyborg / modified-human identity".
+Bad labels are broad genre summaries, such as "sci-fi action", "speculative themes", or
+"complex narratives".
 
 Avoid abstract trope language unless it is clearly supported by multiple items.
 Do not use labels like redemption, coming of age, relationships, secrets, truth, purpose,
 humanity, moral ambiguity, family healing, or similar moral-arc language unless the pattern is
-explicitly repeated across several items and is supported by metadata, not just synopsis wording.
+explicitly repeated across several items and clearly separates HIGH from LOW.
 
-If the items are noisy, heterogeneous, malformed, or do not support a clear separator, use:
+Do not return UNCLEAR / MIXED SIGNAL merely because the label is imperfect.
+If one or two HIGH examples are outliers but the remaining examples form a clear cluster,
+label the dominant cluster and lower confidence.
+
+Use UNCLEAR / MIXED SIGNAL only when no concrete label reaches the coverage threshold or
+HIGH and LOW examples are not meaningfully separable:
 UNCLEAR / MIXED SIGNAL
 
 Return JSON only.
@@ -72,8 +76,12 @@ Dimension-specific guidance:
 {dimension_specific_guidance}
 
 Rules:
-- Use metadata first; use plot hints only as tie-breakers.
-- Prefer concrete labels over abstract themes.
+- Find the strongest reusable semantic separator between HIGH and LOW examples.
+- Use all available evidence: titles, genres, media type, plot hints, and cast/director only when they reveal an obvious cluster.
+- Genres are often broad and noisy; do not over-weight genre if plot hints reveal a stronger common concept.
+- Prefer concrete story/entity labels over broad genre labels.
+- Good label style: "cyborg / modified-human identity".
+- Bad label style: "sci-fi action", "speculative themes", or "complex narratives".
 - Label must be 8 words or fewer.
 - Explanation must be exactly 1 sentence.
 - Provide exactly 3 evidence bullets as short strings.
@@ -86,19 +94,19 @@ Rules:
 - HIGH examples in this prompt = {high_item_count}; LOW examples in this prompt = {low_item_count}.
 - A proposed label is only strong if HIGH coverage is at or above {minimum_label_coverage_percent}% and LOW overlap is at or below {maximum_low_overlap_percent}%.
 - If fewer than {minimum_label_coverage_percent}% of HIGH examples clearly support the proposed label, do not assign a confident semantic label.
-- When coverage is below the threshold, return UNCLEAR / MIXED SIGNAL unless there is an obvious narrow cluster label such as "Gossip Girl episode cluster" or "mostly short episodic titles"; narrow cluster labels should be low or medium confidence.
+- If one or two HIGH examples are outliers but the remaining examples form a clear cluster, assign the dominant cluster label and lower confidence.
+- When coverage is far below the threshold, return UNCLEAR / MIXED SIGNAL unless there is an obvious narrow cluster label such as "Gossip Girl episode cluster" or "mostly short episodic titles"; narrow cluster labels should be low or medium confidence.
 - If LOW overlap is above {maximum_low_overlap_percent}%, the label cannot be high confidence.
 - If LOW overlap is 50% or higher, return UNCLEAR / MIXED SIGNAL unless the label is a very narrow mechanical label that is still clearly useful.
 - Do not claim broad labels based on only a minority of examples.
 - Do not assign broad semantic labels that apply equally well to HIGH and LOW examples.
 - Prefer labels that separate HIGH from LOW, not merely labels that describe HIGH.
-- Prefer boring, mechanical labels over creative vibe labels.
+- Prefer concrete semantic labels over broad genres, mechanical labels, or creative vibe labels.
 - Report coverage as counts and percents: coverage_high_count / coverage_high_total and coverage_low_overlap_count / coverage_low_total, such as 7/10 and 2/8.
-- Also output UNCLEAR / MIXED SIGNAL if:
-  1. HIGH items split into unrelated clusters,
+- Return UNCLEAR / MIXED SIGNAL only if:
+  1. no concrete label reaches the coverage threshold after allowing a dominant cluster with one or two outliers,
   2. malformed or truncated titles dominate,
-  3. the pattern is driven mostly by synopsis text,
-  4. HIGH vs LOW contrast is weak or contradictory.
+  3. HIGH vs LOW contrast is weak or contradictory.
 
 Return ONLY this JSON shape:
 {{
@@ -379,14 +387,25 @@ def validate_label_result(
         and high_percent < minimum_label_coverage_percent
         and not _is_unclear_label(validated.get("label", ""))
     ):
-        if validated.get("label_type") in {"cluster", "mechanical"}:
+        near_threshold_floor = max(0, minimum_label_coverage_percent - 10)
+        is_near_threshold = high_percent >= near_threshold_floor
+        low_overlap_is_limited = (
+            low_overlap_percent is None
+            or low_overlap_percent <= maximum_low_overlap_percent
+        )
+
+        if (
+            validated.get("label_type") in {"cluster", "mechanical"}
+            or (is_near_threshold and low_overlap_is_limited)
+        ):
             validated["label_confidence"] = "low"
             _add_validation_note(
                 validated,
                 "downgraded",
                 (
                     f"HIGH coverage was {high_percent}%, below the "
-                    f"{minimum_label_coverage_percent}% minimum; kept only as a low-confidence narrow label."
+                    f"{minimum_label_coverage_percent}% preferred minimum; kept only as a low-confidence "
+                    f"dominant-cluster label."
                 ),
             )
         else:
@@ -978,8 +997,9 @@ def call_llm_for_label_result(
                 break
             time.sleep(retry_delay_s * attempt)
 
+    error_detail = f": {last_error}" if last_error else ""
     raise RuntimeError(
-        f"Failed to generate label via {resolved_provider}:{resolved_model}"
+        f"Failed to generate label via {resolved_provider}:{resolved_model}{error_detail}"
     ) from last_error
 
 

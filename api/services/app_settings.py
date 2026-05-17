@@ -748,7 +748,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "advanced_labeling",
         "Summary Hint Characters",
         "integer",
-        default=140,
+        default=220,
         minimum=20,
         description=(
             "Maximum amount of summary text included per item. Increase this if the LLM needs more plot/context to "

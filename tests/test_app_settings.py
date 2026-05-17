@@ -267,6 +267,15 @@ class AppSettingsTests(unittest.TestCase):
         with self.assertRaises(app_settings.SettingsValidationError):
             app_settings.parse_value(definition, "105")
 
+    def test_summary_hint_setting_allows_longer_plot_evidence(self):
+        definition = app_settings.get_setting_definition("labeling.summary_hint_chars")
+
+        self.assertEqual(definition.label, "Summary Hint Characters")
+        self.assertEqual(definition.value_type, "integer")
+        self.assertEqual(definition.default, 220)
+        self.assertEqual(definition.minimum, 20)
+        self.assertEqual(app_settings.parse_value(definition, "240"), 240)
+
     def test_consumer_defaults_and_overrides(self):
         settings_map = {
             "labeling.provider": "ollama",

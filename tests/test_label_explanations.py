@@ -110,6 +110,30 @@ class DimensionRoutingTests(unittest.TestCase):
         self.assertEqual(batch_label_embeddings._get_dimension_range("user"), (768, 1536))
         self.assertEqual(batch_label_embeddings._get_dimension_range("all"), (0, 1536))
 
+    def test_manual_batch_dimensions_keep_requested_order_and_stats(self):
+        with patch.object(
+            batch_label_embeddings,
+            "get_ranked_dimension_stats",
+            return_value=[
+                {
+                    "dimension": 300,
+                    "usage_count": 12,
+                    "sum_abs_shap": 4.5,
+                    "avg_abs_shap": 0.3,
+                    "combined_score": 9.1,
+                    "user_count": 5,
+                    "stats_source": "aggregate",
+                }
+            ],
+        ):
+            stats = batch_label_embeddings.get_dimension_stats_for_dimensions(None, [301, 300])
+
+        self.assertEqual([stat["dimension"] for stat in stats], [301, 300])
+        self.assertEqual(stats[0]["stats_source"], "manual")
+        self.assertEqual(stats[0]["usage_count"], 0)
+        self.assertEqual(stats[1]["stats_source"], "aggregate")
+        self.assertEqual(stats[1]["combined_score"], 9.1)
+
 
 class PositiveLabelSelectionTests(unittest.TestCase):
     def test_positive_label_selection_excludes_negative_dedupes_and_limits(self):
@@ -175,6 +199,9 @@ class LabelCoveragePromptTests(unittest.TestCase):
 
         self.assertIn("Minimum Label Coverage Percent = 80", prompt_text)
         self.assertIn("Maximum Low Overlap Percent = 35", prompt_text)
+        self.assertIn("Find the strongest reusable semantic separator", prompt_text)
+        self.assertIn("plot hints reveal a stronger common concept", prompt_text)
+        self.assertIn("Prefer concrete story/entity labels", prompt_text)
         self.assertIn("If fewer than 80% of HIGH examples clearly support", prompt_text)
         self.assertIn("LOW overlap is above 35%", prompt_text)
         self.assertIn("labels that separate HIGH from LOW", prompt_text)
@@ -323,6 +350,32 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(result["validation_status"], "invalid")
         self.assertIn("HIGH coverage was 50%", " ".join(result["validation_notes"]))
 
+    def test_near_threshold_dominant_cluster_is_kept_low_confidence(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "modified-human identity",
+              "label_confidence": "medium",
+              "label_type": "semantic",
+              "coverage_high_count": 4,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 1,
+              "coverage_low_total": 4,
+              "explanation": "Most high examples involve modified or artificial beings while low examples mostly do not.",
+              "evidence": ["Cyborgs and androids repeat", "One or two HIGH outliers remain", "LOW overlap is limited"]
+            }
+            """,
+            minimum_label_coverage_percent=70,
+            maximum_low_overlap_percent=40,
+        )
+
+        self.assertEqual(result["coverage_high_percent"], 67)
+        self.assertEqual(result["coverage_low_overlap_percent"], 25)
+        self.assertEqual(result["label"], "modified-human identity")
+        self.assertEqual(result["label_confidence"], "low")
+        self.assertEqual(result["validation_status"], "downgraded")
+        self.assertIn("dominant-cluster label", " ".join(result["validation_notes"]))
+
     def test_unclear_with_strong_high_and_low_separation_needs_review(self):
         result = gpt_utils._extract_label_result_from_response(
             """
@@ -347,6 +400,16 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(result["label"], gpt_utils.UNCLEAR_LABEL)
         self.assertEqual(result["validation_status"], "needs_review")
         self.assertIn("Label marked unclear despite meeting HIGH coverage threshold", " ".join(result["validation_notes"]))
+
+    def test_llm_generation_error_includes_root_cause(self):
+        with patch.object(gpt_utils, "resolve_label_backend", return_value=("ollama", "example-model")):
+            with patch.object(
+                gpt_utils,
+                "_call_ollama_for_label_result",
+                side_effect=RuntimeError("model not found"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "model not found"):
+                    gpt_utils.call_llm_for_label_result("prompt", max_retries=1)
 
 
 if __name__ == "__main__":

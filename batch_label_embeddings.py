@@ -163,6 +163,30 @@ def get_top_unlabeled_dimensions(cur, limit=25, dim_type="media"):
     return get_top_dimensions(cur, limit=limit, dim_type=dim_type, include_labeled=False)
 
 
+def get_dimension_stats_for_dimensions(cur, dimensions: list[int]):
+    ranked_stats = {
+        stat["dimension"]: stat
+        for stat in get_ranked_dimension_stats(cur)
+    }
+    stats = []
+    for dimension in dimensions:
+        stats.append(
+            ranked_stats.get(
+                dimension,
+                {
+                    "dimension": dimension,
+                    "usage_count": 0,
+                    "sum_abs_shap": 0.0,
+                    "avg_abs_shap": 0.0,
+                    "combined_score": 0.0,
+                    "user_count": 0,
+                    "stats_source": "manual",
+                },
+            )
+        )
+    return stats
+
+
 def _fetch_dimension_samples(dimension: int):
     if get_dimension_mode(dimension) == "media":
         positive_ids = get_top_media_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
@@ -233,6 +257,9 @@ def main():
     parser.add_argument("--save_label", action="store_true")
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--dim_type", choices=["media", "user", "all"], default="all")
+    dimension_group = parser.add_mutually_exclusive_group()
+    dimension_group.add_argument("--dimension", type=int, help="Process one exact embedding dimension")
+    dimension_group.add_argument("--dimensions", nargs="+", type=int, help="Process exact embedding dimensions")
     parser.add_argument(
         "--refresh_existing",
         "--include_labeled",
@@ -249,14 +276,35 @@ def main():
     if args.label:
         provider_name, model_name = resolve_label_backend(args.label_provider, args.label_model)
 
+    ensure_app_schema()
+
     conn = connect_db()
     cur = conn.cursor()
-    top_dims = get_top_dimensions(
-        cur,
-        limit=args.limit,
-        dim_type=args.dim_type,
-        include_labeled=args.refresh_existing,
+
+    requested_dimensions = args.dimensions or (
+        [args.dimension] if args.dimension is not None else []
     )
+    if requested_dimensions:
+        dim_min, dim_max = _get_dimension_range(args.dim_type)
+        for dimension in requested_dimensions:
+            if dimension < 0 or dimension >= COMBINED_EMBEDDING_DIMENSIONS:
+                parser.error(
+                    f"dimension {dimension} is outside the valid range "
+                    f"0-{COMBINED_EMBEDDING_DIMENSIONS - 1}"
+                )
+            if not (dim_min <= dimension < dim_max):
+                parser.error(
+                    f"dimension {dimension} is outside --dim_type {args.dim_type}; "
+                    "use --dim_type all or the matching scope"
+                )
+        top_dims = get_dimension_stats_for_dimensions(cur, requested_dimensions)
+    else:
+        top_dims = get_top_dimensions(
+            cur,
+            limit=args.limit,
+            dim_type=args.dim_type,
+            include_labeled=args.refresh_existing,
+        )
 
     if not top_dims:
         scope = "all dimensions" if args.refresh_existing else "unlabeled dimensions"
@@ -368,5 +416,4 @@ def main():
 
 
 if __name__ == "__main__":
-    ensure_app_schema()
     main()
