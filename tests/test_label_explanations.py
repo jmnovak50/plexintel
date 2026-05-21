@@ -202,6 +202,9 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertIn("Find the strongest reusable semantic separator", prompt_text)
         self.assertIn("plot hints reveal a stronger common concept", prompt_text)
         self.assertIn("Prefer concrete story/entity labels", prompt_text)
+        self.assertIn("Good labels are compact evidence-derived noun phrases", prompt_text)
+        self.assertIn("Never copy wording from these instructions", prompt_text)
+        self.assertIn("choose the narrower nuance", prompt_text)
         self.assertIn("If fewer than 80% of HIGH examples clearly support", prompt_text)
         self.assertIn("LOW overlap is above 35%", prompt_text)
         self.assertIn("labels that separate HIGH from LOW", prompt_text)
@@ -210,6 +213,8 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertIn('"coverage_low_overlap_count": 0', prompt_text)
         self.assertIn('"coverage_low_overlap_percent": 0', prompt_text)
         self.assertIn('"label_confidence": "high, medium, low, or unclear"', prompt_text)
+        self.assertNotIn("cyborg / modified-human identity", gpt_utils.SYSTEM_PROMPT)
+        self.assertNotIn("cyborg / modified-human identity", prompt_text)
         self.assertEqual(prompt_bundle["minimum_label_coverage_percent"], 80)
         self.assertEqual(prompt_bundle["maximum_low_overlap_percent"], 35)
 

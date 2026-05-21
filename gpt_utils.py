@@ -45,9 +45,13 @@ For user dimensions, infer a viewing-preference or taste separator from the repr
 associated with HIGH versus LOW users.
 
 Prefer concrete story/entity separators over broad genre labels.
-Good labels are specific, such as "cyborg / modified-human identity".
 Bad labels are broad genre summaries, such as "sci-fi action", "speculative themes", or
 "complex narratives".
+Good labels are short, concrete, evidence-derived noun phrases.
+Do not copy example wording from these instructions into the label. The label must come only
+from the HIGH/LOW evidence for the current dimension.
+If related dimensions share a broad theme, label each dimension by its distinguishing nuance
+instead of reusing a generic umbrella label.
 
 Avoid abstract trope language unless it is clearly supported by multiple items.
 Do not use labels like redemption, coming of age, relationships, secrets, truth, purpose,
@@ -80,8 +84,11 @@ Rules:
 - Use all available evidence: titles, genres, media type, plot hints, and cast/director only when they reveal an obvious cluster.
 - Genres are often broad and noisy; do not over-weight genre if plot hints reveal a stronger common concept.
 - Prefer concrete story/entity labels over broad genre labels.
-- Good label style: "cyborg / modified-human identity".
 - Bad label style: "sci-fi action", "speculative themes", or "complex narratives".
+- Good labels are compact evidence-derived noun phrases, no more than 8 words.
+- Derive the label only from the listed HIGH/LOW items for this dimension.
+- Never copy wording from these instructions or reuse a prior label unless the current dimension independently supports the exact words.
+- When a dimension resembles a broader theme seen elsewhere, choose the narrower nuance that best separates this HIGH set from this LOW set.
 - Label must be 8 words or fewer.
 - Explanation must be exactly 1 sentence.
 - Provide exactly 3 evidence bullets as short strings.
