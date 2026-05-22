@@ -219,6 +219,7 @@ class AgentToolServiceTests(unittest.TestCase):
                     "rating": "7.4",
                     "year": 2025,
                     "duration": 123,
+                    "duration_formatted": "00:00:00",
                     "genres": "Thriller",
                     "actors": "Cate Blanchett",
                     "directors": "Steven Soderbergh",
@@ -240,8 +241,10 @@ class AgentToolServiceTests(unittest.TestCase):
         self.assertEqual(response.count, 1)
         self.assertEqual(response.items[0].title, "Black Bag")
         self.assertEqual(response.items[0].rating, 7.4)
+        self.assertEqual(response.items[0].duration_formatted, "00:00:00")
         executed_sql, executed_params = conn.cursor_obj.executed[0]
         self.assertIn("FROM library_catalog_v", executed_sql)
+        self.assertIn("duration_formatted", executed_sql)
         self.assertIn("media_type ILIKE %s", executed_sql)
         self.assertIn("COALESCE(added_at, changed_at) >= NOW()", executed_sql)
         self.assertIn("COALESCE(added_at, changed_at) DESC", executed_sql)

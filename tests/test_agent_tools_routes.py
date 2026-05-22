@@ -100,6 +100,7 @@ class AgentToolsRouteTests(unittest.TestCase):
                     title="Black Bag",
                     media_type="movie",
                     year=2025,
+                    duration_formatted="00:00:00",
                 )
             ],
         )
@@ -111,6 +112,7 @@ class AgentToolsRouteTests(unittest.TestCase):
         self.assertEqual(data["media_type"], "movie")
         self.assertEqual(data["days"], 7)
         self.assertEqual(data["items"][0]["title"], "Black Bag")
+        self.assertEqual(data["items"][0]["duration_formatted"], "00:00:00")
 
     def test_poster_gallery_route_accepts_rating_keys_and_resolves_metadata(self):
         with patch.object(

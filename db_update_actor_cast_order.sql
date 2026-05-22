@@ -176,7 +176,8 @@ CREATE OR REPLACE VIEW public.library_catalog_v AS
     m.added_at AS changed_at,
     m.thumb_path,
     m.parent_thumb_path,
-    m.grandparent_thumb_path
+    m.grandparent_thumb_path,
+    TO_CHAR(MAKE_INTERVAL(SECS => COALESCE(m.duration, 0) / 1000), 'HH24:MI:SS'::text) AS duration_formatted
    FROM public.library m
      LEFT JOIN g ON (g.rating_key = m.rating_key)
      LEFT JOIN a ON (a.rating_key = m.rating_key)

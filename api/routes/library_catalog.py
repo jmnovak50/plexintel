@@ -7,7 +7,7 @@ from api.db.connection import connect_db
 router = APIRouter()
 
 BASE = """
-SELECT rating_key, title, year, media_type, duration, added_at, changed_at,
+SELECT rating_key, title, year, media_type, duration, duration_formatted, added_at, changed_at,
        genres_arr, actors_arr, directors_arr,
        rating, summary, season_number, episode_number,
        show_title, episode_title, episode_summary,

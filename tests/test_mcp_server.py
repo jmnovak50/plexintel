@@ -171,6 +171,7 @@ class MCPServerTests(unittest.TestCase):
                     title="Black Bag",
                     media_type="movie",
                     year=2025,
+                    duration_formatted="00:00:00",
                 )
             ],
         )
@@ -280,6 +281,7 @@ class MCPServerTests(unittest.TestCase):
         self.assertIn("https://plexintel.kabolly.com/api/posters/88?w=180", results["gallery"].content[0].text)
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
+        self.assertEqual(results["recent"].structuredContent["items"][0]["duration_formatted"], "00:00:00")
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
 
     def test_build_poster_markup_payload_uses_public_agent_url(self):

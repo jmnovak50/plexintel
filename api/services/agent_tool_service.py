@@ -86,6 +86,7 @@ class RecentLibraryItem(BaseModel):
     rating: Optional[float] = None
     year: Optional[int] = None
     duration: Optional[int] = None
+    duration_formatted: Optional[str] = None
     genres: Optional[str] = None
     actors: Optional[str] = None
     directors: Optional[str] = None
@@ -360,6 +361,7 @@ def get_recent_library_additions(
             rating,
             year,
             duration,
+            duration_formatted,
             genres,
             actors,
             directors,
@@ -401,6 +403,7 @@ def get_recent_library_additions(
             rating=normalize_float(row.get("rating")),
             year=row.get("year"),
             duration=row.get("duration"),
+            duration_formatted=row.get("duration_formatted"),
             genres=row.get("genres"),
             actors=row.get("actors"),
             directors=row.get("directors"),
