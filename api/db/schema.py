@@ -133,6 +133,54 @@ def apply_schema_updates(conn) -> None:
         )
         cur.execute(
             """
+            DO $$
+            BEGIN
+                IF to_regclass('public.watch_history') IS NOT NULL THEN
+                    WITH ranked AS (
+                        SELECT
+                            ctid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY watch_id
+                                ORDER BY watched_at DESC NULLS LAST, ctid DESC
+                            ) AS rn
+                        FROM public.watch_history
+                    )
+                    DELETE FROM public.watch_history wh
+                    USING ranked
+                    WHERE wh.ctid = ranked.ctid
+                      AND ranked.rn > 1;
+
+                    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS watch_history_watch_id_uidx ON public.watch_history (watch_id)';
+                END IF;
+            END $$;
+            """
+        )
+        cur.execute(
+            """
+            DO $$
+            BEGIN
+                IF to_regclass('public.watch_embeddings') IS NOT NULL THEN
+                    WITH ranked AS (
+                        SELECT
+                            ctid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY watch_id
+                                ORDER BY ctid DESC
+                            ) AS rn
+                        FROM public.watch_embeddings
+                    )
+                    DELETE FROM public.watch_embeddings we
+                    USING ranked
+                    WHERE we.ctid = ranked.ctid
+                      AND ranked.rn > 1;
+
+                    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS watch_embeddings_watch_id_uidx ON public.watch_embeddings (watch_id)';
+                END IF;
+            END $$;
+            """
+        )
+        cur.execute(
+            """
             ALTER TABLE IF EXISTS public.user_feedback
             DROP CONSTRAINT IF EXISTS user_feedback_feedback_check
             """

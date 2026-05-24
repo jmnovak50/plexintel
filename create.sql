@@ -892,9 +892,13 @@ CREATE INDEX IF NOT EXISTS recommendations_username_score_idx ON public.recommen
 
 CREATE INDEX IF NOT EXISTS library_show_rating_key_idx ON public.library (show_rating_key);
 
+CREATE UNIQUE INDEX IF NOT EXISTS watch_history_watch_id_uidx ON public.watch_history (watch_id);
+
 CREATE INDEX IF NOT EXISTS watch_history_username_rating_key_idx ON public.watch_history (username, rating_key);
 
 CREATE INDEX IF NOT EXISTS watch_history_username_show_rating_key_idx ON public.watch_history (username, show_rating_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS watch_embeddings_watch_id_uidx ON public.watch_embeddings (watch_id);
 
 
 --

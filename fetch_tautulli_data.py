@@ -27,7 +27,7 @@ def safe_int(value):
         return None
     try:
         return int(value)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 def get_embed_batch_size() -> int:
@@ -664,7 +664,7 @@ def store_directors(conn, cursor, rating_key, directors):
 
 
 # ✅ Store watch history in PostgreSQL
-def store_watch_history(conn, cursor, watch_history):           
+def store_watch_history(conn, cursor, watch_history, *, raise_on_error=False):
     insert_watch = """
         INSERT INTO watch_history (
             rating_key, watched_at, played_duration, percent_complete, watch_id, media_type, username,
@@ -679,8 +679,11 @@ def store_watch_history(conn, cursor, watch_history):
                 show_rating_key = EXCLUDED.show_rating_key
 """
     for record in watch_history:
-        watch_id = record.get("watch_id") or record.get("id")
-        rating_key = record.get("rating_key")
+        raw_watch_id = record.get("watch_id")
+        if raw_watch_id is None:
+            raw_watch_id = record.get("id")
+        watch_id = safe_int(raw_watch_id)
+        rating_key = safe_int(record.get("rating_key"))
         if watch_id is None or rating_key is None:
             print(f"⚠️ Skipping watch history insert due to missing watch_id or rating_key: {record}")
             continue
@@ -701,6 +704,8 @@ def store_watch_history(conn, cursor, watch_history):
             ))
         except Exception as e:
             print(f"❌ Error inserting watch history for watch_id={watch_id}: {e}")
+            if raise_on_error:
+                raise
             conn.rollback()
 
 #def fetch_existing_library_data(cursor):
@@ -1097,76 +1102,232 @@ def recover_missing_media(dry_run=False):
 from datetime import datetime, timezone
 import json
 
-def fetch_all_watch_history(after_ts):
-    print(f"🕵️ Fetching all Tautulli history after {after_ts} (paginated)")
+WATCH_HISTORY_PAGE_SIZE = 1000
+
+
+def fetch_watch_history_pages(after_ts=None, page_size=WATCH_HISTORY_PAGE_SIZE):
+    scope = f"after {after_ts}" if after_ts is not None else "from the beginning"
+    print(f"🕵️ Fetching all Tautulli history {scope} (paginated)")
     all_rows = []
     start = 0
-    page_size = 1000
+    expected_total = None
 
     while True:
-        response = fetch_tautulli_data("get_history", {
-            "after": after_ts,
+        params = {
             "order_dir": "asc",
             "length": page_size,
-            "start": start
-        })
-        rows = response.get("data", [])
+            "start": start,
+        }
+        if after_ts is not None:
+            params["after"] = after_ts
+
+        response = fetch_tautulli_data("get_history", params)
+        if not isinstance(response, dict):
+            return {
+                "ok": False,
+                "rows": all_rows,
+                "error": f"Page {start // page_size + 1} returned a non-object response",
+            }
+
+        rows = response.get("data")
+        if not isinstance(rows, list):
+            return {
+                "ok": False,
+                "rows": all_rows,
+                "error": f"Page {start // page_size + 1} was missing a list 'data' payload",
+            }
+
+        total_value = response.get("recordsFiltered")
+        if total_value in (None, ""):
+            total_value = response.get("recordsTotal")
+        if total_value not in (None, ""):
+            try:
+                expected_total = int(total_value)
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "rows": all_rows,
+                    "error": f"Page {start // page_size + 1} returned invalid total count: {total_value}",
+                }
+
         print(f"📦 Page {start // page_size + 1}: Retrieved {len(rows)} rows")
 
+        all_rows.extend(rows)
+
+        if expected_total is not None and len(all_rows) > expected_total:
+            return {
+                "ok": False,
+                "rows": all_rows,
+                "error": (
+                    "Pagination returned more rows than Tautulli reported: "
+                    f"got {len(all_rows)} of {expected_total}"
+                ),
+            }
+        if expected_total is not None and len(all_rows) == expected_total:
+            break
         if not rows:
             break
-
-        all_rows.extend(rows)
         if len(rows) < page_size:
             break
 
         start += page_size
 
-    return all_rows
+    if expected_total is not None and len(all_rows) < expected_total:
+        return {
+            "ok": False,
+            "rows": all_rows,
+            "error": (
+                "Pagination ended before all rows were fetched: "
+                f"got {len(all_rows)} of {expected_total}"
+            ),
+        }
+
+    return {
+        "ok": True,
+        "rows": all_rows,
+        "error": None,
+        "expected_total": expected_total,
+    }
+
+
+def fetch_all_watch_history(after_ts):
+    result = fetch_watch_history_pages(after_ts=after_ts)
+    if not result["ok"]:
+        print(f"⚠️ Watch history fetch failed: {result['error']}")
+        return []
+    return result["rows"]
+
+
+def normalize_watch_history_rows(rows):
+    valid_rows = []
+    upstream_watch_ids = set()
+    malformed_rows = []
+
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            malformed_rows.append({"index": index, "reason": "row is not an object", "row": row})
+            continue
+
+        raw_watch_id = row.get("id")
+        if raw_watch_id is None:
+            raw_watch_id = row.get("watch_id")
+        watch_id = safe_int(raw_watch_id)
+        rating_key = safe_int(row.get("rating_key"))
+
+        if watch_id is None or rating_key is None:
+            malformed_rows.append({
+                "index": index,
+                "reason": "missing id/watch_id or rating_key",
+                "row": row,
+            })
+            continue
+
+        normalized = dict(row)
+        normalized["watch_id"] = watch_id
+        normalized["rating_key"] = rating_key
+        valid_rows.append(normalized)
+        upstream_watch_ids.add(watch_id)
+
+    return valid_rows, upstream_watch_ids, malformed_rows
+
+
+def purge_deleted_watch_history(cursor, upstream_watch_ids):
+    upstream_ids = sorted(upstream_watch_ids)
+    deleted_embedding_rows = 0
+    deleted_watch_rows = 0
+
+    if upstream_ids:
+        cursor.execute(
+            """
+            DELETE FROM watch_embeddings we
+            USING watch_history wh
+            WHERE we.watch_id = wh.watch_id
+              AND NOT (wh.watch_id = ANY(%s))
+            """,
+            (upstream_ids,),
+        )
+        deleted_embedding_rows = cursor.rowcount or 0
+
+        cursor.execute(
+            """
+            DELETE FROM watch_history
+            WHERE NOT (watch_id = ANY(%s))
+            """,
+            (upstream_ids,),
+        )
+        deleted_watch_rows = cursor.rowcount or 0
+
+    cursor.execute(
+        """
+        DELETE FROM watch_embeddings we
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM watch_history wh
+            WHERE wh.watch_id = we.watch_id
+        )
+        """
+    )
+    deleted_orphan_embeddings = cursor.rowcount or 0
+
+    return {
+        "deleted_watch_rows": deleted_watch_rows,
+        "deleted_embedding_rows": deleted_embedding_rows,
+        "deleted_orphan_embeddings": deleted_orphan_embeddings,
+    }
+
 
 def sync_new_watch_history(conn, cursor):
-    print("🎬 Syncing new watch history...")
+    print("🎬 Reconciling watch history with Tautulli...")
 
-    cursor.execute("SELECT MAX(watched_at) FROM watch_history")
-    last_seen = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM watch_history")
+    count_row = cursor.fetchone()
+    local_count = count_row[0] if count_row else 0
 
-    # Convert to UNIX seconds (Tautulli expects this)
-    if last_seen is None:
-        after_ts = 0
-    else:
-        if last_seen.tzinfo is None:
-            last_seen = last_seen.replace(tzinfo=timezone.utc)
-        after_ts = int(last_seen.timestamp()) - 60
+    result = fetch_watch_history_pages(after_ts=None)
+    if not result["ok"]:
+        print(f"⚠️ Watch history reconciliation skipped: {result['error']}")
+        return False
 
-    rows = fetch_all_watch_history(after_ts)
+    rows = result["rows"]
     print(f"🧪 Tautulli returned {len(rows)} raw rows total")
 
-    if not rows:
-        print("✅ No new watch history found.")
-        return
+    valid_rows, upstream_watch_ids, malformed_rows = normalize_watch_history_rows(rows)
+    if malformed_rows:
+        print(f"⚠️ Watch history reconciliation skipped due to {len(malformed_rows)} malformed row(s).")
+        print("⚠️ Example malformed row:")
+        print(json.dumps(malformed_rows[0], indent=2, default=str))
+        return False
 
-    valid_rows = []
-    skipped_rows = []
+    if not valid_rows and local_count:
+        print(
+            "⚠️ Watch history reconciliation skipped: Tautulli returned zero valid "
+            f"rows while {local_count} local row(s) exist."
+        )
+        return False
 
-    for r in rows:
-        if r.get("id") and r.get("rating_key"):
-            r["watch_id"] = r["id"]  # normalize for DB
-            valid_rows.append(r)
-        else:
-            skipped_rows.append(r)
-
-    print(f"📥 Found {len(valid_rows)} valid watch history rows. Inserting...")
-
-    if skipped_rows:
-        print(f"⚠️ Skipped {len(skipped_rows)} rows due to missing id or rating_key")
-        print("⚠️ Example skipped row:")
-        print(json.dumps(skipped_rows[0], indent=2))
+    print(f"📥 Found {len(valid_rows)} valid watch history rows. Upserting...")
 
     if valid_rows:
-        latest_insert = max([r["date"] for r in valid_rows])
-        print(f"🆕 Most recent fetched watched_at: {datetime.utcfromtimestamp(latest_insert)} UTC")
+        latest_insert = max(safe_int(r.get("date")) or 0 for r in valid_rows)
+        if latest_insert:
+            print(f"🆕 Most recent fetched watched_at: {datetime.fromtimestamp(latest_insert, timezone.utc)}")
 
-    store_watch_history(conn, cursor, valid_rows)
+    try:
+        store_watch_history(conn, cursor, valid_rows, raise_on_error=True)
+        purge_counts = purge_deleted_watch_history(cursor, upstream_watch_ids)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Watch history reconciliation failed; rolled back changes: {e}")
+        return False
+
+    print(
+        "✅ Watch history reconciliation complete. "
+        f"Deleted {purge_counts['deleted_watch_rows']} stale watch row(s), "
+        f"{purge_counts['deleted_embedding_rows']} stale watch embedding(s), "
+        f"{purge_counts['deleted_orphan_embeddings']} orphan watch embedding(s)."
+    )
+    return True
 
 def generate_media_embeddings(batch_size: int | None = None):
     """

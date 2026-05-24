@@ -56,6 +56,9 @@ def build_user_embeddings(watch_history, conn):
             user_vectors[username].append(np.array(embedding))
 
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM user_embeddings")
+        print("🧹 Cleared existing user embeddings before rebuild")
+
         for username, vectors in user_vectors.items():
             if len(vectors) == 0:
                 continue
