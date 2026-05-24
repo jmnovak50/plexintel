@@ -361,7 +361,7 @@ def get_recent_library_additions(
             rating,
             year,
             duration,
-            duration_formatted,
+            TO_CHAR(MAKE_INTERVAL(SECS => COALESCE(duration, 0) / 1000), 'HH24:MI:SS') AS duration_formatted,
             genres,
             actors,
             directors,

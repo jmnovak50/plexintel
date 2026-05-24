@@ -245,6 +245,7 @@ class AgentToolServiceTests(unittest.TestCase):
         executed_sql, executed_params = conn.cursor_obj.executed[0]
         self.assertIn("FROM library_catalog_v", executed_sql)
         self.assertIn("duration_formatted", executed_sql)
+        self.assertIn("MAKE_INTERVAL", executed_sql)
         self.assertIn("media_type ILIKE %s", executed_sql)
         self.assertIn("COALESCE(added_at, changed_at) >= NOW()", executed_sql)
         self.assertIn("COALESCE(added_at, changed_at) DESC", executed_sql)
