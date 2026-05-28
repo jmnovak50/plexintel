@@ -1014,6 +1014,44 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("PIPELINE_TIMEZONE",),
         description="IANA timezone used for the pipeline schedule.",
     ),
+    _setting(
+        "pipeline.label_batch_limit",
+        "pipeline",
+        "Label Batch Limit",
+        "integer",
+        default=300,
+        env_aliases=("PIPELINE_LABEL_BATCH_LIMIT",),
+        minimum=1,
+        description=(
+            "Number of embedding dimensions the in-app pipeline attempts to label in each batch labeling stage. "
+            "Raise this to expand label coverage faster; lower it if labeling takes too long or overwhelms the LLM."
+        ),
+    ),
+    _setting(
+        "pipeline.label_dim_type",
+        "pipeline",
+        "Label Dimension Type",
+        "string",
+        default="all",
+        env_aliases=("PIPELINE_LABEL_DIM_TYPE",),
+        choices=("all", "media", "user"),
+        description=(
+            "Embedding dimension scope used by the in-app pipeline label stage. Use all for broad coverage, media for "
+            "title/content-side labels only, or user for preference-side labels only."
+        ),
+    ),
+    _setting(
+        "pipeline.refresh_existing_labels",
+        "pipeline",
+        "Refresh Existing Labels",
+        "boolean",
+        default=False,
+        env_aliases=("PIPELINE_REFRESH_EXISTING_LABELS",),
+        description=(
+            "When enabled, the in-app pipeline may relabel dimensions that already have saved labels. Leave disabled "
+            "when the goal is to backfill labels onto more recommendations."
+        ),
+    ),
 )
 
 SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFINITIONS}

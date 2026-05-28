@@ -93,6 +93,11 @@ function choiceLabel(field: SettingField, choice: string) {
   if (field.key === "pipeline.weekly_day") {
     return `${choice.charAt(0).toUpperCase()}${choice.slice(1)}`;
   }
+  if (field.key === "pipeline.label_dim_type") {
+    if (choice === "all") return "All dimensions";
+    if (choice === "media") return "Media dimensions";
+    if (choice === "user") return "User dimensions";
+  }
   return choice;
 }
 

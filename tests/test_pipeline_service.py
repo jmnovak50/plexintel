@@ -71,6 +71,40 @@ class PipelineScheduleSlotTests(unittest.TestCase):
             self.assertEqual(out["status"], "disabled")
 
 
+class PipelineStageTests(unittest.TestCase):
+    def test_build_pipeline_stages_uses_label_batch_setting_defaults(self):
+        with patch.object(pipeline_service, "get_setting_value", side_effect=lambda _key, default=None: default):
+            stages = pipeline_service.build_pipeline_stages()
+
+        batch_label = dict(stages)["batch_label"]
+        self.assertIn("batch_label_embeddings.py", batch_label[1])
+        self.assertIn("--label", batch_label)
+        self.assertIn("--save_label", batch_label)
+        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "300")
+        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
+        self.assertIn("--export_csv", batch_label)
+        self.assertNotIn("--refresh_existing", batch_label)
+
+    def test_build_pipeline_stages_can_refresh_existing_labels_from_settings(self):
+        values = {
+            "pipeline.label_batch_limit": 25,
+            "pipeline.label_dim_type": "media",
+            "pipeline.refresh_existing_labels": True,
+        }
+
+        with patch.object(
+            pipeline_service,
+            "get_setting_value",
+            side_effect=lambda key, default=None: values.get(key, default),
+        ):
+            stages = pipeline_service.build_pipeline_stages()
+
+        batch_label = dict(stages)["batch_label"]
+        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
+        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "media")
+        self.assertIn("--refresh_existing", batch_label)
+
+
 class PipelineRunTests(unittest.TestCase):
     def test_run_pipeline_reads_named_advisory_lock_result(self):
         conn = FakeConnection(

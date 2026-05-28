@@ -108,6 +108,24 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     root = str(REPO_ROOT)
     today = datetime.now().strftime("%Y-%m-%d")
     csv_path = str(REPO_ROOT / f"shap_labels_{today}.csv")
+    label_batch_limit = get_setting_value("pipeline.label_batch_limit", default=300)
+    label_dim_type = get_setting_value("pipeline.label_dim_type", default="all")
+    refresh_existing_labels = get_setting_value("pipeline.refresh_existing_labels", default=False)
+    batch_label_args = [
+        py,
+        f"{root}/batch_label_embeddings.py",
+        "--label",
+        "--save_label",
+        "--limit",
+        str(label_batch_limit),
+        "--dim_type",
+        str(label_dim_type),
+        "--export_csv",
+        csv_path,
+    ]
+    if refresh_existing_labels:
+        batch_label_args.append("--refresh_existing")
+
     return [
         ("tautulli_incremental", [py, f"{root}/fetch_tautulli_data.py", "--mode", "incremental"]),
         ("library_embeddings", [py, f"{root}/fetch_tautulli_data.py", "--mode", "embeddings"]),
@@ -118,18 +136,7 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
         ("score_model", [py, f"{root}/score_model.py", "--all-users"]),
         (
             "batch_label",
-            [
-                py,
-                f"{root}/batch_label_embeddings.py",
-                "--label",
-                "--save_label",
-                "--limit",
-                "300",
-                "--dim_type",
-                "all",
-                "--export_csv",
-                csv_path,
-            ],
+            batch_label_args,
         ),
     ]
 

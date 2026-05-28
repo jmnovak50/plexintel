@@ -276,6 +276,34 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(definition.minimum, 20)
         self.assertEqual(app_settings.parse_value(definition, "240"), 240)
 
+    def test_pipeline_label_batch_settings_metadata_and_validation(self):
+        limit_definition = app_settings.get_setting_definition("pipeline.label_batch_limit")
+        dim_type_definition = app_settings.get_setting_definition("pipeline.label_dim_type")
+        refresh_definition = app_settings.get_setting_definition("pipeline.refresh_existing_labels")
+
+        self.assertEqual(limit_definition.label, "Label Batch Limit")
+        self.assertEqual(limit_definition.value_type, "integer")
+        self.assertEqual(limit_definition.default, 300)
+        self.assertEqual(limit_definition.minimum, 1)
+        self.assertEqual(app_settings.parse_value(limit_definition, "500"), 500)
+
+        self.assertEqual(dim_type_definition.label, "Label Dimension Type")
+        self.assertEqual(dim_type_definition.value_type, "string")
+        self.assertEqual(dim_type_definition.default, "all")
+        self.assertEqual(dim_type_definition.choices, ("all", "media", "user"))
+        self.assertEqual(app_settings.parse_value(dim_type_definition, "media"), "media")
+
+        self.assertEqual(refresh_definition.label, "Refresh Existing Labels")
+        self.assertEqual(refresh_definition.value_type, "boolean")
+        self.assertFalse(refresh_definition.default)
+        self.assertTrue(app_settings.parse_value(refresh_definition, "true"))
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(limit_definition, "0")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(dim_type_definition, "people")
+
     def test_consumer_defaults_and_overrides(self):
         settings_map = {
             "labeling.provider": "ollama",
