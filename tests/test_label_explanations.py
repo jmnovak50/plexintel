@@ -29,6 +29,29 @@ import gpt_utils
 import label_embeddings
 
 
+def coverage_candidate(
+    dimension: int,
+    username: str,
+    rating_key: int,
+    shap_value: float = 1.0,
+    predicted_probability: float = 1.0,
+    combined_score: float = 0.0,
+) -> dict:
+    return {
+        "dimension": dimension,
+        "username": username,
+        "rating_key": rating_key,
+        "shap_value": shap_value,
+        "predicted_probability": predicted_probability,
+        "usage_count": 1,
+        "sum_abs_shap": abs(shap_value),
+        "avg_abs_shap": abs(shap_value),
+        "combined_score": combined_score,
+        "user_count": 1,
+        "stats_source": "aggregate",
+    }
+
+
 def select_positive_labels(shap_rows: list[tuple[int, float]], labels_by_dimension: dict[int, str]) -> str:
     label_scores: dict[str, float] = {}
     for dimension, shap_value in shap_rows:
@@ -133,6 +156,227 @@ class DimensionRoutingTests(unittest.TestCase):
         self.assertEqual(stats[0]["usage_count"], 0)
         self.assertEqual(stats[1]["stats_source"], "aggregate")
         self.assertEqual(stats[1]["combined_score"], 9.1)
+
+
+class CoverageSelectionTests(unittest.TestCase):
+    def test_dimension_with_most_unique_unlabeled_recommendations_is_selected_first(self):
+        rows = [
+            coverage_candidate(10, "alice", 1),
+            coverage_candidate(10, "alice", 2),
+            coverage_candidate(10, "alice", 3),
+            coverage_candidate(11, "alice", 4),
+            coverage_candidate(11, "alice", 5),
+        ]
+
+        selected, summary = batch_label_embeddings.select_coverage_dimensions(rows, limit=1)
+
+        self.assertEqual([stat["dimension"] for stat in selected], [10])
+        self.assertEqual(selected[0]["unlock_count_total"], 3)
+        self.assertEqual(selected[0]["marginal_unlock_count"], 3)
+        self.assertEqual(summary["eligible_unlabeled_recommendations"], 5)
+
+    def test_overlap_handling_prefers_next_best_marginal_coverage(self):
+        rows = [
+            coverage_candidate(10, "alice", 1),
+            coverage_candidate(10, "alice", 2),
+            coverage_candidate(10, "alice", 3),
+            coverage_candidate(11, "alice", 1),
+            coverage_candidate(11, "alice", 2),
+            coverage_candidate(11, "alice", 3),
+            coverage_candidate(12, "alice", 4),
+            coverage_candidate(12, "alice", 5),
+        ]
+
+        selected, summary = batch_label_embeddings.select_coverage_dimensions(rows, limit=2)
+
+        self.assertEqual([stat["dimension"] for stat in selected], [10, 12])
+        self.assertEqual(selected[1]["marginal_unlock_count"], 2)
+        self.assertEqual(summary["potential_unlocked_recommendations"], 5)
+
+    def test_equal_marginal_coverage_ties_break_by_weighted_unlock_score(self):
+        rows = [
+            coverage_candidate(10, "alice", 1, shap_value=1.0, predicted_probability=0.2),
+            coverage_candidate(11, "alice", 2, shap_value=1.0, predicted_probability=0.9),
+        ]
+
+        selected, _summary = batch_label_embeddings.select_coverage_dimensions(rows, limit=1)
+
+        self.assertEqual(selected[0]["dimension"], 11)
+        self.assertAlmostEqual(selected[0]["marginal_weighted_unlock_score"], 0.9)
+
+    def test_sql_candidate_query_matches_positive_unlabeled_view_logic(self):
+        class FakeCursor:
+            def __init__(self):
+                self.executed = []
+
+            def execute(self, sql, params=None):
+                self.executed.append((sql, params))
+
+            def fetchall(self):
+                return []
+
+        cur = FakeCursor()
+
+        batch_label_embeddings.get_coverage_dimension_candidates(cur, dim_type="media")
+
+        sql, params = cur.executed[0]
+        self.assertEqual(params, (0, 768))
+        self.assertIn("JOIN shap_impact si", sql)
+        self.assertIn("LEFT JOIN embedding_labels candidate_label", sql)
+        self.assertIn("LEFT JOIN shap_dimension_stats_current s", sql)
+        self.assertIn("si.shap_value > 0", sql)
+        self.assertIn("candidate_label.dimension IS NULL", sql)
+        self.assertIn("NOT EXISTS", sql)
+        self.assertIn("JOIN embedding_labels el_existing", sql)
+        self.assertIn("el_existing.label IS NOT NULL", sql)
+
+    def test_existing_labeled_dimensions_can_be_excluded_from_coverage_selection(self):
+        rows = [
+            coverage_candidate(10, "alice", 1),
+            coverage_candidate(10, "alice", 2),
+            coverage_candidate(11, "alice", 3),
+        ]
+
+        selected, _summary = batch_label_embeddings.select_coverage_dimensions(
+            rows,
+            limit=2,
+            excluded_dimensions={10},
+        )
+
+        self.assertEqual([stat["dimension"] for stat in selected], [11])
+
+    def test_coverage_refresh_existing_still_uses_unlabeled_coverage_candidates_only(self):
+        rows = [
+            coverage_candidate(10, "alice", 1),
+            coverage_candidate(11, "alice", 2),
+        ]
+
+        with patch.object(batch_label_embeddings, "get_coverage_dimension_candidates", return_value=rows):
+            with patch.object(batch_label_embeddings, "get_top_dimensions") as top_dimensions:
+                selected, summary = batch_label_embeddings.select_automatic_dimensions(
+                    None,
+                    limit=1,
+                    dim_type="all",
+                    selection_mode="coverage",
+                    include_labeled=True,
+                )
+
+        top_dimensions.assert_not_called()
+        self.assertEqual([stat["dimension"] for stat in selected], [10])
+        self.assertEqual(summary["coverage_selected_count"], 1)
+
+    def test_hybrid_dedupes_dimensions_and_fills_requested_limit(self):
+        coverage_rows = [
+            coverage_candidate(10, "alice", 1),
+            coverage_candidate(20, "alice", 2),
+        ]
+        importance_rows = [
+            {
+                "dimension": 10,
+                "usage_count": 3,
+                "sum_abs_shap": 3.0,
+                "avg_abs_shap": 1.0,
+                "combined_score": 9.0,
+                "user_count": 1,
+                "stats_source": "aggregate",
+            },
+            {
+                "dimension": 30,
+                "usage_count": 3,
+                "sum_abs_shap": 3.0,
+                "avg_abs_shap": 1.0,
+                "combined_score": 8.0,
+                "user_count": 1,
+                "stats_source": "aggregate",
+            },
+        ]
+
+        with patch.object(batch_label_embeddings, "get_coverage_dimension_candidates", return_value=coverage_rows):
+            with patch.object(batch_label_embeddings, "get_top_dimensions", return_value=importance_rows):
+                selected, summary = batch_label_embeddings.select_automatic_dimensions(
+                    None,
+                    limit=3,
+                    dim_type="all",
+                    selection_mode="hybrid",
+                    coverage_share=0.50,
+                )
+
+        self.assertEqual([stat["dimension"] for stat in selected], [10, 20, 30])
+        self.assertEqual(len({stat["dimension"] for stat in selected}), 3)
+        self.assertEqual(summary["coverage_selected_count"], 2)
+        self.assertEqual(summary["importance_selected_count"], 1)
+
+    def test_hybrid_refresh_existing_allows_labeled_dimensions_only_in_importance_portion(self):
+        coverage_rows = [
+            coverage_candidate(10, "alice", 1),
+        ]
+        refreshed_importance_row = {
+            "dimension": 20,
+            "usage_count": 10,
+            "sum_abs_shap": 5.0,
+            "avg_abs_shap": 0.5,
+            "combined_score": 12.0,
+            "user_count": 4,
+            "stats_source": "aggregate",
+        }
+
+        with patch.object(batch_label_embeddings, "get_coverage_dimension_candidates", return_value=coverage_rows):
+            with patch.object(
+                batch_label_embeddings,
+                "get_top_dimensions",
+                return_value=[refreshed_importance_row],
+            ) as top_dimensions:
+                selected, summary = batch_label_embeddings.select_automatic_dimensions(
+                    None,
+                    limit=2,
+                    dim_type="all",
+                    selection_mode="hybrid",
+                    coverage_share=0.50,
+                    include_labeled=True,
+                )
+
+        top_dimensions.assert_called_once()
+        self.assertTrue(top_dimensions.call_args.kwargs["include_labeled"])
+        self.assertEqual([stat["selection_mode"] for stat in selected], ["hybrid_coverage", "hybrid_importance"])
+        self.assertEqual([stat["dimension"] for stat in selected], [10, 20])
+        self.assertEqual(selected[1]["unlock_count_total"], "")
+        self.assertEqual(summary["potential_unlocked_recommendations"], 1)
+
+    def test_importance_refresh_existing_behavior_is_unchanged(self):
+        importance_rows = [
+            {
+                "dimension": 20,
+                "usage_count": 10,
+                "sum_abs_shap": 5.0,
+                "avg_abs_shap": 0.5,
+                "combined_score": 12.0,
+                "user_count": 4,
+                "stats_source": "aggregate",
+            }
+        ]
+
+        with patch.object(
+            batch_label_embeddings,
+            "get_top_dimensions",
+            return_value=importance_rows,
+        ) as top_dimensions:
+            selected, summary = batch_label_embeddings.select_automatic_dimensions(
+                None,
+                limit=1,
+                dim_type="all",
+                selection_mode="importance",
+                include_labeled=True,
+            )
+
+        top_dimensions.assert_called_once_with(
+            None,
+            limit=1,
+            dim_type="all",
+            include_labeled=True,
+        )
+        self.assertEqual(selected[0]["dimension"], 20)
+        self.assertEqual(selected[0]["selection_mode"], "importance")
+        self.assertEqual(summary["importance_selected_count"], 1)
 
 
 class PositiveLabelSelectionTests(unittest.TestCase):
