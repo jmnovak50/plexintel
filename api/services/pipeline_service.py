@@ -30,8 +30,18 @@ PIPELINE_CANCEL_POLL_SECONDS_ENV = "PIPELINE_CANCEL_POLL_SECONDS"
 PIPELINE_CANCEL_GRACE_SECONDS_ENV = "PIPELINE_CANCEL_GRACE_SECONDS"
 DEFAULT_CANCEL_POLL_SECONDS = 2.0
 DEFAULT_CANCEL_GRACE_SECONDS = 10.0
+PIPELINE_CANCEL_RECONCILE_GRACE_SECONDS_ENV = "PIPELINE_CANCEL_RECONCILE_GRACE_SECONDS"
 TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled"}
 SCHEDULE_TERMINAL_STATUSES = {"success", "cancelled"}
+ACTIVE_SCHEDULE_STATUSES = {"started", "cancel_requested"}
+PIPELINE_PROCESS_MARKERS = (
+    "fetch_tautulli_data.py",
+    "build_user_embeddings.py",
+    "build_training_data.py",
+    "train_model.py",
+    "score_model.py",
+    "batch_label_embeddings.py",
+)
 
 WEEKDAY_INDEX = {
     "monday": 0,
@@ -92,6 +102,43 @@ def _read_spooled_output(handle) -> str:
     if isinstance(data, str):
         return data
     return data.decode("utf-8", errors="replace")
+
+
+def _process_exists(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_matches_pipeline_process(pid: int | None) -> bool | None:
+    if pid is None or pid <= 0:
+        return False
+    proc_dir = Path("/proc")
+    if not proc_dir.is_dir():
+        return None
+    try:
+        raw_cmdline = (proc_dir / str(pid) / "cmdline").read_bytes()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    cmdline = raw_cmdline.decode("utf-8", errors="replace")
+    return any(marker in cmdline for marker in PIPELINE_PROCESS_MARKERS)
+
+
+def _is_older_than(value: Any, seconds: float) -> bool:
+    if value is None:
+        return True
+    if not hasattr(value, "tzinfo"):
+        return True
+    now = datetime.now(value.tzinfo) if value.tzinfo else datetime.now()
+    return (now - value).total_seconds() >= seconds
 
 
 def get_pipeline_log_path() -> Path:
@@ -191,6 +238,16 @@ def _mark_run_cancelled(conn, *, run_id: int, notes: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
+            UPDATE public.pipeline_run_stages
+            SET status = 'cancelled',
+                stderr_tail = COALESCE(NULLIF(stderr_tail, ''), %s),
+                completed_at = COALESCE(completed_at, now())
+            WHERE run_id = %s AND status = 'started'
+            """,
+            (_tail(notes), run_id),
+        )
+        cur.execute(
+            """
             UPDATE public.pipeline_runs
             SET status = 'cancelled',
                 notes = %s,
@@ -205,13 +262,125 @@ def _mark_run_cancelled(conn, *, run_id: int, notes: str) -> None:
     conn.commit()
 
 
+def _signal_pid_process_group(
+    pid: int | None,
+    sig: signal.Signals,
+    *,
+    require_pipeline_match: bool = False,
+) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    if require_pipeline_match and _pid_matches_pipeline_process(pid) is False:
+        return False
+    try:
+        os.killpg(pid, sig)
+        return True
+    except ProcessLookupError:
+        try:
+            os.kill(pid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except Exception:
+            return False
+    except PermissionError:
+        return True
+    except Exception:
+        try:
+            os.kill(pid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except Exception:
+            return False
+
+
+def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
+    grace_seconds = _env_float(
+        PIPELINE_CANCEL_RECONCILE_GRACE_SECONDS_ENV,
+        DEFAULT_CANCEL_GRACE_SECONDS,
+    )
+    params: tuple[Any, ...] = ()
+    run_filter = ""
+    if run_id is not None:
+        run_filter = "AND run_id = %s"
+        params = (run_id,)
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT
+                run_id,
+                current_pid,
+                current_stage_key,
+                cancel_requested_at
+            FROM public.pipeline_runs
+            WHERE status = 'cancel_requested'
+            {run_filter}
+            ORDER BY cancel_requested_at ASC NULLS FIRST
+            """,
+            params,
+        )
+        rows = list(cur.fetchall() or [])
+
+    reconciled_count = 0
+    for row in rows:
+        rid = int(row["run_id"])
+        pid = row.get("current_pid")
+        stage_key = row.get("current_stage_key") or "active stage"
+        cancel_requested_at = row.get("cancel_requested_at")
+
+        if not pid:
+            note = f"Pipeline run cancelled; no active process was registered for {stage_key}."
+            _mark_run_cancelled(conn, run_id=rid, notes=note)
+            _log_run_event(rid, note)
+            reconciled_count += 1
+            continue
+
+        if not _process_exists(pid):
+            note = f"Pipeline run cancelled; process {pid} for {stage_key} is no longer running."
+            _mark_run_cancelled(conn, run_id=rid, notes=note)
+            _log_run_event(rid, note)
+            reconciled_count += 1
+            continue
+
+        if _pid_matches_pipeline_process(pid) is False:
+            note = f"Pipeline run cancelled; process {pid} no longer matches a pipeline stage."
+            _mark_run_cancelled(conn, run_id=rid, notes=note)
+            _log_run_event(rid, note)
+            reconciled_count += 1
+            continue
+
+        if _is_older_than(cancel_requested_at, grace_seconds):
+            _signal_pid_process_group(pid, signal.SIGKILL, require_pipeline_match=True)
+        else:
+            _signal_pid_process_group(pid, signal.SIGTERM, require_pipeline_match=True)
+
+    return reconciled_count
+
+
+def reconcile_cancel_requested_runs(*, run_id: int | None = None) -> int:
+    conn = connect_db(cursor_factory=RealDictCursor)
+    try:
+        reconciled_count = _reconcile_cancel_requested_runs(conn, run_id=run_id)
+        conn.commit()
+        return reconciled_count
+    finally:
+        conn.close()
+
+
 def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[str, Any]:
     conn = connect_db(cursor_factory=RealDictCursor)
+    current_pid: int | None = None
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT run_id, status
+                SELECT run_id, status, current_pid
                 FROM public.pipeline_runs
                 WHERE run_id = %s
                 FOR UPDATE
@@ -232,6 +401,7 @@ def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[st
                     "run_status": current_status,
                 }
 
+            current_pid = _row_value(row, "current_pid", 2)
             cur.execute(
                 """
                 UPDATE public.pipeline_runs
@@ -242,7 +412,10 @@ def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[st
                 WHERE run_id = %s
                 """,
                 (requested_by, run_id),
-            )
+        )
+        conn.commit()
+        _signal_pid_process_group(current_pid, signal.SIGTERM, require_pipeline_match=True)
+        _reconcile_cancel_requested_runs(conn, run_id=run_id)
         conn.commit()
         _log_run_event(run_id, f"Pipeline cancellation requested by {requested_by or '-'}")
         return {"status": "cancel_requested", "run_id": run_id}
@@ -251,15 +424,12 @@ def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[st
 
 
 def _signal_process_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
-    try:
-        os.killpg(proc.pid, sig)
-    except ProcessLookupError:
+    if _signal_pid_process_group(proc.pid, sig):
         return
-    except Exception:
-        if sig == signal.SIGTERM:
-            proc.terminate()
-        elif sig == signal.SIGKILL:
-            proc.kill()
+    if sig == signal.SIGTERM:
+        proc.terminate()
+    elif sig == signal.SIGKILL:
+        proc.kill()
 
 
 def _run_stage_process(
@@ -409,6 +579,20 @@ def _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key: str) -> boo
         return cur.fetchone() is not None
 
 
+def _has_active_run_for_schedule_key(conn, schedule_key: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM public.pipeline_runs
+            WHERE schedule_key = %s AND status IN %s
+            LIMIT 1
+            """,
+            (schedule_key, tuple(sorted(ACTIVE_SCHEDULE_STATUSES))),
+        )
+        return cur.fetchone() is not None
+
+
 def run_scheduled_pipeline(*, triggered_by: str | None = None) -> dict[str, Any]:
     enabled = get_setting_value("pipeline.enabled", default=False)
     if not enabled:
@@ -419,8 +603,12 @@ def run_scheduled_pipeline(*, triggered_by: str | None = None) -> dict[str, Any]
 
     conn = connect_db()
     try:
+        _reconcile_cancel_requested_runs(conn)
+        conn.commit()
         if _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key):
             return {"status": "already_ran", "schedule_key": schedule_key}
+        if _has_active_run_for_schedule_key(conn, schedule_key):
+            return {"status": "already_running", "schedule_key": schedule_key}
     finally:
         conn.close()
 
@@ -454,11 +642,18 @@ def run_pipeline(
             return {"status": "locked"}
 
         if schedule_key is not None and delivery_type == "scheduled":
+            _reconcile_cancel_requested_runs(conn)
+            conn.commit()
             if _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key):
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock(%s)", (PIPELINE_ADVISORY_LOCK_ID,))
                 conn.commit()
                 return {"status": "already_ran", "schedule_key": schedule_key}
+            if _has_active_run_for_schedule_key(conn, schedule_key):
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (PIPELINE_ADVISORY_LOCK_ID,))
+                conn.commit()
+                return {"status": "already_running", "schedule_key": schedule_key}
 
         with conn.cursor() as cur:
             cur.execute(
@@ -655,6 +850,8 @@ def run_pipeline(
 def get_pipeline_runs(*, limit: int = 50) -> dict[str, Any]:
     conn = connect_db(cursor_factory=RealDictCursor)
     try:
+        _reconcile_cancel_requested_runs(conn)
+        conn.commit()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -723,6 +920,8 @@ def get_pipeline_runs(*, limit: int = 50) -> dict[str, Any]:
 def get_pipeline_run(run_id: int) -> dict[str, Any] | None:
     conn = connect_db(cursor_factory=RealDictCursor)
     try:
+        _reconcile_cancel_requested_runs(conn, run_id=run_id)
+        conn.commit()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """

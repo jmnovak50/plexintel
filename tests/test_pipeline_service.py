@@ -3,7 +3,7 @@ from __future__ import annotations
 import signal
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -27,10 +27,14 @@ class FakeCursor:
     def fetchone(self):
         return self.conn.fetchone_results.pop(0)
 
+    def fetchall(self):
+        return self.conn.fetchall_results.pop(0)
+
 
 class FakeConnection:
-    def __init__(self, fetchone_results):
+    def __init__(self, fetchone_results, fetchall_results=None):
         self.fetchone_results = list(fetchone_results)
+        self.fetchall_results = list(fetchall_results or [])
         self.executed = []
         self.commit_count = 0
         self.closed = False
@@ -278,7 +282,7 @@ class PipelineRunTests(unittest.TestCase):
         )
 
     def test_run_scheduled_pipeline_treats_cancelled_schedule_as_terminal(self):
-        conn = FakeConnection([{"exists": 1}])
+        conn = FakeConnection([{"exists": 1}], fetchall_results=[[]])
 
         with patch.object(pipeline_service, "get_setting_value", return_value=True):
             with patch.object(
@@ -295,6 +299,83 @@ class PipelineRunTests(unittest.TestCase):
         executed_sql = " ".join(sql for sql, _params in conn.executed)
         self.assertIn("status IN", executed_sql)
         self.assertIn(("cancelled", "success"), [params[1] for _sql, params in conn.executed if params][0:1])
+
+    def test_run_scheduled_pipeline_reconciles_cancel_requested_before_retry(self):
+        conn = FakeConnection(
+            [{"exists": 1}],
+            fetchall_results=[
+                [
+                    {
+                        "run_id": 321,
+                        "current_pid": None,
+                        "current_stage_key": "train_model",
+                        "cancel_requested_at": datetime.now(ZoneInfo("UTC")) - timedelta(seconds=30),
+                    }
+                ]
+            ],
+        )
+
+        with patch.object(pipeline_service, "get_setting_value", return_value=True):
+            with patch.object(
+                pipeline_service,
+                "get_pipeline_schedule_slot",
+                return_value={"schedule_key": "daily:test"},
+            ):
+                with patch.object(pipeline_service, "connect_db", return_value=conn):
+                    with patch.object(pipeline_service, "run_pipeline") as mock_run_pipeline:
+                        out = pipeline_service.run_scheduled_pipeline(triggered_by="test")
+
+        self.assertEqual(out, {"status": "already_ran", "schedule_key": "daily:test"})
+        mock_run_pipeline.assert_not_called()
+        executed_sql = " ".join(sql for sql, _params in conn.executed)
+        self.assertIn("status = 'cancelled'", executed_sql)
+
+    def test_run_scheduled_pipeline_skips_active_cancel_requested_run(self):
+        conn = FakeConnection(
+            [None, {"exists": 1}],
+            fetchall_results=[[]],
+        )
+
+        with patch.object(pipeline_service, "get_setting_value", return_value=True):
+            with patch.object(
+                pipeline_service,
+                "get_pipeline_schedule_slot",
+                return_value={"schedule_key": "daily:test"},
+            ):
+                with patch.object(pipeline_service, "connect_db", return_value=conn):
+                    with patch.object(pipeline_service, "run_pipeline") as mock_run_pipeline:
+                        out = pipeline_service.run_scheduled_pipeline(triggered_by="test")
+
+        self.assertEqual(out, {"status": "already_running", "schedule_key": "daily:test"})
+        mock_run_pipeline.assert_not_called()
+
+    def test_request_cancel_reconciles_missing_pid(self):
+        conn = FakeConnection(
+            [
+                {"run_id": 123, "status": "started", "current_pid": None},
+            ],
+            fetchall_results=[
+                [
+                    {
+                        "run_id": 123,
+                        "current_pid": None,
+                        "current_stage_key": "train_model",
+                        "cancel_requested_at": datetime.now(ZoneInfo("UTC")) - timedelta(seconds=30),
+                    }
+                ]
+            ],
+        )
+
+        with patch.object(pipeline_service, "connect_db", return_value=conn):
+            out = pipeline_service.request_pipeline_cancel(
+                run_id=123,
+                requested_by="admin",
+            )
+
+        self.assertEqual(out, {"status": "cancel_requested", "run_id": 123})
+        executed_sql = " ".join(sql for sql, _params in conn.executed)
+        self.assertIn("SET status = 'cancel_requested'", executed_sql)
+        self.assertIn("SET status = 'cancelled'", executed_sql)
 
 
 if __name__ == "__main__":
