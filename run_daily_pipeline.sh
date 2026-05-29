@@ -8,6 +8,7 @@ PY="$VENV/bin/python"
 cd "$APP" || exit 1
 
 echo "🚀 Starting daily pipeline run: $(date)"
+echo "⚠️  Use either this cron script or the Admin in-app scheduler, not both."
 
 # Venv hard-lock: PATH + source; also pin PG to 17 on 5432
 export PATH="$VENV/bin:$PATH"
@@ -53,7 +54,7 @@ echo "🎓 Re-training model..."
 echo "🔮 Scoring recommendations..."
 "$PY" "$APP/score_model.py" --all-users
 
-echo "🏷  Auto-labeling SHAP dimensions with Ollama..."
-"$PY" "$APP/batch_label_embeddings.py" --label --save_label --limit 300 --dim_type all --export_csv shap_labels_$(date +%F).csv
+echo "🏷  Auto-labeling SHAP dimensions in coverage mode..."
+"$PY" "$APP/batch_label_embeddings.py" --selection_mode coverage --limit 25 --dim_type all --label --save_label --export_csv shap_labels_$(date +%F).csv
 
 echo "✅ Daily pipeline complete: $(date)"

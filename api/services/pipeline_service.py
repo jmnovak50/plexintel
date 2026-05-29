@@ -501,25 +501,14 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     root = str(REPO_ROOT)
     today = datetime.now().strftime("%Y-%m-%d")
     csv_path = str(REPO_ROOT / f"shap_labels_{today}.csv")
-    label_batch_limit = get_setting_value("pipeline.label_batch_limit", default=300)
+    labeling_enabled = get_setting_value("pipeline.labeling_enabled", default=True)
+    label_selection_mode = get_setting_value("pipeline.label_selection_mode", default="coverage")
+    label_batch_limit = get_setting_value("pipeline.label_batch_limit", default=25)
     label_dim_type = get_setting_value("pipeline.label_dim_type", default="all")
+    label_coverage_share = get_setting_value("pipeline.label_coverage_share", default=0.80)
     refresh_existing_labels = get_setting_value("pipeline.refresh_existing_labels", default=False)
-    batch_label_args = [
-        py,
-        f"{root}/batch_label_embeddings.py",
-        "--label",
-        "--save_label",
-        "--limit",
-        str(label_batch_limit),
-        "--dim_type",
-        str(label_dim_type),
-        "--export_csv",
-        csv_path,
-    ]
-    if refresh_existing_labels:
-        batch_label_args.append("--refresh_existing")
 
-    return [
+    stages = [
         ("tautulli_incremental", [py, f"{root}/fetch_tautulli_data.py", "--mode", "incremental"]),
         ("library_embeddings", [py, f"{root}/fetch_tautulli_data.py", "--mode", "embeddings"]),
         ("watch_embeddings", [py, f"{root}/fetch_tautulli_data.py", "--mode", "watch_embeddings"]),
@@ -527,11 +516,30 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
         ("training_data", [py, f"{root}/build_training_data.py"]),
         ("train_model", [py, f"{root}/train_model.py"]),
         ("score_model", [py, f"{root}/score_model.py", "--all-users"]),
-        (
-            "batch_label",
-            batch_label_args,
-        ),
     ]
+
+    if labeling_enabled:
+        batch_label_args = [
+            py,
+            f"{root}/batch_label_embeddings.py",
+            "--selection_mode",
+            str(label_selection_mode),
+            "--limit",
+            str(label_batch_limit),
+            "--dim_type",
+            str(label_dim_type),
+            "--label",
+            "--save_label",
+            "--export_csv",
+            csv_path,
+        ]
+        if str(label_selection_mode) == "hybrid":
+            batch_label_args.extend(["--coverage_share", str(label_coverage_share)])
+        if refresh_existing_labels:
+            batch_label_args.append("--refresh_existing")
+        stages.append(("batch_label", batch_label_args))
+
+    return stages
 
 
 def get_pipeline_schedule_slot(now_utc: datetime | None = None) -> dict[str, Any]:

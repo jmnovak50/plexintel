@@ -1068,11 +1068,37 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         description="IANA timezone used for the pipeline schedule.",
     ),
     _setting(
+        "pipeline.labeling_enabled",
+        "pipeline",
+        "Enable Batch Labeling",
+        "boolean",
+        default=True,
+        env_aliases=("PIPELINE_LABELING_ENABLED",),
+        description=(
+            "When enabled, the pipeline runs the SHAP dimension labeling stage after scoring. Disable this when labels "
+            "are managed manually or LLM labeling should not run during scheduled pipeline jobs."
+        ),
+    ),
+    _setting(
+        "pipeline.label_selection_mode",
+        "pipeline",
+        "Label Selection Mode",
+        "string",
+        default="coverage",
+        env_aliases=("PIPELINE_LABEL_SELECTION_MODE",),
+        choices=("importance", "coverage", "hybrid"),
+        description=(
+            "Automatic dimension selection strategy for scheduled batch labeling. coverage is the daily default because "
+            "it only targets dimensions that can unlock themes for SHAP-enabled recommendation cards. importance and "
+            "hybrid are better suited to manual quality-review or broader label expansion runs."
+        ),
+    ),
+    _setting(
         "pipeline.label_batch_limit",
         "pipeline",
         "Label Batch Limit",
         "integer",
-        default=300,
+        default=25,
         env_aliases=("PIPELINE_LABEL_BATCH_LIMIT",),
         minimum=1,
         description=(
@@ -1091,6 +1117,20 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         description=(
             "Embedding dimension scope used by the in-app pipeline label stage. Use all for broad coverage, media for "
             "title/content-side labels only, or user for preference-side labels only."
+        ),
+    ),
+    _setting(
+        "pipeline.label_coverage_share",
+        "pipeline",
+        "Label Coverage Share",
+        "float",
+        default=0.80,
+        env_aliases=("PIPELINE_LABEL_COVERAGE_SHARE",),
+        minimum=0.0,
+        maximum=1.0,
+        description=(
+            "Hybrid-mode share of the label batch allocated to coverage-driven dimensions. Ignored when selection mode "
+            "is coverage or importance."
         ),
     ),
     _setting(

@@ -299,13 +299,27 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(app_settings.parse_value(definition, "240"), 240)
 
     def test_pipeline_label_batch_settings_metadata_and_validation(self):
+        enabled_definition = app_settings.get_setting_definition("pipeline.labeling_enabled")
+        mode_definition = app_settings.get_setting_definition("pipeline.label_selection_mode")
         limit_definition = app_settings.get_setting_definition("pipeline.label_batch_limit")
         dim_type_definition = app_settings.get_setting_definition("pipeline.label_dim_type")
+        share_definition = app_settings.get_setting_definition("pipeline.label_coverage_share")
         refresh_definition = app_settings.get_setting_definition("pipeline.refresh_existing_labels")
+
+        self.assertEqual(enabled_definition.label, "Enable Batch Labeling")
+        self.assertEqual(enabled_definition.value_type, "boolean")
+        self.assertTrue(enabled_definition.default)
+        self.assertFalse(app_settings.parse_value(enabled_definition, "false"))
+
+        self.assertEqual(mode_definition.label, "Label Selection Mode")
+        self.assertEqual(mode_definition.value_type, "string")
+        self.assertEqual(mode_definition.default, "coverage")
+        self.assertEqual(mode_definition.choices, ("importance", "coverage", "hybrid"))
+        self.assertEqual(app_settings.parse_value(mode_definition, "hybrid"), "hybrid")
 
         self.assertEqual(limit_definition.label, "Label Batch Limit")
         self.assertEqual(limit_definition.value_type, "integer")
-        self.assertEqual(limit_definition.default, 300)
+        self.assertEqual(limit_definition.default, 25)
         self.assertEqual(limit_definition.minimum, 1)
         self.assertEqual(app_settings.parse_value(limit_definition, "500"), 500)
 
@@ -314,6 +328,13 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(dim_type_definition.default, "all")
         self.assertEqual(dim_type_definition.choices, ("all", "media", "user"))
         self.assertEqual(app_settings.parse_value(dim_type_definition, "media"), "media")
+
+        self.assertEqual(share_definition.label, "Label Coverage Share")
+        self.assertEqual(share_definition.value_type, "float")
+        self.assertEqual(share_definition.default, 0.80)
+        self.assertEqual(share_definition.minimum, 0.0)
+        self.assertEqual(share_definition.maximum, 1.0)
+        self.assertEqual(app_settings.parse_value(share_definition, "0.5"), 0.5)
 
         self.assertEqual(refresh_definition.label, "Refresh Existing Labels")
         self.assertEqual(refresh_definition.value_type, "boolean")
@@ -325,6 +346,12 @@ class AppSettingsTests(unittest.TestCase):
 
         with self.assertRaises(app_settings.SettingsValidationError):
             app_settings.parse_value(dim_type_definition, "people")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(mode_definition, "manual")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(share_definition, "1.1")
 
     def test_consumer_defaults_and_overrides(self):
         settings_map = {
