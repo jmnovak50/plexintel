@@ -18,7 +18,11 @@ from api.services.app_settings import get_setting_value
 warnings.filterwarnings("ignore", category=UserWarning, module='sklearn')
 
 SHAP_PRUNE_DAYS = get_setting_value("scoring.shap_prune_days", default=3)
+SHAP_TARGETING_STRATEGY = get_setting_value("scoring.shap_targeting_strategy", default="per_media_type")
 SHAP_MAX_ITEMS = get_setting_value("scoring.shap_max_items", default=100)
+SHAP_MAX_ITEMS_OVERALL = get_setting_value("scoring.shap_max_items_overall", default=100)
+SHAP_MAX_ITEMS_MOVIE = get_setting_value("scoring.shap_max_items_movie", default=250)
+SHAP_MAX_ITEMS_TV = get_setting_value("scoring.shap_max_items_tv", default=250)
 SHAP_RAW_MIN_DIMS = get_setting_value("scoring.shap_raw_min_dims", default=5)
 SHAP_RAW_MAX_DIMS = get_setting_value("scoring.shap_raw_max_dims", default=20)
 SHAP_RAW_CUMABS_TARGET = get_setting_value("scoring.shap_raw_cumabs_target", default=0.90)
@@ -26,6 +30,8 @@ SHAP_AGG_TOP_DIMS = get_setting_value("scoring.shap_agg_top_dims", default=50)
 WATCHED_ENGAGEMENT_THRESHOLD = get_setting_value("scoring.watched_engagement_threshold", default=0.5)
 WATCH_EMBED_MIN_ENGAGEMENT = get_setting_value("training.watch_embed_min_engagement", default=0.5)
 DB_URL = get_database_url()
+SHAP_TV_DISPLAY_LEVEL = "show"
+TV_ROLLUP_TOP_FRACTION = 0.20
 
 def get_engine():
     return create_engine(DB_URL)
@@ -112,6 +118,196 @@ def _select_agg_shap_dims(sorted_dims):
         return []
     top_n = max(0, SHAP_AGG_TOP_DIMS)
     return sorted_dims[:top_n]
+
+def _normalize_shap_strategy(strategy):
+    normalized = str(strategy or "per_media_type").strip().lower().replace("-", "_")
+    if normalized in {"global", "legacy", "legacy_global"}:
+        return "global"
+    return "per_media_type"
+
+def _nonnegative_int(value):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+def _sort_by_probability(df, *, stable_ties=False):
+    if df.empty:
+        return df.copy()
+    if stable_ties and "rating_key" in df.columns:
+        return df.sort_values(
+            by=["predicted_probability", "rating_key"],
+            ascending=[False, True],
+        )
+    return df.sort_values(by="predicted_probability", ascending=False)
+
+def _top_displayed_show_representative_rows(df, limit):
+    limit = _nonnegative_int(limit)
+    if limit <= 0 or df.empty or "show_rating_key" not in df.columns:
+        return df.head(0).copy()
+
+    media_type = df["media_type"].fillna("").astype(str).str.lower()
+    episodes = df[(media_type == "episode") & df["show_rating_key"].notna()].copy()
+    if episodes.empty:
+        return episodes
+
+    episodes = episodes.sort_values(
+        by=["show_rating_key", "predicted_probability", "rating_key"],
+        ascending=[True, False, True],
+    )
+    group = episodes.groupby("show_rating_key", dropna=True)
+    episodes["_visible_rank"] = group.cumcount() + 1
+    episodes["_visible_episode_count"] = group["rating_key"].transform("count")
+    episodes["_visible_top_k"] = np.ceil(
+        episodes["_visible_episode_count"] * TV_ROLLUP_TOP_FRACTION
+    ).astype(int).clip(lower=1)
+
+    topk_rows = episodes[episodes["_visible_rank"] <= episodes["_visible_top_k"]]
+    rollup_scores = topk_rows.groupby("show_rating_key")["predicted_probability"].mean()
+
+    representatives = episodes[episodes["_visible_rank"] == 1].copy()
+    representatives["_display_rollup_score"] = representatives["show_rating_key"].map(rollup_scores)
+    representatives = representatives.sort_values(
+        by=["_display_rollup_score", "predicted_probability", "rating_key"],
+        ascending=[False, False, True],
+    )
+    return representatives.head(limit).drop(
+        columns=[
+            "_visible_rank",
+            "_visible_episode_count",
+            "_visible_top_k",
+            "_display_rollup_score",
+        ],
+        errors="ignore",
+    )
+
+def _append_unique_targets(selected_indices, selected_keys, candidates, *, limit=None):
+    added = 0
+    max_add = None if limit is None else _nonnegative_int(limit)
+    for idx, row in candidates.iterrows():
+        if max_add is not None and added >= max_add:
+            break
+        try:
+            rating_key = int(row["rating_key"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if rating_key in selected_keys:
+            continue
+        selected_keys.add(rating_key)
+        selected_indices.append(idx)
+        added += 1
+    return added
+
+def select_shap_target_rows(
+    df,
+    *,
+    strategy=None,
+    global_limit=None,
+    overall_limit=None,
+    movie_limit=None,
+    tv_limit=None,
+):
+    """
+    Select scored recommendation rows that should receive raw SHAP rows.
+
+    Recommendation rows are deduplicated by rating_key because shap_impact is
+    stored by (user_id, rating_key, dimension). TV top-level cards are show
+    rollups in the UI/digest; until SHAP storage gains a show-level aggregate,
+    the selector targets the top contributing episode row for each selected show.
+    """
+    strategy = _normalize_shap_strategy(SHAP_TARGETING_STRATEGY if strategy is None else strategy)
+    selected_indices = []
+    selected_keys = set()
+
+    if strategy == "global":
+        limit = _nonnegative_int(SHAP_MAX_ITEMS if global_limit is None else global_limit)
+        candidates = _sort_by_probability(df)
+        added = _append_unique_targets(selected_indices, selected_keys, candidates, limit=limit)
+        selected = df.loc[selected_indices].copy() if selected_indices else df.head(0).copy()
+        summary = {
+            "strategy": "global",
+            "tv_display_level": SHAP_TV_DISPLAY_LEVEL,
+            "source_counts": {"overall/global": added},
+            "deduped_total": len(selected),
+        }
+        return selected, summary
+
+    media_type = df["media_type"].fillna("").astype(str).str.lower()
+    movie_limit = _nonnegative_int(SHAP_MAX_ITEMS_MOVIE if movie_limit is None else movie_limit)
+    tv_limit = _nonnegative_int(SHAP_MAX_ITEMS_TV if tv_limit is None else tv_limit)
+    overall_limit = _nonnegative_int(
+        SHAP_MAX_ITEMS_OVERALL if overall_limit is None else overall_limit
+    )
+
+    source_counts = {}
+
+    movie_candidates = _sort_by_probability(df[media_type == "movie"], stable_ties=True).head(movie_limit)
+    source_counts["movie"] = _append_unique_targets(
+        selected_indices,
+        selected_keys,
+        movie_candidates,
+    )
+
+    show_candidates = _top_displayed_show_representative_rows(df, tv_limit)
+    source_counts[SHAP_TV_DISPLAY_LEVEL] = _append_unique_targets(
+        selected_indices,
+        selected_keys,
+        show_candidates,
+    )
+
+    overall_candidates = _sort_by_probability(df, stable_ties=True)
+    source_counts["overall/additional catch-all"] = _append_unique_targets(
+        selected_indices,
+        selected_keys,
+        overall_candidates,
+        limit=overall_limit,
+    )
+
+    selected = df.loc[selected_indices].copy() if selected_indices else df.head(0).copy()
+    summary = {
+        "strategy": "per-media-type",
+        "tv_display_level": SHAP_TV_DISPLAY_LEVEL,
+        "source_counts": source_counts,
+        "deduped_total": len(selected),
+    }
+    return selected, summary
+
+def format_shap_targeting_summary(summaries):
+    if isinstance(summaries, dict):
+        summaries = [summaries]
+    summaries = [summary for summary in summaries if summary]
+    if not summaries:
+        return "SHAP target selection strategy: none\nUsers scored: 0"
+
+    strategy = summaries[0].get("strategy", "unknown")
+    user_count = len(summaries)
+    labels = []
+    for summary in summaries:
+        for label in summary.get("source_counts", {}):
+            if label not in labels:
+                labels.append(label)
+
+    lines = [
+        f"SHAP target selection strategy: {strategy}",
+        f"Users scored: {user_count}",
+        "",
+        "Media Type | Selected Cards | Cards Per User Min | Cards Per User Max",
+        "--- | ---: | ---: | ---:",
+    ]
+    for label in labels:
+        counts = [int(summary.get("source_counts", {}).get(label, 0)) for summary in summaries]
+        lines.append(f"{label} | {sum(counts)} | {min(counts)} | {max(counts)}")
+
+    total = sum(int(summary.get("deduped_total", 0)) for summary in summaries)
+    lines.extend([
+        "",
+        f"Deduplicated total recommendation cards receiving raw SHAP rows: {total}",
+    ])
+    if any(summary.get("tv_display_level") == "show" for summary in summaries):
+        lines.append(
+            "TV display level: show rollups; raw SHAP rows use the top contributing episode recommendation key for each selected show."
+        )
+    return "\n".join(lines)
 
 def _upsert_shap_dimension_stats_current(cur, user_dim_agg):
     for dim, stats in user_dim_agg.items():
@@ -211,6 +407,7 @@ def get_unwatched_media(username):
             m.media_type,
             m.title,
             m.parent_rating_key,
+            m.show_rating_key,
             e.embedding,
             m.year,
             g.genre_tags,
@@ -509,19 +706,16 @@ def score_and_store(username, skip_shap=False):
     print(f"✅ Replaced recommendations for {username} with {len(output)} scored items.")
     if skip_shap:
         print("⏩ Skipping SHAP impact generation.")
-        return
+        return None
     explainer = shap.TreeExplainer(model)
-    df_shap = df.sort_values(by='predicted_probability', ascending=False)
-    if SHAP_MAX_ITEMS > 0:
-        df_shap = df_shap.head(SHAP_MAX_ITEMS)
-    else:
-        df_shap = df_shap.head(0)
+    df_shap, shap_target_summary = select_shap_target_rows(df)
 
     if df_shap.empty:
-        print("⏩ No rows selected for SHAP (SHAP_MAX_ITEMS=0).")
-        return
+        print(format_shap_targeting_summary(shap_target_summary))
+        print("⏩ No rows selected for SHAP.")
+        return shap_target_summary
 
-    print(f"🔍 Limiting SHAP to top {len(df_shap)} items (SHAP_MAX_ITEMS={SHAP_MAX_ITEMS})")
+    print(format_shap_targeting_summary(shap_target_summary))
     if 'shap_source_index' in df_shap.columns:
         shap_idx = [int(i) for i in df_shap['shap_source_index'].tolist()]
     else:
@@ -583,6 +777,7 @@ def score_and_store(username, skip_shap=False):
     print(f"📊 Upserted {len(user_dim_agg)} aggregate SHAP dimension rows for {username}")
     cur.close()
     conn.close()
+    return shap_target_summary
 
 def get_all_users():
     engine = get_engine()
@@ -609,7 +804,13 @@ if __name__ == "__main__":
             reset_shap_snapshot_tables()
         users = get_all_users()
         print(f"🔁 Scoring for all users: {users}")
+        shap_target_summaries = []
         for user in users:
-            score_and_store(user, skip_shap=args.skip_shap)
+            summary = score_and_store(user, skip_shap=args.skip_shap)
+            if summary:
+                shap_target_summaries.append(summary)
+        if shap_target_summaries:
+            print("\n📊 All-user SHAP targeting summary")
+            print(format_shap_targeting_summary(shap_target_summaries))
     else:
         score_and_store(args.user, skip_shap=args.skip_shap)

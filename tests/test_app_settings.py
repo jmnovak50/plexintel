@@ -250,6 +250,28 @@ class AppSettingsTests(unittest.TestCase):
         with self.assertRaises(app_settings.SettingsValidationError):
             app_settings.parse_value(definition, "105")
 
+    def test_shap_targeting_settings_metadata_and_validation(self):
+        strategy = app_settings.get_setting_definition("scoring.shap_targeting_strategy")
+        overall = app_settings.get_setting_definition("scoring.shap_max_items_overall")
+        movie = app_settings.get_setting_definition("scoring.shap_max_items_movie")
+        tv = app_settings.get_setting_definition("scoring.shap_max_items_tv")
+
+        self.assertEqual(strategy.default, "per_media_type")
+        self.assertEqual(strategy.choices, ("per_media_type", "global"))
+        self.assertEqual(app_settings.parse_value(strategy, "global"), "global")
+
+        self.assertEqual(overall.default, 100)
+        self.assertEqual(overall.minimum, 0)
+        self.assertEqual(app_settings.parse_value(overall, "0"), 0)
+        self.assertEqual(movie.default, 250)
+        self.assertEqual(tv.default, 250)
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(strategy, "episode")
+
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(movie, "-1")
+
     def test_low_overlap_setting_metadata_and_validation(self):
         definition = app_settings.get_setting_definition("labeling.maximum_low_overlap_percent")
 
@@ -314,7 +336,11 @@ class AppSettingsTests(unittest.TestCase):
             "labeling.default_fetch_items": 22,
             "labeling.minimum_label_coverage_percent": 85,
             "labeling.maximum_low_overlap_percent": 35,
+            "scoring.shap_targeting_strategy": "global",
             "scoring.shap_max_items": 321,
+            "scoring.shap_max_items_overall": 44,
+            "scoring.shap_max_items_movie": 222,
+            "scoring.shap_max_items_tv": 111,
             "scoring.shap_raw_min_dims": 7,
             "scoring.shap_raw_max_dims": 17,
             "scoring.shap_raw_cumabs_target": 0.82,
@@ -338,7 +364,11 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(gpt_utils.MAXIMUM_LOW_OVERLAP_PERCENT, 35)
         self.assertEqual(gpt_utils.resolve_label_backend(), ("ollama", "gemma3:12b"))
         self.assertEqual(gpt_utils.resolve_label_backend("openai", "gpt-4.1-mini"), ("openai", "gpt-4.1-mini"))
+        self.assertEqual(score_model.SHAP_TARGETING_STRATEGY, "global")
         self.assertEqual(score_model.SHAP_MAX_ITEMS, 321)
+        self.assertEqual(score_model.SHAP_MAX_ITEMS_OVERALL, 44)
+        self.assertEqual(score_model.SHAP_MAX_ITEMS_MOVIE, 222)
+        self.assertEqual(score_model.SHAP_MAX_ITEMS_TV, 111)
         self.assertEqual(score_model.WATCHED_ENGAGEMENT_THRESHOLD, 0.73)
         self.assertEqual(fetch_tautulli_data.get_embed_batch_size(), 128)
 

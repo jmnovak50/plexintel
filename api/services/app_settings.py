@@ -596,17 +596,70 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         ),
     ),
     _setting(
+        "scoring.shap_targeting_strategy",
+        "training_scoring",
+        "SHAP Targeting Strategy",
+        "string",
+        default="per_media_type",
+        env_aliases=("SHAP_TARGETING_STRATEGY",),
+        choices=("per_media_type", "global"),
+        description=(
+            "Controls which recommendations receive raw SHAP explanation rows. per_media_type targets movies, "
+            "displayed TV show rollups, and a small additional overall catch-all separately per user. global preserves "
+            "the legacy behavior of taking the top SHAP Max Items overall."
+        ),
+    ),
+    _setting(
         "scoring.shap_max_items",
         "training_scoring",
-        "SHAP Max Items",
+        "SHAP Max Items (Legacy Global)",
         "integer",
         default=100,
         env_aliases=("SHAP_MAX_ITEMS",),
         minimum=1,
         description=(
-            "Maximum number of scored recommendations that receive SHAP explanations per run. Increase this if more "
-            "recommendations need \"why this?\" explanations. Lower it if scoring is slow, SHAP storage is growing too "
-            "fast, or only top-ranked items need explanations."
+            "Legacy global limit used only when SHAP Targeting Strategy is global. In per_media_type mode, use the "
+            "Movie, TV, and Overall SHAP limits below; this field is retained so existing global-only behavior remains "
+            "available explicitly."
+        ),
+    ),
+    _setting(
+        "scoring.shap_max_items_overall",
+        "training_scoring",
+        "SHAP Max Items Overall",
+        "integer",
+        default=100,
+        env_aliases=("SHAP_MAX_ITEMS_OVERALL",),
+        minimum=0,
+        description=(
+            "Additional top recommendations per user that receive SHAP rows after the movie and TV allocations are "
+            "deduplicated. Use 0 to rely only on per-media targeting."
+        ),
+    ),
+    _setting(
+        "scoring.shap_max_items_movie",
+        "training_scoring",
+        "SHAP Max Items Movie",
+        "integer",
+        default=250,
+        env_aliases=("SHAP_MAX_ITEMS_MOVIE",),
+        minimum=0,
+        description=(
+            "Top movie recommendation rows per user that receive raw SHAP rows in per_media_type targeting mode."
+        ),
+    ),
+    _setting(
+        "scoring.shap_max_items_tv",
+        "training_scoring",
+        "SHAP Max Items TV",
+        "integer",
+        default=250,
+        env_aliases=("SHAP_MAX_ITEMS_TV",),
+        minimum=0,
+        description=(
+            "Top displayed TV show recommendations per user targeted in per_media_type mode. Because raw shap_impact "
+            "is stored on recommendation rows and TV shows are currently display rollups of episode rows, scoring stores "
+            "SHAP for the top contributing episode key for each selected show."
         ),
     ),
     _setting(
