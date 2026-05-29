@@ -88,6 +88,8 @@ In **Admin → Settings → Nightly pipeline**, enable the scheduler and set fre
 
 In-app pipeline runs also append the complete stdout/stderr for every stage to `logs/pipeline.log` by default. Override the destination with `PIPELINE_LOG_PATH`; in Docker, map the host log directory to `/app/logs` and set `PIPELINE_LOG_PATH=/app/logs/pipeline.log`.
 
+Admins can cancel an active in-app run from **Admin → Pipeline runs**. Cancellation is cooperative: the API marks the run for cancellation, the active stage receives `SIGTERM`, and it is force-killed if it does not exit within the grace period. Cancelled scheduled runs count as terminal for that schedule slot, so the scheduler will not immediately retry the same nightly run. This control does not apply to host cron jobs that launch `run_daily_pipeline.sh` outside the API process.
+
 **Option B — Cron**
 Schedule `run_daily_pipeline.sh` (or the individual Python steps) with cron on the host. If you use cron, leave the in-app pipeline scheduler **disabled** in admin settings.
 

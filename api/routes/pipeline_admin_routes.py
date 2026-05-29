@@ -9,6 +9,7 @@ from api.routes.admin_routes import require_admin
 from api.services.pipeline_service import (
     get_pipeline_run,
     get_pipeline_runs,
+    request_pipeline_cancel,
     run_pipeline,
 )
 
@@ -17,7 +18,7 @@ router = APIRouter()
 
 def _serialize_run(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
-    for key in ("started_at", "completed_at"):
+    for key in ("started_at", "completed_at", "cancel_requested_at", "last_heartbeat_at"):
         v = out.get(key)
         if v is not None and hasattr(v, "isoformat"):
             out[key] = v.isoformat()
@@ -52,6 +53,27 @@ def admin_get_pipeline_run(run_id: int, admin_user=Depends(require_admin)):
     if not row:
         raise HTTPException(status_code=404, detail="Run not found")
     return {"requested_by": admin_user["username"], "run": _serialize_run(row)}
+
+
+@router.post("/admin/pipeline/runs/{run_id}/cancel", status_code=202)
+def admin_cancel_pipeline_run(run_id: int, admin_user=Depends(require_admin)):
+    result = request_pipeline_cancel(
+        run_id=run_id,
+        requested_by=admin_user["username"],
+    )
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Run not found")
+    if result["status"] == "already_terminal":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run is already {result.get('run_status', 'terminal')}",
+        )
+    return {
+        "status": "cancel_requested",
+        "requested_by": admin_user["username"],
+        "run_id": run_id,
+        "detail": "Pipeline cancellation requested. The active stage will stop shortly.",
+    }
 
 
 @router.post("/admin/pipeline/trigger")

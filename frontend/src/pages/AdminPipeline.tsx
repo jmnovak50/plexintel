@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
+import { CircleStop } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 
 interface AdminMe {
@@ -27,6 +28,11 @@ interface PipelineRun {
   triggered_by: string | null;
   status: string;
   notes: string | null;
+  cancel_requested_at: string | null;
+  cancel_requested_by: string | null;
+  last_heartbeat_at: string | null;
+  current_stage_key: string | null;
+  current_pid: number | null;
   started_at: string | null;
   completed_at: string | null;
   stages: PipelineStage[];
@@ -55,10 +61,29 @@ function statusChip(status: string) {
       return "bg-emerald-50 text-emerald-800 border-emerald-200";
     case "failed":
       return "bg-red-50 text-red-800 border-red-200";
+    case "cancelled":
+      return "bg-slate-100 text-slate-700 border-slate-300";
+    case "cancel_requested":
+      return "bg-orange-50 text-orange-800 border-orange-200";
     case "started":
       return "bg-amber-50 text-amber-900 border-amber-200";
     default:
       return "bg-slate-50 text-slate-700 border-slate-200";
+  }
+}
+
+function isActiveRun(status: string) {
+  return status === "started" || status === "cancel_requested";
+}
+
+async function responseMessage(response: Response, fallback: string) {
+  const text = await response.text();
+  if (!text) return fallback;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed.detail || fallback;
+  } catch {
+    return text;
   }
 }
 
@@ -68,9 +93,11 @@ export default function AdminPipeline() {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
+  const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null);
+  const hasActiveRun = runs.some((run) => isActiveRun(run.status));
 
   const loadRuns = useCallback(async () => {
     const response = await fetch("/api/admin/pipeline/runs?limit=50", { credentials: "include" });
@@ -118,6 +145,16 @@ export default function AdminPipeline() {
     };
   }, [navigate, loadRuns]);
 
+  useEffect(() => {
+    if (!hasActiveRun) return undefined;
+    const timer = window.setInterval(() => {
+      void loadRuns().catch((caught) => {
+        setError(caught instanceof Error ? caught.message : "Failed to refresh pipeline runs.");
+      });
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveRun, loadRuns]);
+
   async function triggerRun() {
     setTriggering(true);
     setStatus(null);
@@ -128,8 +165,7 @@ export default function AdminPipeline() {
         credentials: "include",
       });
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `Trigger failed (${response.status})`);
+        throw new Error(await responseMessage(response, `Trigger failed (${response.status})`));
       }
       const data = await response.json();
       setStatus(data.detail || "Pipeline started in the background.");
@@ -138,6 +174,28 @@ export default function AdminPipeline() {
       setError(caught instanceof Error ? caught.message : "Trigger failed.");
     } finally {
       setTriggering(false);
+    }
+  }
+
+  async function cancelRun(runId: number) {
+    setCancellingRunId(runId);
+    setStatus(null);
+    setError(null);
+    try {
+      const response = await fetch(`/api/admin/pipeline/runs/${runId}/cancel`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(await responseMessage(response, `Cancel failed (${response.status})`));
+      }
+      const data = await response.json();
+      setStatus(data.detail || "Pipeline cancellation requested.");
+      await loadRuns();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Cancel failed.");
+    } finally {
+      setCancellingRunId(null);
     }
   }
 
@@ -251,6 +309,11 @@ export default function AdminPipeline() {
                             >
                               {run.status}
                             </span>
+                            {isActiveRun(run.status) && run.current_stage_key && (
+                              <div className="mt-1 max-w-[180px] truncate text-xs text-slate-500" title={run.current_stage_key}>
+                                {run.current_stage_key}
+                              </div>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-slate-700">{durationMs(run.started_at, run.completed_at)}</td>
                           <td className="px-4 py-3 text-slate-700">{run.triggered_by || "—"}</td>
@@ -258,18 +321,40 @@ export default function AdminPipeline() {
                             {run.schedule_key || "—"}
                           </td>
                           <td className="px-4 py-3">
-                            <button
-                              type="button"
-                              onClick={() => toggleExpand(run.run_id)}
-                              className="text-sky-700 hover:underline"
-                            >
-                              {expandedRunId === run.run_id ? "Hide stages" : "Show stages"}
-                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleExpand(run.run_id)}
+                                className="text-sky-700 hover:underline"
+                              >
+                                {expandedRunId === run.run_id ? "Hide stages" : "Show stages"}
+                              </button>
+                              {run.status === "started" && (
+                                <button
+                                  type="button"
+                                  onClick={() => void cancelRun(run.run_id)}
+                                  disabled={cancellingRunId === run.run_id}
+                                  className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-red-50 px-2 py-1 text-xs text-red-800 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  <CircleStop className="h-4 w-4" aria-hidden="true" />
+                                  {cancellingRunId === run.run_id ? "Cancelling…" : "Cancel"}
+                                </button>
+                              )}
+                              {run.status === "cancel_requested" && (
+                                <span className="text-xs text-orange-700">Cancel requested</span>
+                              )}
+                            </div>
                           </td>
                         </tr>
                         {expandedRunId === run.run_id && (
                           <tr className="bg-stone-50">
                             <td colSpan={7} className="px-4 py-4">
+                              {run.cancel_requested_at && (
+                                <p className="mb-3 rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+                                  Cancel requested by {run.cancel_requested_by || "admin"} at{" "}
+                                  {formatDate(run.cancel_requested_at)}.
+                                </p>
+                              )}
                               {run.notes && (
                                 <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
                                   {run.notes}

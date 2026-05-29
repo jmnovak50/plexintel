@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+import signal
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
+from dataclasses import dataclass
 from datetime import datetime, time as time_of_day, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +26,12 @@ PIPELINE_ADVISORY_LOCK_ID = 884722901
 LOG_TAIL_MAX = 5000
 PIPELINE_LOG_PATH_ENV = "PIPELINE_LOG_PATH"
 DEFAULT_PIPELINE_LOG_PATH = REPO_ROOT / "logs" / "pipeline.log"
+PIPELINE_CANCEL_POLL_SECONDS_ENV = "PIPELINE_CANCEL_POLL_SECONDS"
+PIPELINE_CANCEL_GRACE_SECONDS_ENV = "PIPELINE_CANCEL_GRACE_SECONDS"
+DEFAULT_CANCEL_POLL_SECONDS = 2.0
+DEFAULT_CANCEL_GRACE_SECONDS = 10.0
+TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled"}
+SCHEDULE_TERMINAL_STATUSES = {"success", "cancelled"}
 
 WEEKDAY_INDEX = {
     "monday": 0,
@@ -32,6 +42,14 @@ WEEKDAY_INDEX = {
     "saturday": 5,
     "sunday": 6,
 }
+
+
+@dataclass(frozen=True)
+class StageProcessResult:
+    returncode: int | None
+    stdout: str
+    stderr: str
+    cancelled: bool = False
 
 
 def _python_executable() -> str:
@@ -47,6 +65,33 @@ def _tail(s: str | None, max_len: int = LOG_TAIL_MAX) -> str:
     if len(s) <= max_len:
         return s
     return s[-max_len:]
+
+
+def _row_value(row: Any, key: str, index: int = 0) -> Any:
+    if row is None:
+        return None
+    if hasattr(row, "get"):
+        return row.get(key)
+    return row[index]
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def _read_spooled_output(handle) -> str:
+    handle.seek(0)
+    data = handle.read()
+    if isinstance(data, str):
+        return data
+    return data.decode("utf-8", errors="replace")
 
 
 def get_pipeline_log_path() -> Path:
@@ -100,6 +145,184 @@ def _log_stage_output(
         lines.append("\n")
     lines.append(f"[{timestamp}] [run:{run_id}] [stage:{stage_key}] end\n")
     _append_pipeline_log("".join(lines))
+
+
+def _is_pipeline_cancel_requested(conn, run_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                (status = 'cancel_requested' OR cancel_requested_at IS NOT NULL) AS cancel_requested
+            FROM public.pipeline_runs
+            WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+        row = cur.fetchone()
+    return bool(_row_value(row, "cancel_requested"))
+
+
+def _update_run_heartbeat(
+    conn,
+    *,
+    run_id: int,
+    stage_key: str | None,
+    pid: int | None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.pipeline_runs
+            SET last_heartbeat_at = now(),
+                current_stage_key = %s,
+                current_pid = %s
+            WHERE run_id = %s
+            """,
+            (stage_key, pid, run_id),
+        )
+    conn.commit()
+
+
+def _clear_run_current_stage(conn, run_id: int) -> None:
+    _update_run_heartbeat(conn, run_id=run_id, stage_key=None, pid=None)
+
+
+def _mark_run_cancelled(conn, *, run_id: int, notes: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.pipeline_runs
+            SET status = 'cancelled',
+                notes = %s,
+                completed_at = COALESCE(completed_at, now()),
+                last_heartbeat_at = now(),
+                current_stage_key = NULL,
+                current_pid = NULL
+            WHERE run_id = %s
+            """,
+            (_tail(notes, 2000), run_id),
+        )
+    conn.commit()
+
+
+def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[str, Any]:
+    conn = connect_db(cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT run_id, status
+                FROM public.pipeline_runs
+                WHERE run_id = %s
+                FOR UPDATE
+                """,
+                (run_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.commit()
+                return {"status": "not_found", "run_id": run_id}
+
+            current_status = str(_row_value(row, "status", 1))
+            if current_status in TERMINAL_RUN_STATUSES:
+                conn.commit()
+                return {
+                    "status": "already_terminal",
+                    "run_id": run_id,
+                    "run_status": current_status,
+                }
+
+            cur.execute(
+                """
+                UPDATE public.pipeline_runs
+                SET status = 'cancel_requested',
+                    cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                    cancel_requested_by = COALESCE(cancel_requested_by, %s),
+                    last_heartbeat_at = now()
+                WHERE run_id = %s
+                """,
+                (requested_by, run_id),
+            )
+        conn.commit()
+        _log_run_event(run_id, f"Pipeline cancellation requested by {requested_by or '-'}")
+        return {"status": "cancel_requested", "run_id": run_id}
+    finally:
+        conn.close()
+
+
+def _signal_process_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        return
+    except Exception:
+        if sig == signal.SIGTERM:
+            proc.terminate()
+        elif sig == signal.SIGKILL:
+            proc.kill()
+
+
+def _run_stage_process(
+    *,
+    conn,
+    run_id: int,
+    stage_key: str,
+    argv: list[str],
+    env: dict[str, str],
+    poll_seconds: float | None = None,
+    grace_seconds: float | None = None,
+) -> StageProcessResult:
+    poll_interval = (
+        poll_seconds
+        if poll_seconds is not None
+        else _env_float(PIPELINE_CANCEL_POLL_SECONDS_ENV, DEFAULT_CANCEL_POLL_SECONDS)
+    )
+    cancel_grace = (
+        grace_seconds
+        if grace_seconds is not None
+        else _env_float(PIPELINE_CANCEL_GRACE_SECONDS_ENV, DEFAULT_CANCEL_GRACE_SECONDS)
+    )
+
+    with tempfile.TemporaryFile(mode="w+b") as stdout_file:
+        with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(REPO_ROOT),
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=env,
+                start_new_session=True,
+            )
+            cancelled = False
+            _update_run_heartbeat(conn, run_id=run_id, stage_key=stage_key, pid=proc.pid)
+
+            while proc.poll() is None:
+                if _is_pipeline_cancel_requested(conn, run_id):
+                    cancelled = True
+                    _signal_process_group(proc, signal.SIGTERM)
+                    deadline = time.monotonic() + cancel_grace
+                    while proc.poll() is None and time.monotonic() < deadline:
+                        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
+                    if proc.poll() is None:
+                        _signal_process_group(proc, signal.SIGKILL)
+                    proc.wait()
+                    break
+
+                if poll_interval > 0:
+                    time.sleep(poll_interval)
+                _update_run_heartbeat(conn, run_id=run_id, stage_key=stage_key, pid=proc.pid)
+
+            if proc.poll() is None:
+                proc.wait()
+
+            stdout = _read_spooled_output(stdout_file)
+            stderr = _read_spooled_output(stderr_file)
+            return StageProcessResult(
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                cancelled=cancelled,
+            )
 
 
 def build_pipeline_stages() -> list[tuple[str, list[str]]]:
@@ -172,16 +395,16 @@ def get_pipeline_schedule_slot(now_utc: datetime | None = None) -> dict[str, Any
     return {"slot_dt": slot_dt, "schedule_key": schedule_key, "timezone": tz_name}
 
 
-def _has_successful_run_for_schedule_key(conn, schedule_key: str) -> bool:
+def _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT 1
             FROM public.pipeline_runs
-            WHERE schedule_key = %s AND status = 'success'
+            WHERE schedule_key = %s AND status IN %s
             LIMIT 1
             """,
-            (schedule_key,),
+            (schedule_key, tuple(sorted(SCHEDULE_TERMINAL_STATUSES))),
         )
         return cur.fetchone() is not None
 
@@ -196,7 +419,7 @@ def run_scheduled_pipeline(*, triggered_by: str | None = None) -> dict[str, Any]
 
     conn = connect_db()
     try:
-        if _has_successful_run_for_schedule_key(conn, schedule_key):
+        if _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key):
             return {"status": "already_ran", "schedule_key": schedule_key}
     finally:
         conn.close()
@@ -231,7 +454,7 @@ def run_pipeline(
             return {"status": "locked"}
 
         if schedule_key is not None and delivery_type == "scheduled":
-            if _has_successful_run_for_schedule_key(conn, schedule_key):
+            if _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key):
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock(%s)", (PIPELINE_ADVISORY_LOCK_ID,))
                 conn.commit()
@@ -241,9 +464,9 @@ def run_pipeline(
             cur.execute(
                 """
                 INSERT INTO public.pipeline_runs (
-                    delivery_type, schedule_key, triggered_by, status, started_at
+                    delivery_type, schedule_key, triggered_by, status, started_at, last_heartbeat_at
                 )
-                VALUES (%s, %s, %s, 'started', now())
+                VALUES (%s, %s, %s, 'started', now(), now())
                 RETURNING run_id
                 """,
                 (delivery_type, schedule_key, triggered_by),
@@ -262,6 +485,12 @@ def run_pipeline(
 
         stages = build_pipeline_stages()
         for stage_key, argv in stages:
+            if _is_pipeline_cancel_requested(conn, run_id):
+                note = f"Pipeline run cancelled before stage {stage_key}"
+                _mark_run_cancelled(conn, run_id=run_id, notes=note)
+                _log_run_event(run_id, note)
+                break
+
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -278,13 +507,12 @@ def run_pipeline(
             conn.commit()
 
             try:
-                proc = subprocess.run(
-                    argv,
-                    cwd=str(REPO_ROOT),
-                    capture_output=True,
-                    text=True,
+                proc_result = _run_stage_process(
+                    conn=conn,
+                    run_id=run_id,
+                    stage_key=stage_key,
+                    argv=argv,
                     env=env,
-                    timeout=None,
                 )
             except Exception as exc:
                 err_msg = str(exc)
@@ -310,7 +538,12 @@ def run_pipeline(
                     cur.execute(
                         """
                         UPDATE public.pipeline_runs
-                        SET status = 'failed', notes = %s, completed_at = now()
+                        SET status = 'failed',
+                            notes = %s,
+                            completed_at = now(),
+                            last_heartbeat_at = now(),
+                            current_stage_key = NULL,
+                            current_pid = NULL
                         WHERE run_id = %s
                         """,
                         (_tail(err_msg, 2000), run_id),
@@ -319,16 +552,20 @@ def run_pipeline(
                 _log_run_event(run_id, f"Pipeline run failed during stage {stage_key}: {err_msg}")
                 break
 
-            out_t = _tail(proc.stdout)
-            err_t = _tail(proc.stderr)
-            stage_status = "success" if proc.returncode == 0 else "failed"
+            out_t = _tail(proc_result.stdout)
+            err_t = _tail(proc_result.stderr)
+            stage_status = (
+                "cancelled"
+                if proc_result.cancelled
+                else "success" if proc_result.returncode == 0 else "failed"
+            )
             _log_stage_output(
                 run_id=run_id,
                 stage_key=stage_key,
                 argv=argv,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                exit_code=proc.returncode,
+                stdout=proc_result.stdout,
+                stderr=proc_result.stderr,
+                exit_code=proc_result.returncode,
             )
             with conn.cursor() as cur:
                 cur.execute(
@@ -339,17 +576,29 @@ def run_pipeline(
                         completed_at = now()
                     WHERE stage_id = %s
                     """,
-                    (stage_status, proc.returncode, out_t, err_t, stage_id),
+                    (stage_status, proc_result.returncode, out_t, err_t, stage_id),
                 )
             conn.commit()
+            _clear_run_current_stage(conn, run_id)
 
-            if proc.returncode != 0:
-                note = f"Stage {stage_key} exited with code {proc.returncode}"
+            if proc_result.cancelled:
+                note = f"Pipeline run cancelled during stage {stage_key}"
+                _mark_run_cancelled(conn, run_id=run_id, notes=note)
+                _log_run_event(run_id, note)
+                break
+
+            if proc_result.returncode != 0:
+                note = f"Stage {stage_key} exited with code {proc_result.returncode}"
                 with conn.cursor() as cur:
                     cur.execute(
                         """
                         UPDATE public.pipeline_runs
-                        SET status = 'failed', notes = %s, completed_at = now()
+                        SET status = 'failed',
+                            notes = %s,
+                            completed_at = now(),
+                            last_heartbeat_at = now(),
+                            current_stage_key = NULL,
+                            current_pid = NULL
                         WHERE run_id = %s
                         """,
                         (_tail(note, 2000), run_id),
@@ -362,7 +611,11 @@ def run_pipeline(
                 cur.execute(
                     """
                     UPDATE public.pipeline_runs
-                    SET status = 'success', completed_at = now()
+                    SET status = 'success',
+                        completed_at = now(),
+                        last_heartbeat_at = now(),
+                        current_stage_key = NULL,
+                        current_pid = NULL
                     WHERE run_id = %s
                     """,
                     (run_id,),
@@ -381,6 +634,8 @@ def run_pipeline(
         conn.commit()
         if final_status == "failed":
             result = {"status": "failed", "run_id": run_id}
+        elif final_status == "cancelled":
+            result = {"status": "cancelled", "run_id": run_id}
         elif final_status == "success":
             result = {"status": "success", "run_id": run_id}
         return result
@@ -410,6 +665,11 @@ def get_pipeline_runs(*, limit: int = 50) -> dict[str, Any]:
                     triggered_by,
                     status,
                     notes,
+                    cancel_requested_at,
+                    cancel_requested_by,
+                    last_heartbeat_at,
+                    current_stage_key,
+                    current_pid,
                     started_at,
                     completed_at
                 FROM public.pipeline_runs
@@ -473,6 +733,11 @@ def get_pipeline_run(run_id: int) -> dict[str, Any] | None:
                     triggered_by,
                     status,
                     notes,
+                    cancel_requested_at,
+                    cancel_requested_by,
+                    last_heartbeat_at,
+                    current_stage_key,
+                    current_pid,
                     started_at,
                     completed_at
                 FROM public.pipeline_runs

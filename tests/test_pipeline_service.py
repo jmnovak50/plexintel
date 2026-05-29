@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import subprocess
+import signal
 import tempfile
 import unittest
 from datetime import datetime
@@ -151,12 +151,12 @@ class PipelineRunTests(unittest.TestCase):
             [
                 {"acquired": True},
                 {"run_id": 123},
+                {"cancel_requested": False},
                 {"stage_id": 456},
                 {"status": "success"},
             ]
         )
-        completed = subprocess.CompletedProcess(
-            args=["python", "stage.py"],
+        completed = pipeline_service.StageProcessResult(
             returncode=0,
             stdout="complete stdout\nincluding a second line\n",
             stderr="complete stderr\n",
@@ -171,7 +171,7 @@ class PipelineRunTests(unittest.TestCase):
                         "build_pipeline_stages",
                         return_value=[("stage_one", ["python", "stage.py"])],
                     ):
-                        with patch.object(pipeline_service.subprocess, "run", return_value=completed):
+                        with patch.object(pipeline_service, "_run_stage_process", return_value=completed):
                             out = pipeline_service.run_pipeline(
                                 delivery_type="manual",
                                 triggered_by="admin",
@@ -186,6 +186,115 @@ class PipelineRunTests(unittest.TestCase):
         self.assertIn("complete stdout\nincluding a second line\n", log_text)
         self.assertIn("complete stderr\n", log_text)
         self.assertIn("[run:123] Pipeline run completed successfully", log_text)
+
+    def test_run_pipeline_cancel_before_next_stage_prevents_next_subprocess(self):
+        conn = FakeConnection(
+            [
+                {"acquired": True},
+                {"run_id": 123},
+                {"cancel_requested": False},
+                {"stage_id": 456},
+                {"cancel_requested": True},
+                {"status": "cancelled"},
+            ]
+        )
+        completed = pipeline_service.StageProcessResult(
+            returncode=0,
+            stdout="stage one done\n",
+            stderr="",
+        )
+
+        with patch.object(pipeline_service, "connect_db", return_value=conn):
+            with patch.object(
+                pipeline_service,
+                "build_pipeline_stages",
+                return_value=[
+                    ("stage_one", ["python", "one.py"]),
+                    ("stage_two", ["python", "two.py"]),
+                ],
+            ):
+                with patch.object(pipeline_service, "_run_stage_process", return_value=completed) as mock_run:
+                    out = pipeline_service.run_pipeline(
+                        delivery_type="manual",
+                        triggered_by="admin",
+                        schedule_key=None,
+                    )
+
+        self.assertEqual(out, {"status": "cancelled", "run_id": 123})
+        mock_run.assert_called_once()
+        executed_params = [params for _sql, params in conn.executed if params]
+        self.assertTrue(
+            any(
+                isinstance(params, tuple)
+                and params
+                and "cancelled before stage stage_two" in str(params[0])
+                for params in executed_params
+            )
+        )
+
+    def test_run_stage_process_sends_term_then_kill_on_cancel(self):
+        class FakeProc:
+            pid = 987
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                self.returncode = -9
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        conn = FakeConnection([{"cancel_requested": True}])
+        fake_proc = FakeProc()
+        signals: list[tuple[int, signal.Signals]] = []
+
+        with patch.object(pipeline_service.subprocess, "Popen", return_value=fake_proc):
+            with patch.object(
+                pipeline_service.os,
+                "killpg",
+                side_effect=lambda pid, sig: signals.append((pid, sig)),
+            ):
+                result = pipeline_service._run_stage_process(
+                    conn=conn,
+                    run_id=123,
+                    stage_key="stage_one",
+                    argv=["python", "stage.py"],
+                    env={},
+                    poll_seconds=0,
+                    grace_seconds=0,
+                )
+
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.returncode, -9)
+        self.assertEqual(
+            signals,
+            [(987, signal.SIGTERM), (987, signal.SIGKILL)],
+        )
+
+    def test_run_scheduled_pipeline_treats_cancelled_schedule_as_terminal(self):
+        conn = FakeConnection([{"exists": 1}])
+
+        with patch.object(pipeline_service, "get_setting_value", return_value=True):
+            with patch.object(
+                pipeline_service,
+                "get_pipeline_schedule_slot",
+                return_value={"schedule_key": "daily:test"},
+            ):
+                with patch.object(pipeline_service, "connect_db", return_value=conn):
+                    with patch.object(pipeline_service, "run_pipeline") as mock_run_pipeline:
+                        out = pipeline_service.run_scheduled_pipeline(triggered_by="test")
+
+        self.assertEqual(out, {"status": "already_ran", "schedule_key": "daily:test"})
+        mock_run_pipeline.assert_not_called()
+        executed_sql = " ".join(sql for sql, _params in conn.executed)
+        self.assertIn("status IN", executed_sql)
+        self.assertIn(("cancelled", "success"), [params[1] for _sql, params in conn.executed if params][0:1])
 
 
 if __name__ == "__main__":

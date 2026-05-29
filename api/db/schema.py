@@ -409,9 +409,44 @@ def apply_schema_updates(conn) -> None:
                 triggered_by text,
                 status text NOT NULL DEFAULT 'started',
                 notes text,
+                cancel_requested_at timestamp with time zone,
+                cancel_requested_by text,
+                last_heartbeat_at timestamp with time zone,
+                current_stage_key text,
+                current_pid integer,
                 started_at timestamp with time zone NOT NULL DEFAULT now(),
                 completed_at timestamp with time zone
             )
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.pipeline_runs
+            ADD COLUMN IF NOT EXISTS cancel_requested_at timestamp with time zone
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.pipeline_runs
+            ADD COLUMN IF NOT EXISTS cancel_requested_by text
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.pipeline_runs
+            ADD COLUMN IF NOT EXISTS last_heartbeat_at timestamp with time zone
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.pipeline_runs
+            ADD COLUMN IF NOT EXISTS current_stage_key text
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.pipeline_runs
+            ADD COLUMN IF NOT EXISTS current_pid integer
             """
         )
         cur.execute(
