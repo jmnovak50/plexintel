@@ -9,6 +9,14 @@ This file is a carry-forward list for future sessions. It should track unresolve
   - `Taste match`: labels from positive SHAP contributors in user-preference dimensions `768-1535`.
 - [ ] Update the API/UI payload so the frontend can render those groups separately.
 
+## Recommendation Refresh Availability
+
+- [ ] Keep last good recommendations visible while `score_model.py --all-users` runs.
+- [ ] Remove the global `TRUNCATE recommendations` behavior from all-user scoring.
+- [ ] Add a lightweight refresh-status API based on active `pipeline_runs.current_stage_key = 'score_model'`.
+- [ ] Show a user-facing banner in `Recommendations.tsx` while recommendations are refreshing.
+- [ ] Add backend and frontend build/test coverage when implementing.
+
 ## Context
 
 - Combined embedding layout is `[media_embedding, user_embedding]`.
