@@ -119,7 +119,11 @@ class TautulliWatchReconciliationTests(unittest.TestCase):
         insert_params = cursor.executed[insert_index][1]
         self.assertEqual(insert_params[0], 500)
         self.assertEqual(insert_params[4], 100)
-        self.assertEqual(cursor.executed[stale_watch_index][1], ([100],))
+        self.assertIn("we.watch_id::text = wh.watch_id::text", statements[stale_embedding_index])
+        self.assertIn("wh.watch_id::text = ANY(%s)", statements[stale_embedding_index])
+        self.assertIn("watch_id::text = ANY(%s)", statements[stale_watch_index])
+        self.assertIn("wh.watch_id::text = we.watch_id::text", statements[orphan_embedding_index])
+        self.assertEqual(cursor.executed[stale_watch_index][1], (["100"],))
 
     def test_sync_aborts_without_deleting_on_fetch_failure(self):
         conn = FakeWatchConnection()

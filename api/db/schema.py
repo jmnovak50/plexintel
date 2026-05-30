@@ -160,19 +160,36 @@ def apply_schema_updates(conn) -> None:
             DO $$
             BEGIN
                 IF to_regclass('public.watch_embeddings') IS NOT NULL THEN
+                    DELETE FROM public.watch_embeddings
+                    WHERE watch_id IS NULL
+                       OR watch_id::text !~ '^[0-9]+$';
+
                     WITH ranked AS (
                         SELECT
                             ctid,
                             ROW_NUMBER() OVER (
-                                PARTITION BY watch_id
+                                PARTITION BY watch_id::integer
                                 ORDER BY ctid DESC
                             ) AS rn
                         FROM public.watch_embeddings
+                        WHERE watch_id::text ~ '^[0-9]+$'
                     )
                     DELETE FROM public.watch_embeddings we
                     USING ranked
                     WHERE we.ctid = ranked.ctid
                       AND ranked.rn > 1;
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'watch_embeddings'
+                          AND column_name = 'watch_id'
+                          AND udt_name <> 'int4'
+                    ) THEN
+                        EXECUTE 'DROP INDEX IF EXISTS public.watch_embeddings_watch_id_uidx';
+                        EXECUTE 'ALTER TABLE public.watch_embeddings ALTER COLUMN watch_id TYPE integer USING watch_id::integer';
+                    END IF;
 
                     EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS watch_embeddings_watch_id_uidx ON public.watch_embeddings (watch_id)';
                 END IF;

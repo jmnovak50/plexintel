@@ -1232,7 +1232,7 @@ def normalize_watch_history_rows(rows):
 
 
 def purge_deleted_watch_history(cursor, upstream_watch_ids):
-    upstream_ids = sorted(upstream_watch_ids)
+    upstream_ids = sorted(str(watch_id) for watch_id in upstream_watch_ids)
     deleted_embedding_rows = 0
     deleted_watch_rows = 0
 
@@ -1241,8 +1241,8 @@ def purge_deleted_watch_history(cursor, upstream_watch_ids):
             """
             DELETE FROM watch_embeddings we
             USING watch_history wh
-            WHERE we.watch_id = wh.watch_id
-              AND NOT (wh.watch_id = ANY(%s))
+            WHERE we.watch_id::text = wh.watch_id::text
+              AND NOT (wh.watch_id::text = ANY(%s))
             """,
             (upstream_ids,),
         )
@@ -1251,7 +1251,7 @@ def purge_deleted_watch_history(cursor, upstream_watch_ids):
         cursor.execute(
             """
             DELETE FROM watch_history
-            WHERE NOT (watch_id = ANY(%s))
+            WHERE NOT (watch_id::text = ANY(%s))
             """,
             (upstream_ids,),
         )
@@ -1263,7 +1263,7 @@ def purge_deleted_watch_history(cursor, upstream_watch_ids):
         WHERE NOT EXISTS (
             SELECT 1
             FROM watch_history wh
-            WHERE wh.watch_id = we.watch_id
+            WHERE wh.watch_id::text = we.watch_id::text
         )
         """
     )
