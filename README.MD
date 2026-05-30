@@ -97,6 +97,8 @@ Admins can cancel an active in-app run from **Admin → Pipeline runs**. Cancell
 **Option B — Cron**
 Schedule `run_daily_pipeline.sh` (or the individual Python steps) with cron on the host. If you use cron, leave the in-app pipeline scheduler **disabled** in admin settings.
 
+The cron script uses the same coverage-oriented label defaults. To explicitly pass `--refresh_existing` for a manual quality-review run, use `run_daily_pipeline.sh --refresh-existing` or set `PIPELINE_REFRESH_EXISTING_LABELS=true`. Keep it off for normal daily runs.
+
 📦 Prerequisites
 
 Python 3.11+

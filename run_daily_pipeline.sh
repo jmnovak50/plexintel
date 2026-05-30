@@ -4,6 +4,21 @@ set -euo pipefail
 APP="/home/jmnovak/projects/plexintel"
 VENV="/home/jmnovak/projects/plexintel/plexenv"
 PY="$VENV/bin/python"
+REFRESH_EXISTING_LABELS="${PIPELINE_REFRESH_EXISTING_LABELS:-false}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --refresh-existing|--refresh_existing)
+      REFRESH_EXISTING_LABELS=true
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      echo "Usage: $0 [--refresh-existing]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 cd "$APP" || exit 1
 
@@ -55,6 +70,22 @@ echo "🔮 Scoring recommendations..."
 "$PY" "$APP/score_model.py" --all-users
 
 echo "🏷  Auto-labeling SHAP dimensions in coverage mode..."
-"$PY" "$APP/batch_label_embeddings.py" --selection_mode coverage --limit 25 --dim_type all --label --save_label --export_csv shap_labels_$(date +%F).csv
+LABEL_ARGS=(
+  "$PY"
+  "$APP/batch_label_embeddings.py"
+  --selection_mode coverage
+  --limit 25
+  --dim_type all
+  --label
+  --save_label
+  --export_csv "shap_labels_$(date +%F).csv"
+)
+case "$REFRESH_EXISTING_LABELS" in
+  true|TRUE|True|1|yes|YES|Yes|on|ON|On)
+    echo "⚠️  Adding --refresh_existing to the coverage label stage."
+    LABEL_ARGS+=(--refresh_existing)
+    ;;
+esac
+"${LABEL_ARGS[@]}"
 
 echo "✅ Daily pipeline complete: $(date)"
