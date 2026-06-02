@@ -230,13 +230,20 @@ class MCPServerTests(unittest.TestCase):
                                 ):
                                     with patch.object(
                                         mcp_server,
-                                        "fetch_poster_image_for_rating_key",
-                                        return_value={
-                                            "content": _png_bytes(),
-                                            "content_type": "image/png",
-                                        },
+                                        "build_public_poster_url",
+                                        side_effect=lambda rating_key, width=None, thumb=False: (
+                                            f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
+                                        ),
                                     ):
-                                        results = anyio.run(self._exercise_mcp_protocol)
+                                        with patch.object(
+                                            mcp_server,
+                                            "fetch_poster_image_for_rating_key",
+                                            return_value={
+                                                "content": _png_bytes(),
+                                                "content_type": "image/png",
+                                            },
+                                        ):
+                                            results = anyio.run(self._exercise_mcp_protocol)
 
         self.assertTrue(results["initialize"].serverInfo.name)
         tool_names = {tool.name for tool in results["tools"].tools}
@@ -270,15 +277,15 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(
             results["poster"].content[0].text,
             "### Blade Runner 2049\n"
-            "![Poster for Blade Runner 2049](https://plexintel.kabolly.com/api/posters/42?w=240)",
+            "![Poster for Blade Runner 2049](https://plexintel.example.com/api/posters/42?w=240)",
         )
         self.assertIsNone(results["gallery"].structuredContent)
         self.assertIn(
-            "### Blade Runner 2049\n![Poster for Blade Runner 2049](https://plexintel.kabolly.com/api/posters/42?w=180)",
+            "### Blade Runner 2049\n![Poster for Blade Runner 2049](https://plexintel.example.com/api/posters/42?w=180)",
             results["gallery"].content[0].text,
         )
         self.assertIn("### Black Bag", results["gallery"].content[0].text)
-        self.assertIn("https://plexintel.kabolly.com/api/posters/88?w=180", results["gallery"].content[0].text)
+        self.assertIn("https://plexintel.example.com/api/posters/88?w=180", results["gallery"].content[0].text)
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["recent"].structuredContent["items"][0]["duration_formatted"], "00:00:00")

@@ -378,7 +378,7 @@ def _get_digest_settings() -> dict[str, Any]:
         "timezone": get_setting_value("digest.timezone", default="America/Chicago"),
         "top_movies": int(get_setting_value("digest.top_movies", default=25) or 0),
         "top_shows": int(get_setting_value("digest.top_shows", default=10) or 0),
-        "base_url": get_setting_value("digest.base_url", default="http://localhost:8489"),
+        "base_url": get_setting_value("digest.base_url"),
         "display_threshold": float(get_setting_value("recommendations.display_threshold", default=0.70)),
     }
 

@@ -72,6 +72,13 @@ class PosterRouteTests(unittest.TestCase):
                 "https://plexintel.example.com/api/posters/42?w=240",
             )
 
+    def test_build_public_poster_url_requires_configured_public_base_url(self):
+        with patch.object(poster_service, "get_setting_value", return_value=None):
+            with self.assertRaises(RuntimeError) as raised:
+                poster_service.build_public_poster_url(42)
+
+        self.assertIn("agent.public_base_url", str(raised.exception))
+
     def test_build_plex_item_url_uses_server_identifier_when_configured(self):
         def fake_get_setting_value(key: str, default=None):
             values = {

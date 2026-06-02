@@ -17,7 +17,6 @@ from api.services.app_settings import (
 )
 
 
-DEFAULT_PUBLIC_BASE_URL = "https://plexintel.kabolly.com"
 DEFAULT_PLEX_WEB_BASE_URL = "https://app.plex.tv/desktop"
 AUTO_DISCOVERED_SOURCE = "auto_discovered"
 PLACEHOLDER_PLEX_SERVER_IDENTIFIER_KEYS = {
@@ -241,8 +240,13 @@ def build_plex_item_url_from_context(
 
 
 def get_public_base_url() -> str:
-    base_url = get_setting_value("agent.public_base_url", default=DEFAULT_PUBLIC_BASE_URL)
-    return (base_url or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
+    base_url = get_setting_value("agent.public_base_url")
+    if not base_url:
+        raise RuntimeError(
+            "Agent Public Base URL is not configured. Set agent.public_base_url in Admin Settings "
+            "or AGENT_PUBLIC_BASE_URL/PLEXINTEL_PUBLIC_BASE_URL in the container environment."
+        )
+    return str(base_url).rstrip("/")
 
 
 def build_public_poster_url(
