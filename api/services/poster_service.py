@@ -20,6 +20,25 @@ from api.services.app_settings import (
 DEFAULT_PUBLIC_BASE_URL = "https://plexintel.kabolly.com"
 DEFAULT_PLEX_WEB_BASE_URL = "https://app.plex.tv/desktop"
 AUTO_DISCOVERED_SOURCE = "auto_discovered"
+PLACEHOLDER_PLEX_SERVER_IDENTIFIER_KEYS = {
+    "serverid",
+    "serveridentifier",
+    "plexserverid",
+    "plexserveridentifier",
+    "machineid",
+    "machineidentifier",
+    "plexmachineid",
+    "plexmachineidentifier",
+    "pmsidentifier",
+    "yourserverid",
+    "yourserveridentifier",
+    "yourplexserverid",
+    "yourplexserveridentifier",
+    "yourmachineid",
+    "yourmachineidentifier",
+    "yourplexmachineid",
+    "yourplexmachineidentifier",
+}
 
 
 def _normalize_path(value: Optional[str]) -> Optional[str]:
@@ -27,6 +46,24 @@ def _normalize_path(value: Optional[str]) -> Optional[str]:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def normalize_plex_server_identifier(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+
+    placeholder_key = "".join(char for char in normalized.lower() if char.isalnum())
+    if placeholder_key in PLACEHOLDER_PLEX_SERVER_IDENTIFIER_KEYS:
+        return None
+
+    if any(char.isspace() for char in normalized):
+        return None
+
+    return normalized
 
 
 def resolve_poster_path(
@@ -85,7 +122,7 @@ def build_poster_url(
 
 
 def persist_plex_server_identifier(server_identifier: str) -> None:
-    normalized_identifier = (server_identifier or "").strip()
+    normalized_identifier = normalize_plex_server_identifier(server_identifier)
     if not normalized_identifier:
         return
 
@@ -146,7 +183,7 @@ def fetch_tautulli_server_identifier() -> Optional[str]:
     )
     if not server_identifier:
         return None
-    normalized_identifier = str(server_identifier).strip()
+    normalized_identifier = normalize_plex_server_identifier(server_identifier)
     if not normalized_identifier:
         return None
     persist_plex_server_identifier(normalized_identifier)
@@ -158,7 +195,9 @@ def build_plex_item_url(rating_key: Any) -> Optional[str]:
         get_setting_value("plex.web_base_url", default=DEFAULT_PLEX_WEB_BASE_URL)
         or DEFAULT_PLEX_WEB_BASE_URL
     ).rstrip("/")
-    configured_server_identifier = (get_setting_value("plex.server_identifier") or "").strip()
+    configured_server_identifier = normalize_plex_server_identifier(
+        get_setting_value("plex.server_identifier")
+    )
     server_identifier = configured_server_identifier or fetch_tautulli_server_identifier()
 
     return build_plex_item_url_from_context(
@@ -173,7 +212,10 @@ def get_plex_item_url_context() -> dict[str, Optional[str]]:
         get_setting_value("plex.web_base_url", default=DEFAULT_PLEX_WEB_BASE_URL)
         or DEFAULT_PLEX_WEB_BASE_URL
     ).rstrip("/")
-    server_identifier = (get_setting_value("plex.server_identifier") or "").strip() or None
+    configured_server_identifier = normalize_plex_server_identifier(
+        get_setting_value("plex.server_identifier")
+    )
+    server_identifier = configured_server_identifier or fetch_tautulli_server_identifier()
     return {
         "web_base_url": web_base_url,
         "server_identifier": server_identifier,
@@ -189,11 +231,12 @@ def build_plex_item_url_from_context(
     if rating_key is None:
         return None
 
-    if not server_identifier:
+    normalized_server_identifier = normalize_plex_server_identifier(server_identifier)
+    if not normalized_server_identifier:
         return None
 
     metadata_key = quote(f"/library/metadata/{rating_key}", safe="")
-    server_path = quote(server_identifier, safe="")
+    server_path = quote(normalized_server_identifier, safe="")
     return f"{web_base_url.rstrip('/')}/#!/server/{server_path}/details?key={metadata_key}"
 
 

@@ -76,15 +76,46 @@ class PosterRouteTests(unittest.TestCase):
         def fake_get_setting_value(key: str, default=None):
             values = {
                 "plex.web_base_url": "https://app.plex.tv/desktop/",
-                "plex.server_identifier": "server id",
+                "plex.server_identifier": "real-machine-id",
             }
             return values.get(key, default)
 
         with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
             self.assertEqual(
                 poster_service.build_plex_item_url(42),
-                "https://app.plex.tv/desktop/#!/server/server%20id/details?key=%2Flibrary%2Fmetadata%2F42",
+                "https://app.plex.tv/desktop/#!/server/real-machine-id/details?key=%2Flibrary%2Fmetadata%2F42",
             )
+
+    def test_build_plex_item_url_ignores_placeholder_identifier_and_fetches_from_tautulli(self):
+        def fake_get_setting_value(key: str, default=None):
+            values = {
+                "plex.web_base_url": "https://app.plex.tv/desktop",
+                "plex.server_identifier": "server id",
+                "tautulli.api_url": "https://tautulli.example.com/api/v2",
+                "tautulli.api_key": "secret-key",
+            }
+            return values.get(key, default)
+
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
+            with patch.object(
+                poster_service.requests,
+                "get",
+                return_value=SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "response": {
+                            "data": {
+                                "pms_identifier": "real-machine-id",
+                            },
+                        },
+                    },
+                ),
+            ) as mock_get:
+                self.assertEqual(
+                    poster_service.build_plex_item_url(42),
+                    "https://app.plex.tv/desktop/#!/server/real-machine-id/details?key=%2Flibrary%2Fmetadata%2F42",
+                )
+                self.assertEqual(mock_get.call_count, 1)
 
     def test_build_plex_item_url_fetches_server_identifier_from_tautulli(self):
         def fake_get_setting_value(key: str, default=None):
@@ -105,7 +136,7 @@ class PosterRouteTests(unittest.TestCase):
                     json=lambda: {
                         "response": {
                             "data": {
-                                "pms_identifier": "server id",
+                                "pms_identifier": "real-machine-id",
                             },
                         },
                     },
@@ -113,7 +144,41 @@ class PosterRouteTests(unittest.TestCase):
             ) as mock_get:
                 self.assertEqual(
                     poster_service.build_plex_item_url(42),
-                    "https://app.plex.tv/desktop/#!/server/server%20id/details?key=%2Flibrary%2Fmetadata%2F42",
+                    "https://app.plex.tv/desktop/#!/server/real-machine-id/details?key=%2Flibrary%2Fmetadata%2F42",
+                )
+                self.assertEqual(mock_get.call_count, 1)
+
+    def test_get_plex_item_url_context_discovers_identifier_for_recommendation_batches(self):
+        def fake_get_setting_value(key: str, default=None):
+            values = {
+                "plex.web_base_url": "https://app.plex.tv/desktop",
+                "plex.server_identifier": "server id",
+                "tautulli.api_url": "https://tautulli.example.com/api/v2",
+                "tautulli.api_key": "secret-key",
+            }
+            return values.get(key, default)
+
+        with patch.object(poster_service, "get_setting_value", side_effect=fake_get_setting_value):
+            with patch.object(
+                poster_service.requests,
+                "get",
+                return_value=SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "response": {
+                            "data": {
+                                "pms_identifier": "real-machine-id",
+                            },
+                        },
+                    },
+                ),
+            ) as mock_get:
+                self.assertEqual(
+                    poster_service.get_plex_item_url_context(),
+                    {
+                        "web_base_url": "https://app.plex.tv/desktop",
+                        "server_identifier": "real-machine-id",
+                    },
                 )
                 self.assertEqual(mock_get.call_count, 1)
 
