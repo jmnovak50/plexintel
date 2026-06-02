@@ -408,11 +408,34 @@ class PositiveLabelSelectionTests(unittest.TestCase):
         sql = Path("db_update_positive_recommendation_labels.sql").read_text(encoding="utf-8")
 
         self.assertIn("si.shap_value > (0)::double precision", sql)
-        self.assertIn("GROUP BY el.label", sql)
+        self.assertIn("el.explainable IS TRUE", sql)
+        self.assertIn("el.display_label IS NOT NULL", sql)
+        self.assertIn("GROUP BY el.display_label", sql)
+        self.assertIn("string_agg(top_labels.display_label", sql)
         self.assertIn("ORDER BY top_labels.max_shap DESC", sql)
         self.assertIn("LIMIT 3", sql)
         self.assertNotIn("abs(si.shap_value)", sql.lower())
         self.assertNotIn("LIMIT 5", sql)
+
+    def test_label_governance_migration_adds_diagnostics_and_validation(self):
+        sql = Path("sql/add_embedding_label_governance.sql").read_text(encoding="utf-8")
+
+        for column in (
+            "ADD COLUMN IF NOT EXISTS label_type text",
+            "ADD COLUMN IF NOT EXISTS explainable boolean",
+            "ADD COLUMN IF NOT EXISTS display_label text",
+            "ADD COLUMN IF NOT EXISTS needs_review boolean DEFAULT false",
+            "ADD COLUMN IF NOT EXISTS updated_at timestamp without time zone DEFAULT now()",
+        ):
+            self.assertIn(column, sql)
+
+        self.assertIn("CREATE OR REPLACE VIEW public.embedding_label_governance_v", sql)
+        self.assertIn("LEFT JOIN public.shap_impact si ON si.dimension = el.dimension", sql)
+        self.assertIn("WHEN el.dimension < 768 THEN 'media'::text", sql)
+        self.assertIn("ELSE 'user'::text", sql)
+        self.assertIn("GROUP BY label_type, side, explainable, needs_review", sql)
+        self.assertIn("el.explainable IS TRUE", sql)
+        self.assertIn("el.display_label IS NOT NULL", sql)
 
 
 class LabelCoveragePromptTests(unittest.TestCase):

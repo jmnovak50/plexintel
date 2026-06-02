@@ -1,0 +1,461 @@
+BEGIN;
+
+-- Embedding label governance for explanation display only.
+--
+-- embedding_labels.dimension intentionally stores exact combined SHAP/model
+-- dimensions. Dimensions 0-767 are media-side labels and 768-1535 are
+-- user-side labels. This migration does not normalize dimensions and does not
+-- change model training, scoring, SHAP generation, or embedding generation.
+-- It only adds governance metadata so user-facing explanations can filter
+-- weak or structural labels while preserving the raw label rows.
+
+ALTER TABLE public.embedding_labels
+    ADD COLUMN IF NOT EXISTS label_type text,
+    ADD COLUMN IF NOT EXISTS explainable boolean,
+    ADD COLUMN IF NOT EXISTS display_label text,
+    ADD COLUMN IF NOT EXISTS needs_review boolean DEFAULT false,
+    ADD COLUMN IF NOT EXISTS updated_at timestamp without time zone DEFAULT now();
+
+COMMENT ON COLUMN public.embedding_labels.dimension IS
+    'Exact combined SHAP/model dimension: 0-767 are media-side labels, 768-1535 are user-side labels. Do not normalize.';
+COMMENT ON COLUMN public.embedding_labels.label_type IS
+    'Governance classification used only by explanation display filtering.';
+COMMENT ON COLUMN public.embedding_labels.explainable IS
+    'True when this label is eligible for user-facing explanation text.';
+COMMENT ON COLUMN public.embedding_labels.display_label IS
+    'Governed label text for user-facing explanations. Raw label remains intact.';
+COMMENT ON COLUMN public.embedding_labels.needs_review IS
+    'True when the governance classification should be manually reviewed.';
+
+WITH normalized AS (
+    SELECT
+        ctid AS row_id,
+        dimension,
+        label,
+        lower(btrim(label)) AS label_lc
+    FROM public.embedding_labels
+),
+classified AS (
+    SELECT
+        dimension,
+        row_id,
+        CASE
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%unknown%',
+                '%unclear%',
+                '%mixed%',
+                '%generic%'
+            ]) THEN 'weak'
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%rating%',
+                '%released in%',
+                '%recent%',
+                '%2025%',
+                '%2026%'
+            ]) THEN 'metadata'
+            WHEN label_lc IN (
+                'tv series episode',
+                'tv series episodes',
+                'tv episodes',
+                'tv episode',
+                'television episode',
+                'television episodes',
+                'television series episodes',
+                'feature-length movies',
+                'feature length movies',
+                'feature films',
+                'feature film preference',
+                'feature-film movies',
+                'standalone feature films',
+                'single tv episode',
+                'single television episode',
+                'single-episode installments',
+                'single-episode tv installments',
+                'individual tv episode',
+                'individual tv episode titles',
+                'individual tv episode releases',
+                'runtime over 45 minutes',
+                'runtime at least 110 minutes',
+                'under-130-minute runtimes',
+                'movies longer than two hours',
+                'feature films longer than two hours',
+                'episodes under 45 minutes',
+                'sub-hour tv episodes',
+                'short-form episodes under 30 minutes',
+                'standard sitcom runtime (≈20-35 min)',
+                'titles with colon subtitle',
+                'titles with colon subtitles',
+                'titles without a colon subtitle',
+                'single-word titles',
+                'single-word title movies',
+                'colon-separated episode subtitles',
+                'colon titles with verb-oriented subtitle'
+            ) THEN 'hard_structural'
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%friends%',
+                '%always sunny%',
+                '%ray donovan%',
+                '%gossip girl%',
+                '%icarly%'
+            ]) THEN 'proper_noun'
+            WHEN label_lc ~ '(^|[^a-z0-9])(episode|episodes|tv|television|movie|movies|film|films|title|titles)([^a-z0-9]|$)'
+                THEN 'soft_structural'
+            ELSE 'semantic_candidate'
+        END AS label_type,
+        CASE
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%unknown%',
+                '%unclear%',
+                '%mixed%',
+                '%generic%'
+            ]) THEN false
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%rating%',
+                '%released in%',
+                '%recent%',
+                '%2025%',
+                '%2026%'
+            ]) THEN false
+            WHEN label_lc IN (
+                'tv series episode',
+                'tv series episodes',
+                'tv episodes',
+                'tv episode',
+                'television episode',
+                'television episodes',
+                'television series episodes',
+                'feature-length movies',
+                'feature length movies',
+                'feature films',
+                'feature film preference',
+                'feature-film movies',
+                'standalone feature films',
+                'single tv episode',
+                'single television episode',
+                'single-episode installments',
+                'single-episode tv installments',
+                'individual tv episode',
+                'individual tv episode titles',
+                'individual tv episode releases',
+                'runtime over 45 minutes',
+                'runtime at least 110 minutes',
+                'under-130-minute runtimes',
+                'movies longer than two hours',
+                'feature films longer than two hours',
+                'episodes under 45 minutes',
+                'sub-hour tv episodes',
+                'short-form episodes under 30 minutes',
+                'standard sitcom runtime (≈20-35 min)',
+                'titles with colon subtitle',
+                'titles with colon subtitles',
+                'titles without a colon subtitle',
+                'single-word titles',
+                'single-word title movies',
+                'colon-separated episode subtitles',
+                'colon titles with verb-oriented subtitle'
+            ) THEN false
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%friends%',
+                '%always sunny%',
+                '%ray donovan%',
+                '%gossip girl%',
+                '%icarly%'
+            ]) THEN false
+            ELSE true
+        END AS explainable,
+        CASE
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%unknown%',
+                '%unclear%',
+                '%mixed%',
+                '%generic%'
+            ]) THEN true
+            WHEN label_lc ~ '(^|[^a-z0-9])(episode|episodes|tv|television|movie|movies|film|films|title|titles)([^a-z0-9]|$)'
+             AND NOT (
+                label_lc LIKE ANY (ARRAY[
+                    '%rating%',
+                    '%released in%',
+                    '%recent%',
+                    '%2025%',
+                    '%2026%'
+                ])
+                OR label_lc IN (
+                    'tv series episode',
+                    'tv series episodes',
+                    'tv episodes',
+                    'tv episode',
+                    'television episode',
+                    'television episodes',
+                    'television series episodes',
+                    'feature-length movies',
+                    'feature length movies',
+                    'feature films',
+                    'feature film preference',
+                    'feature-film movies',
+                    'standalone feature films',
+                    'single tv episode',
+                    'single television episode',
+                    'single-episode installments',
+                    'single-episode tv installments',
+                    'individual tv episode',
+                    'individual tv episode titles',
+                    'individual tv episode releases',
+                    'runtime over 45 minutes',
+                    'runtime at least 110 minutes',
+                    'under-130-minute runtimes',
+                    'movies longer than two hours',
+                    'feature films longer than two hours',
+                    'episodes under 45 minutes',
+                    'sub-hour tv episodes',
+                    'short-form episodes under 30 minutes',
+                    'standard sitcom runtime (≈20-35 min)',
+                    'titles with colon subtitle',
+                    'titles with colon subtitles',
+                    'titles without a colon subtitle',
+                    'single-word titles',
+                    'single-word title movies',
+                    'colon-separated episode subtitles',
+                    'colon titles with verb-oriented subtitle'
+                )
+                OR label_lc LIKE ANY (ARRAY[
+                    '%friends%',
+                    '%always sunny%',
+                    '%ray donovan%',
+                    '%gossip girl%',
+                    '%icarly%'
+                ])
+             ) THEN true
+            ELSE false
+        END AS needs_review,
+        CASE
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%unknown%',
+                '%unclear%',
+                '%mixed%',
+                '%generic%'
+            ]) THEN NULL
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%rating%',
+                '%released in%',
+                '%recent%',
+                '%2025%',
+                '%2026%'
+            ]) THEN NULL
+            WHEN label_lc IN (
+                'tv series episode',
+                'tv series episodes',
+                'tv episodes',
+                'tv episode',
+                'television episode',
+                'television episodes',
+                'television series episodes',
+                'feature-length movies',
+                'feature length movies',
+                'feature films',
+                'feature film preference',
+                'feature-film movies',
+                'standalone feature films',
+                'single tv episode',
+                'single television episode',
+                'single-episode installments',
+                'single-episode tv installments',
+                'individual tv episode',
+                'individual tv episode titles',
+                'individual tv episode releases',
+                'runtime over 45 minutes',
+                'runtime at least 110 minutes',
+                'under-130-minute runtimes',
+                'movies longer than two hours',
+                'feature films longer than two hours',
+                'episodes under 45 minutes',
+                'sub-hour tv episodes',
+                'short-form episodes under 30 minutes',
+                'standard sitcom runtime (≈20-35 min)',
+                'titles with colon subtitle',
+                'titles with colon subtitles',
+                'titles without a colon subtitle',
+                'single-word titles',
+                'single-word title movies',
+                'colon-separated episode subtitles',
+                'colon titles with verb-oriented subtitle'
+            ) THEN NULL
+            WHEN label_lc LIKE ANY (ARRAY[
+                '%friends%',
+                '%always sunny%',
+                '%ray donovan%',
+                '%gossip girl%',
+                '%icarly%'
+            ]) THEN NULL
+            WHEN label_lc = 'comedy-focused titles' THEN 'comedy-focused stories'
+            WHEN label_lc = 'high-octane action-thriller titles' THEN 'high-octane action thrillers'
+            WHEN label_lc = 'prestige tv drama episodes' THEN 'prestige TV drama'
+            WHEN label_lc = 'episodes centered on real-world social commentary' THEN 'real-world social commentary'
+            WHEN label_lc = 'light-hearted tv episodes' THEN 'light-hearted TV stories'
+            WHEN label_lc ~ '^episodes centered on .+' THEN btrim(regexp_replace(label, '^episodes centered on\s+', '', 'i'))
+            WHEN label_lc ~ '\s+tv episodes$' THEN btrim(regexp_replace(label, '\s+tv episodes$', ' TV stories', 'i'))
+            WHEN label_lc ~ '\s+episodes$' AND label_lc !~ '^episodes?([[:space:]]|$)'
+                THEN btrim(regexp_replace(label, '\s+episodes$', '', 'i'))
+            WHEN label_lc ~ '\s+focused titles$' THEN btrim(regexp_replace(label, '\s+titles$', ' stories', 'i'))
+            WHEN label_lc ~ '\s+titles$' THEN btrim(regexp_replace(label, '\s+titles$', '', 'i'))
+            WHEN label_lc ~ '\s+movies$' AND btrim(regexp_replace(label, '\s+movies$', '', 'i')) ~ '\s'
+                THEN btrim(regexp_replace(label, '\s+movies$', '', 'i'))
+            WHEN label_lc ~ '\s+films$' AND btrim(regexp_replace(label, '\s+films$', '', 'i')) ~ '\s'
+                THEN btrim(regexp_replace(label, '\s+films$', '', 'i'))
+            ELSE label
+        END AS raw_display_label
+    FROM normalized
+),
+finalized AS (
+    SELECT
+        dimension,
+        row_id,
+        label_type,
+        explainable,
+        needs_review,
+        CASE
+            WHEN raw_display_label IS NULL THEN NULL
+            ELSE NULLIF(
+                btrim(regexp_replace(raw_display_label, '(^|[^[:alnum:]])tv([^[:alnum:]]|$)', '\1TV\2', 'gi')),
+                ''
+            )
+        END AS display_label
+    FROM classified
+)
+UPDATE public.embedding_labels el
+SET
+    label_type = f.label_type,
+    explainable = f.explainable,
+    needs_review = f.needs_review,
+    display_label = f.display_label,
+    updated_at = now()
+FROM finalized f
+WHERE el.ctid = f.row_id
+  AND (
+      el.label_type IS DISTINCT FROM f.label_type
+      OR el.explainable IS DISTINCT FROM f.explainable
+      OR el.needs_review IS DISTINCT FROM f.needs_review
+      OR el.display_label IS DISTINCT FROM f.display_label
+  );
+
+CREATE OR REPLACE VIEW public.embedding_label_governance_v AS
+ SELECT
+    el.dimension,
+    CASE
+        WHEN el.dimension < 768 THEN 'media'::text
+        ELSE 'user'::text
+    END AS side,
+    el.label,
+    el.display_label,
+    el.label_type,
+    el.explainable,
+    el.needs_review,
+    count(si.dimension) AS shap_rows,
+    avg(abs(si.shap_value)) AS avg_abs_shap,
+    max(abs(si.shap_value)) AS max_abs_shap
+   FROM public.embedding_labels el
+     LEFT JOIN public.shap_impact si ON si.dimension = el.dimension
+  GROUP BY
+    el.dimension,
+    el.label,
+    el.display_label,
+    el.label_type,
+    el.explainable,
+    el.needs_review;
+
+COMMENT ON VIEW public.embedding_label_governance_v IS
+    'Diagnostic label-governance view. Joins shap_impact by exact combined dimension; no dimension normalization or model behavior changes.';
+
+CREATE OR REPLACE VIEW public.expanded_recs_w_label_v AS
+ SELECT r.rating_key,
+    r.username,
+    uv.friendly_name,
+    r.scored_at,
+    m.media_type,
+    m.show_title,
+    m.title,
+    m.season_number,
+    m.episode_number,
+    m.parent_rating_key,
+    m.show_rating_key,
+    m.rating,
+    m.year,
+    m.summary,
+    m.duration,
+    m.added_at,
+    CASE
+        WHEN (m.media_type = ANY (ARRAY['movie'::text, 'show'::text, 'series'::text])) THEN m.thumb_path
+        WHEN (m.media_type = 'season'::text) THEN COALESCE(m.thumb_path, m.parent_thumb_path)
+        WHEN (m.media_type = 'episode'::text) THEN COALESCE(m.parent_thumb_path, m.grandparent_thumb_path, m.thumb_path)
+        ELSE COALESCE(m.thumb_path, m.parent_thumb_path, m.grandparent_thumb_path)
+    END AS poster_path,
+    g.genres,
+    a.actors,
+    d.directors,
+    r.predicted_probability,
+    ( SELECT string_agg(top_labels.display_label, ', '::text ORDER BY top_labels.max_shap DESC) AS string_agg
+           FROM ( SELECT el.display_label,
+                    max(si.shap_value) AS max_shap
+                   FROM public.shap_impact si
+                     JOIN public.embedding_labels el ON (si.dimension = el.dimension)
+                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username) AND (si.shap_value > (0)::double precision) AND (el.explainable IS TRUE) AND (el.display_label IS NOT NULL))
+                  GROUP BY el.display_label
+                  ORDER BY (max(si.shap_value)) DESC
+                 LIMIT 3) top_labels) AS semantic_themes
+   FROM public.recommendations r
+     JOIN public.library m ON (r.rating_key = m.rating_key)
+     JOIN public.users_v uv ON (r.username = uv.username)
+     LEFT JOIN ( SELECT mg.media_id,
+            string_agg(DISTINCT g.name, ', '::text) AS genres
+           FROM public.media_genres mg
+             JOIN public.genres g ON (mg.genre_id = g.id)
+          GROUP BY mg.media_id) g ON (g.media_id = m.rating_key)
+     LEFT JOIN ( SELECT ma.media_id,
+            string_agg(a.name, ', '::text ORDER BY ma.cast_order NULLS LAST, a.name) AS actors
+           FROM public.media_actors ma
+             JOIN public.actors a ON (ma.actor_id = a.id)
+          GROUP BY ma.media_id) a ON (a.media_id = m.rating_key)
+     LEFT JOIN ( SELECT md.media_id,
+            string_agg(DISTINCT d.name, ', '::text) AS directors
+           FROM public.media_directors md
+             JOIN public.directors d ON (md.director_id = d.id)
+          GROUP BY md.media_id) d ON (d.media_id = m.rating_key)
+  WHERE NOT EXISTS (
+           SELECT 1
+           FROM public.watch_history w
+           WHERE w.username = r.username
+             AND w.rating_key = r.rating_key
+             AND (
+               (
+                 w.percent_complete IS NOT NULL
+                 AND (
+                   CASE
+                     WHEN w.percent_complete >= (1)::double precision
+                       THEN w.percent_complete / (100.0)::double precision
+                     ELSE w.percent_complete
+                   END
+                 ) >= (0.5)::double precision
+               )
+               OR (
+                 w.played_duration IS NOT NULL
+                 AND m.duration IS NOT NULL
+                 AND m.duration > 0
+                 AND ((w.played_duration)::double precision / ((m.duration)::double precision / (1000.0)::double precision)) >= (0.5)::double precision
+               )
+             )
+        );
+
+-- Validation output: counts by governance type, side, explainability, and review flag.
+SELECT
+    label_type,
+    CASE
+        WHEN dimension < 768 THEN 'media'::text
+        ELSE 'user'::text
+    END AS side,
+    explainable,
+    needs_review,
+    count(*) AS label_count
+FROM public.embedding_labels
+GROUP BY label_type, side, explainable, needs_review
+ORDER BY label_type, side, explainable, needs_review;
+
+COMMIT;

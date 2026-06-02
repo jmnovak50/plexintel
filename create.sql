@@ -127,7 +127,12 @@ ALTER SEQUENCE public.directors_id_seq OWNED BY public.directors.id;
 CREATE TABLE IF NOT EXISTS public.embedding_labels (
     dimension integer NOT NULL,
     label text NOT NULL,
-    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    label_type text,
+    explainable boolean,
+    display_label text,
+    needs_review boolean DEFAULT false,
+    updated_at timestamp without time zone DEFAULT now()
 );
 
 
@@ -315,6 +320,29 @@ CREATE INDEX IF NOT EXISTS idx_shap_dimension_stats_current_score
 --
 --
 
+CREATE OR REPLACE VIEW public.embedding_label_governance_v AS
+ SELECT el.dimension,
+        CASE
+            WHEN (el.dimension < 768) THEN 'media'::text
+            ELSE 'user'::text
+        END AS side,
+    el.label,
+    el.display_label,
+    el.label_type,
+    el.explainable,
+    el.needs_review,
+    count(si.dimension) AS shap_rows,
+    avg(abs(si.shap_value)) AS avg_abs_shap,
+    max(abs(si.shap_value)) AS max_abs_shap
+   FROM (public.embedding_labels el
+     LEFT JOIN public.shap_impact si ON ((si.dimension = el.dimension)))
+  GROUP BY el.dimension, el.label, el.display_label, el.label_type, el.explainable, el.needs_review;
+
+
+
+--
+--
+
 DROP VIEW IF EXISTS public.expanded_recs_w_label_v CASCADE;
 CREATE VIEW public.expanded_recs_w_label_v AS
  SELECT r.rating_key,
@@ -343,13 +371,13 @@ CREATE VIEW public.expanded_recs_w_label_v AS
     a.actors,
     d.directors,
     r.predicted_probability,
-    ( SELECT string_agg(top_labels.label, ', '::text ORDER BY top_labels.max_shap DESC) AS string_agg
-           FROM ( SELECT el.label,
+    ( SELECT string_agg(top_labels.display_label, ', '::text ORDER BY top_labels.max_shap DESC) AS string_agg
+           FROM ( SELECT el.display_label,
                     max(si.shap_value) AS max_shap
                    FROM public.shap_impact si
                      JOIN public.embedding_labels el ON (si.dimension = el.dimension)
-                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username) AND (si.shap_value > (0)::double precision) AND (el.label IS NOT NULL))
-                  GROUP BY el.label
+                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username) AND (si.shap_value > (0)::double precision) AND (el.explainable IS TRUE) AND (el.display_label IS NOT NULL))
+                  GROUP BY el.display_label
                   ORDER BY (max(si.shap_value)) DESC
                  LIMIT 3) top_labels) AS semantic_themes
    FROM public.recommendations r
