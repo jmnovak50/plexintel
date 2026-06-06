@@ -158,10 +158,38 @@ def apply_schema_updates(conn) -> None:
                 old_label_type text,
                 old_explainable boolean,
                 old_display_label text,
+                old_needs_review boolean,
+                old_last_reviewed_at timestamp without time zone,
+                old_review_attempt_count integer,
+                old_next_review_at timestamp without time zone,
                 new_label text,
                 change_reason text,
                 changed_at timestamp without time zone DEFAULT now()
             )
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.embedding_label_history
+            ADD COLUMN IF NOT EXISTS old_needs_review boolean
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.embedding_label_history
+            ADD COLUMN IF NOT EXISTS old_last_reviewed_at timestamp without time zone
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.embedding_label_history
+            ADD COLUMN IF NOT EXISTS old_review_attempt_count integer
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS public.embedding_label_history
+            ADD COLUMN IF NOT EXISTS old_next_review_at timestamp without time zone
             """
         )
         cur.execute(

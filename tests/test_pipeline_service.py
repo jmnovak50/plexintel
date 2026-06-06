@@ -150,6 +150,28 @@ class PipelineStageTests(unittest.TestCase):
         self.assertEqual(batch_label[batch_label.index("--limit") + 1], "40")
         self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "user")
 
+    def test_build_pipeline_stages_passes_review_mode_without_hybrid_share(self):
+        values = {
+            "pipeline.labeling_enabled": True,
+            "pipeline.label_selection_mode": "review",
+            "pipeline.label_batch_limit": 25,
+            "pipeline.label_dim_type": "all",
+            "pipeline.label_coverage_share": 0.55,
+        }
+
+        with patch.object(
+            pipeline_service,
+            "get_setting_value",
+            side_effect=lambda key, default=None: values.get(key, default),
+        ):
+            stages = pipeline_service.build_pipeline_stages()
+
+        batch_label = dict(stages)["batch_label"]
+        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "review")
+        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
+        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
+        self.assertNotIn("--coverage_share", batch_label)
+
 
 class PipelineRunTests(unittest.TestCase):
     def test_run_pipeline_reads_named_advisory_lock_result(self):

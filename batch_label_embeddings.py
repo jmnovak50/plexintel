@@ -5,6 +5,7 @@ load_dotenv()
 import argparse
 import csv
 import math
+import re
 from datetime import datetime, timezone
 
 from pgvector.psycopg2 import register_vector
@@ -78,6 +79,50 @@ USABLE_LABEL_SQL_TEMPLATE = """
 AND {alias}.display_label IS NOT NULL
 AND BTRIM({alias}.display_label) <> ''
 """
+WEAK_LABEL_FRAGMENTS = ("unknown", "unclear", "mixed", "generic")
+METADATA_LABEL_FRAGMENTS = ("rating", "released in", "recent", "2025", "2026")
+PROPER_NOUN_LABEL_FRAGMENTS = ("friends", "always sunny", "ray donovan", "gossip girl", "icarly")
+HARD_STRUCTURAL_LABELS = {
+    "tv series episode",
+    "tv series episodes",
+    "tv episodes",
+    "tv episode",
+    "television episode",
+    "television episodes",
+    "television series episodes",
+    "feature-length movies",
+    "feature length movies",
+    "feature films",
+    "feature film preference",
+    "feature-film movies",
+    "standalone feature films",
+    "single tv episode",
+    "single television episode",
+    "single-episode installments",
+    "single-episode tv installments",
+    "individual tv episode",
+    "individual tv episode titles",
+    "individual tv episode releases",
+    "runtime over 45 minutes",
+    "runtime at least 110 minutes",
+    "under-130-minute runtimes",
+    "movies longer than two hours",
+    "feature films longer than two hours",
+    "episodes under 45 minutes",
+    "sub-hour tv episodes",
+    "short-form episodes under 30 minutes",
+    "standard sitcom runtime (≈20-35 min)",
+    "titles with colon subtitle",
+    "titles with colon subtitles",
+    "titles without a colon subtitle",
+    "single-word titles",
+    "single-word title movies",
+    "colon-separated episode subtitles",
+    "colon titles with verb-oriented subtitle",
+}
+SOFT_STRUCTURAL_RE = re.compile(
+    r"(^|[^a-z0-9])(episode|episodes|tv|television|movie|movies|film|films|title|titles)([^a-z0-9]|$)"
+)
 
 
 def connect_db():
@@ -96,6 +141,105 @@ def _get_dimension_range(dim_type):
 
 def _should_persist_label(label: str) -> bool:
     return bool(label and label != UNCLEAR_LABEL)
+
+
+def _clean_label_text(label: str | None) -> str:
+    return re.sub(r"\s+", " ", str(label or "")).strip()
+
+
+def _contains_any(value: str, fragments: tuple[str, ...]) -> bool:
+    return any(fragment in value for fragment in fragments)
+
+
+def _format_governed_display_label(label: str) -> str | None:
+    label_lc = label.lower()
+    raw_display_label = label
+
+    if label_lc == "comedy-focused titles":
+        raw_display_label = "comedy-focused stories"
+    elif label_lc == "high-octane action-thriller titles":
+        raw_display_label = "high-octane action thrillers"
+    elif label_lc == "prestige tv drama episodes":
+        raw_display_label = "prestige TV drama"
+    elif label_lc == "episodes centered on real-world social commentary":
+        raw_display_label = "real-world social commentary"
+    elif label_lc == "light-hearted tv episodes":
+        raw_display_label = "light-hearted TV stories"
+    elif re.search(r"^episodes centered on .+", label_lc):
+        raw_display_label = re.sub(r"^episodes centered on\s+", "", label, flags=re.IGNORECASE).strip()
+    elif re.search(r"\s+tv episodes$", label_lc):
+        raw_display_label = re.sub(r"\s+tv episodes$", " TV stories", label, flags=re.IGNORECASE).strip()
+    elif re.search(r"\s+episodes$", label_lc) and not re.search(r"^episodes?(\s|$)", label_lc):
+        raw_display_label = re.sub(r"\s+episodes$", "", label, flags=re.IGNORECASE).strip()
+    elif re.search(r"\s+focused titles$", label_lc):
+        raw_display_label = re.sub(r"\s+titles$", " stories", label, flags=re.IGNORECASE).strip()
+    elif re.search(r"\s+titles$", label_lc):
+        raw_display_label = re.sub(r"\s+titles$", "", label, flags=re.IGNORECASE).strip()
+    elif re.search(r"\s+movies$", label_lc):
+        without_suffix = re.sub(r"\s+movies$", "", label, flags=re.IGNORECASE).strip()
+        if re.search(r"\s", without_suffix):
+            raw_display_label = without_suffix
+    elif re.search(r"\s+films$", label_lc):
+        without_suffix = re.sub(r"\s+films$", "", label, flags=re.IGNORECASE).strip()
+        if re.search(r"\s", without_suffix):
+            raw_display_label = without_suffix
+
+    display_label = re.sub(
+        r"(^|[^A-Za-z0-9])tv([^A-Za-z0-9]|$)",
+        r"\1TV\2",
+        raw_display_label,
+        flags=re.IGNORECASE,
+    ).strip()
+    return display_label or None
+
+
+def classify_label_governance(label: str) -> dict:
+    raw_label = _clean_label_text(label)
+    label_lc = raw_label.lower()
+    if not raw_label:
+        return {
+            "label_type": "weak",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": True,
+        }
+
+    if _contains_any(label_lc, WEAK_LABEL_FRAGMENTS):
+        return {
+            "label_type": "weak",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": True,
+        }
+    if _contains_any(label_lc, METADATA_LABEL_FRAGMENTS):
+        return {
+            "label_type": "metadata",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": False,
+        }
+    if label_lc in HARD_STRUCTURAL_LABELS:
+        return {
+            "label_type": "hard_structural",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": False,
+        }
+    if _contains_any(label_lc, PROPER_NOUN_LABEL_FRAGMENTS):
+        return {
+            "label_type": "proper_noun",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": False,
+        }
+
+    is_soft_structural = bool(SOFT_STRUCTURAL_RE.search(label_lc))
+    return {
+        "label_type": "soft_structural" if is_soft_structural else "semantic_candidate",
+        "explainable": True,
+        "display_label": _format_governed_display_label(raw_label),
+        "needs_review": is_soft_structural,
+    }
 
 
 def _usable_label_sql(alias: str) -> str:
@@ -511,6 +655,156 @@ def get_coverage_selection_diagnostics(cur, dim_type="all") -> dict:
     return {key: int(value or 0) for key, value in zip(keys, row)}
 
 
+def _review_row_to_dict(row) -> dict:
+    if isinstance(row, dict):
+        normalized = dict(row)
+    else:
+        fields = [
+            "dimension",
+            "existing_label",
+            "existing_display_label",
+            "existing_label_type",
+            "existing_explainable",
+            "needs_review",
+            "last_reviewed_at",
+            "review_attempt_count",
+            "next_review_at",
+            "usage_count",
+            "sum_abs_shap",
+            "avg_abs_shap",
+            "combined_score",
+            "user_count",
+            "stats_source",
+        ]
+        normalized = dict(zip(fields, row))
+
+    dimension = int(normalized["dimension"])
+    normalized.update(
+        {
+            "dimension": dimension,
+            "selection_mode": "review",
+            "label_repair_status": "review_label",
+            "selection_reason": "needs_review",
+            "side": get_dimension_mode(dimension),
+            "usage_count": int(normalized.get("usage_count") or 0),
+            "sum_abs_shap": float(normalized.get("sum_abs_shap") or 0.0),
+            "avg_abs_shap": float(normalized.get("avg_abs_shap") or 0.0),
+            "combined_score": float(normalized.get("combined_score") or 0.0),
+            "user_count": int(normalized.get("user_count") or 0),
+            "review_attempt_count": int(normalized.get("review_attempt_count") or 0),
+        }
+    )
+    return _with_selection_fields(normalized, "review")
+
+
+def get_review_selection_diagnostics(cur, dim_type="all") -> dict:
+    diagnostics = {
+        "total_needing_review": 0,
+        "current_shap_activity": 0,
+        "zero_current_shap_activity": 0,
+        "cooldown_suppressed_dimensions": 0,
+    }
+    if cur is None:
+        return diagnostics
+
+    dim_min, dim_max = _get_dimension_range(dim_type)
+    query = """
+        SELECT
+            COUNT(*) AS total_needing_review,
+            COUNT(*) FILTER (
+                WHERE (
+                    el.next_review_at IS NULL
+                    OR el.next_review_at <= NOW()
+                )
+                AND COALESCE(s.usage_count, 0) > 0
+            ) AS current_shap_activity,
+            COUNT(*) FILTER (
+                WHERE (
+                    el.next_review_at IS NULL
+                    OR el.next_review_at <= NOW()
+                )
+                AND COALESCE(s.usage_count, 0) = 0
+            ) AS zero_current_shap_activity,
+            COUNT(*) FILTER (
+                WHERE el.next_review_at IS NOT NULL
+                  AND el.next_review_at > NOW()
+            ) AS cooldown_suppressed_dimensions
+        FROM embedding_labels el
+        LEFT JOIN shap_dimension_stats_current s
+          ON s.dimension = el.dimension
+        WHERE el.needs_review IS TRUE
+          AND el.dimension >= %s
+          AND el.dimension < %s
+    """
+    try:
+        cur.execute(query, (dim_min, dim_max))
+        row = cur.fetchone()
+    except Exception as exc:
+        if hasattr(cur, "connection"):
+            cur.connection.rollback()
+        print(f"⚠️ Could not compute review diagnostics ({exc}).", flush=True)
+        return diagnostics
+
+    if not row:
+        return diagnostics
+    keys = list(diagnostics)
+    return {key: int(value or 0) for key, value in zip(keys, row)}
+
+
+def get_review_dimension_candidates(cur, limit=25, dim_type="all") -> list[dict]:
+    dim_min, dim_max = _get_dimension_range(dim_type)
+    query = """
+        SELECT
+            el.dimension,
+            el.label AS existing_label,
+            el.display_label AS existing_display_label,
+            el.label_type AS existing_label_type,
+            el.explainable AS existing_explainable,
+            el.needs_review,
+            el.last_reviewed_at,
+            COALESCE(el.review_attempt_count, 0) AS review_attempt_count,
+            el.next_review_at,
+            COALESCE(s.usage_count, 0) AS usage_count,
+            COALESCE(s.sum_abs_shap, 0.0) AS sum_abs_shap,
+            COALESCE(s.avg_abs_shap, 0.0) AS avg_abs_shap,
+            COALESCE(s.combined_score, 0.0) AS combined_score,
+            COALESCE(s.user_count, 0) AS user_count,
+            CASE
+                WHEN s.dimension IS NULL OR COALESCE(s.usage_count, 0) = 0
+                    THEN 'review_zero_activity'
+                ELSE 'review_aggregate'
+            END AS stats_source
+        FROM embedding_labels el
+        LEFT JOIN shap_dimension_stats_current s
+          ON s.dimension = el.dimension
+        WHERE el.needs_review IS TRUE
+          AND el.dimension >= %s
+          AND el.dimension < %s
+          AND (
+              el.next_review_at IS NULL
+              OR el.next_review_at <= NOW()
+          )
+        ORDER BY
+            COALESCE(s.combined_score, 0.0) DESC,
+            COALESCE(s.sum_abs_shap, 0.0) DESC,
+            COALESCE(s.usage_count, 0) DESC,
+            el.dimension ASC
+        LIMIT %s
+    """
+    cur.execute(query, (dim_min, dim_max, limit))
+    return [_review_row_to_dict(row) for row in cur.fetchall()]
+
+
+def select_review_dimensions(cur, limit=25, dim_type="all") -> tuple[list[dict], dict]:
+    diagnostics = get_review_selection_diagnostics(cur, dim_type=dim_type)
+    selected = get_review_dimension_candidates(cur, limit=limit, dim_type=dim_type)
+    return selected, {
+        "selection_mode": "review",
+        "review_diagnostics": diagnostics,
+        "review_selected_count": len(selected),
+    }
+
+
 def _coverage_row_to_dict(row) -> dict:
     if isinstance(row, dict):
         normalized = dict(row)
@@ -745,6 +1039,9 @@ def select_automatic_dimensions(
             "importance_selected_count": len(decorated),
         }
 
+    if selection_mode == "review":
+        return select_review_dimensions(cur, limit=limit, dim_type=dim_type)
+
     coverage_diagnostics = get_coverage_selection_diagnostics(cur, dim_type=dim_type)
     coverage_rows = get_coverage_dimension_candidates(cur, dim_type=dim_type)
 
@@ -847,6 +1144,49 @@ def print_selection_summary(selection_mode: str, selected_dimensions: list[dict]
     if selection_mode == "importance":
         print(f"Selected dimensions: {len(selected_dimensions)}", flush=True)
         print("Ranking source: aggregate/global SHAP importance", flush=True)
+        return
+
+    if selection_mode == "review":
+        diagnostics = summary.get("review_diagnostics") or {}
+        print(
+            "Total dimensions needing review: "
+            f"{diagnostics.get('total_needing_review', 0)}",
+            flush=True,
+        )
+        print(
+            "Review candidates with current SHAP activity: "
+            f"{diagnostics.get('current_shap_activity', 0)}",
+            flush=True,
+        )
+        print(
+            "Review candidates with zero current SHAP activity: "
+            f"{diagnostics.get('zero_current_shap_activity', 0)}",
+            flush=True,
+        )
+        print(
+            "Dimensions suppressed by cooldown: "
+            f"{diagnostics.get('cooldown_suppressed_dimensions', 0)}",
+            flush=True,
+        )
+        print(f"Selected dimensions: {len(selected_dimensions)}", flush=True)
+        print(
+            "Rank | Dimension | Side | Existing Raw Label | Existing Display Label | "
+            "Existing Label Type | SHAP Usage Count | Combined Score | "
+            "Last Reviewed At | Review Attempt Count",
+            flush=True,
+        )
+        for rank, stat in enumerate(selected_dimensions, start=1):
+            print(
+                f"{rank} | {stat['dimension']} | {stat.get('side', '')} | "
+                f"{stat.get('existing_label') or ''} | "
+                f"{stat.get('existing_display_label') or ''} | "
+                f"{stat.get('existing_label_type') or ''} | "
+                f"{stat.get('usage_count', 0)} | "
+                f"{_format_float(stat.get('combined_score'))} | "
+                f"{stat.get('last_reviewed_at') or ''} | "
+                f"{stat.get('review_attempt_count', 0)}",
+                flush=True,
+            )
         return
 
     eligible = summary.get("eligible_unlabeled_recommendations") or 0
@@ -1000,6 +1340,7 @@ def _existing_label_row_to_dict(row) -> dict | None:
         "label_type",
         "explainable",
         "display_label",
+        "needs_review",
         "last_reviewed_at",
         "review_attempt_count",
         "next_review_at",
@@ -1016,6 +1357,7 @@ def get_existing_label_row(cur, dimension: int) -> dict | None:
             label_type,
             explainable,
             display_label,
+            needs_review,
             last_reviewed_at,
             review_attempt_count,
             next_review_at
@@ -1039,6 +1381,13 @@ def _valid_semantic_repair_label(label_result: dict) -> bool:
         _valid_generated_label(label_result)
         and label_result.get("validation_status") == "valid"
         and label_result.get("label_type") == "semantic"
+    )
+
+
+def _valid_review_replacement_label(label_result: dict) -> bool:
+    return (
+        _valid_generated_label(label_result)
+        and label_result.get("validation_status") == "valid"
     )
 
 
@@ -1070,6 +1419,7 @@ def save_label_result(
     label_repair_status: str = "",
     selection_reason: str = "",
     repair_cooldown_days: int = DEFAULT_REPAIR_COOLDOWN_DAYS,
+    review_mode: bool = False,
 ) -> tuple[bool, str]:
     existing_row = get_existing_label_row(cur, dimension)
     existing_status, existing_reason = _label_repair_status(existing_row)
@@ -1077,12 +1427,13 @@ def save_label_result(
     effective_reason = selection_reason or existing_reason
 
     if not _valid_generated_label(label_result):
-        if existing_row and existing_status == "unusable_label":
+        if existing_row and (existing_status == "unusable_label" or review_mode):
             _mark_label_review_attempt(cur, dimension, repair_cooldown_days)
             return False, "repair_cooldown_scheduled"
         return False, "invalid_label_not_saved"
 
     generated_label = label_result["label"]
+    governance = classify_label_governance(generated_label)
     if not existing_row:
         cur.execute(
             """
@@ -1103,19 +1454,89 @@ def save_label_result(
                 %s,
                 %s,
                 NOW(),
-                'semantic_candidate',
-                TRUE,
                 %s,
-                FALSE,
+                %s,
+                %s,
+                %s,
                 NOW(),
                 NOW(),
                 0,
                 NULL
             )
             """,
-            (dimension, generated_label, generated_label),
+            (
+                dimension,
+                generated_label,
+                governance["label_type"],
+                governance["explainable"],
+                governance["display_label"],
+                governance["needs_review"],
+            ),
         )
         return True, "inserted_missing_label"
+
+    if review_mode:
+        if not _valid_review_replacement_label(label_result):
+            _mark_label_review_attempt(cur, dimension, repair_cooldown_days)
+            return False, "invalid_review_replacement_not_saved"
+        cur.execute(
+            """
+            INSERT INTO embedding_label_history (
+                dimension,
+                old_label,
+                old_label_type,
+                old_explainable,
+                old_display_label,
+                old_needs_review,
+                old_last_reviewed_at,
+                old_review_attempt_count,
+                old_next_review_at,
+                new_label,
+                change_reason,
+                changed_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                dimension,
+                existing_row.get("label"),
+                existing_row.get("label_type"),
+                existing_row.get("explainable"),
+                existing_row.get("display_label"),
+                existing_row.get("needs_review"),
+                existing_row.get("last_reviewed_at"),
+                existing_row.get("review_attempt_count"),
+                existing_row.get("next_review_at"),
+                generated_label,
+                "review:needs_review",
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE embedding_labels
+            SET
+                label = %s,
+                label_type = %s,
+                explainable = %s,
+                display_label = %s,
+                needs_review = %s,
+                created_at = NOW(),
+                updated_at = NOW(),
+                last_reviewed_at = NOW(),
+                review_attempt_count = COALESCE(review_attempt_count, 0) + 1,
+                next_review_at = NULL
+            WHERE dimension = %s
+            """,
+            (
+                generated_label,
+                governance["label_type"],
+                governance["explainable"],
+                governance["display_label"],
+                governance["needs_review"],
+                dimension,
+            ),
+        )
+        return True, "updated_review_label"
 
     if existing_status == "usable_label":
         return False, "existing_usable_label_preserved"
@@ -1132,11 +1553,15 @@ def save_label_result(
             old_label_type,
             old_explainable,
             old_display_label,
+            old_needs_review,
+            old_last_reviewed_at,
+            old_review_attempt_count,
+            old_next_review_at,
             new_label,
             change_reason,
             changed_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """,
         (
             dimension,
@@ -1144,6 +1569,10 @@ def save_label_result(
             existing_row.get("label_type"),
             existing_row.get("explainable"),
             existing_row.get("display_label"),
+            existing_row.get("needs_review"),
+            existing_row.get("last_reviewed_at"),
+            existing_row.get("review_attempt_count"),
+            existing_row.get("next_review_at"),
             generated_label,
             _history_change_reason(existing_row, effective_status, effective_reason),
         ),
@@ -1153,10 +1582,10 @@ def save_label_result(
         UPDATE embedding_labels
         SET
             label = %s,
-            label_type = 'semantic_candidate',
-            explainable = TRUE,
+            label_type = %s,
+            explainable = %s,
             display_label = %s,
-            needs_review = FALSE,
+            needs_review = %s,
             created_at = NOW(),
             updated_at = NOW(),
             last_reviewed_at = NOW(),
@@ -1164,7 +1593,14 @@ def save_label_result(
             next_review_at = NULL
         WHERE dimension = %s
         """,
-        (generated_label, generated_label, dimension),
+        (
+            generated_label,
+            governance["label_type"],
+            governance["explainable"],
+            governance["display_label"],
+            governance["needs_review"],
+            dimension,
+        ),
     )
     return True, "updated_unusable_label"
 
@@ -1182,7 +1618,7 @@ def main():
     parser.add_argument("--dim_type", choices=["media", "user", "all"], default="all")
     parser.add_argument(
         "--selection_mode",
-        choices=["importance", "coverage", "hybrid"],
+        choices=["importance", "coverage", "hybrid", "review"],
         default="importance",
         help="Automatic dimension selection strategy",
     )
@@ -1282,7 +1718,10 @@ def main():
     )
 
     if not top_dims:
-        scope = "all dimensions" if args.refresh_existing else "unlabeled dimensions"
+        if args.selection_mode == "review":
+            scope = "review dimensions"
+        else:
+            scope = "all dimensions" if args.refresh_existing else "unlabeled dimensions"
         print(f"ℹ️ No {scope} selected for labeling.", flush=True)
 
     for dim_stats in top_dims:
@@ -1382,7 +1821,7 @@ def main():
                 }
             )
 
-        if args.save_label:
+        if args.save_label and not args.dry_run:
             saved, save_status = save_label_result(
                 cur,
                 dimension,
@@ -1390,10 +1829,15 @@ def main():
                 label_repair_status=dim_stats.get("label_repair_status", ""),
                 selection_reason=dim_stats.get("selection_reason", ""),
                 repair_cooldown_days=args.repair_cooldown_days,
+                review_mode=dim_stats.get("selection_mode") == "review",
             )
             if saved:
                 print(f"✅ Saved label for dim {dimension}: {save_status}", flush=True)
-            elif save_status in {"repair_cooldown_scheduled", "non_semantic_repair_not_saved"}:
+            elif save_status in {
+                "repair_cooldown_scheduled",
+                "non_semantic_repair_not_saved",
+                "invalid_review_replacement_not_saved",
+            }:
                 print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
         conn.commit()
 

@@ -427,6 +427,128 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertEqual(summary["importance_selected_count"], 1)
 
 
+class ReviewSelectionTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, diagnostics_row=None, candidate_rows=None):
+            self.diagnostics_row = diagnostics_row or (0, 0, 0, 0)
+            self.candidate_rows = candidate_rows or []
+            self.executed = []
+
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params))
+
+        def fetchone(self):
+            return self.diagnostics_row
+
+        def fetchall(self):
+            return self.candidate_rows
+
+    def test_review_mode_selects_needs_review_rows_ranked_by_shap_activity(self):
+        reviewed_at = datetime(2026, 6, 1, 8, 30)
+        candidate_rows = [
+            (
+                12,
+                "prestige tv drama episodes",
+                "prestige TV drama",
+                "soft_structural",
+                True,
+                True,
+                reviewed_at,
+                2,
+                None,
+                10,
+                5.0,
+                0.5,
+                9.0,
+                3,
+                "review_aggregate",
+            )
+        ]
+        cur = self.FakeCursor(diagnostics_row=(3, 1, 1, 1), candidate_rows=candidate_rows)
+
+        selected, summary = batch_label_embeddings.select_automatic_dimensions(
+            cur,
+            limit=25,
+            dim_type="media",
+            selection_mode="review",
+        )
+
+        diagnostics_sql, diagnostics_params = cur.executed[0]
+        candidate_sql, candidate_params = cur.executed[1]
+        self.assertEqual(diagnostics_params, (0, 768))
+        self.assertEqual(candidate_params, (0, 768, 25))
+        self.assertIn("el.needs_review IS TRUE", diagnostics_sql)
+        self.assertIn("el.needs_review IS TRUE", candidate_sql)
+        self.assertIn("el.next_review_at <= NOW()", candidate_sql)
+        self.assertIn("COALESCE(s.combined_score, 0.0) DESC", candidate_sql)
+        self.assertIn("COALESCE(s.sum_abs_shap, 0.0) DESC", candidate_sql)
+        self.assertIn("COALESCE(s.usage_count, 0) DESC", candidate_sql)
+        self.assertIn("el.dimension ASC", candidate_sql)
+        self.assertEqual(summary["selection_mode"], "review")
+        self.assertEqual(summary["review_selected_count"], 1)
+        self.assertEqual(summary["review_diagnostics"]["total_needing_review"], 3)
+        self.assertEqual(selected[0]["dimension"], 12)
+        self.assertEqual(selected[0]["side"], "media")
+        self.assertEqual(selected[0]["existing_label"], "prestige tv drama episodes")
+        self.assertEqual(selected[0]["existing_display_label"], "prestige TV drama")
+        self.assertEqual(selected[0]["existing_label_type"], "soft_structural")
+        self.assertEqual(selected[0]["usage_count"], 10)
+        self.assertEqual(selected[0]["combined_score"], 9.0)
+        self.assertEqual(selected[0]["last_reviewed_at"], reviewed_at)
+        self.assertEqual(selected[0]["review_attempt_count"], 2)
+
+    def test_review_summary_prints_required_diagnostics_and_selected_rows(self):
+        selected = [
+            {
+                "dimension": 780,
+                "selection_mode": "review",
+                "side": "user",
+                "existing_label": "light-hearted tv episodes",
+                "existing_display_label": "light-hearted TV stories",
+                "existing_label_type": "soft_structural",
+                "usage_count": 7,
+                "combined_score": 3.5,
+                "last_reviewed_at": datetime(2026, 6, 1, 8, 30),
+                "review_attempt_count": 1,
+            }
+        ]
+        summary = {
+            "review_diagnostics": {
+                "total_needing_review": 4,
+                "current_shap_activity": 2,
+                "zero_current_shap_activity": 1,
+                "cooldown_suppressed_dimensions": 1,
+            }
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            batch_label_embeddings.print_selection_summary("review", selected, summary)
+
+        text = output.getvalue()
+        self.assertIn("Total dimensions needing review: 4", text)
+        self.assertIn("Review candidates with current SHAP activity: 2", text)
+        self.assertIn("Review candidates with zero current SHAP activity: 1", text)
+        self.assertIn("Dimensions suppressed by cooldown: 1", text)
+        self.assertIn("Selected dimensions: 1", text)
+        self.assertIn("Existing Raw Label", text)
+        self.assertIn("780 | user | light-hearted tv episodes", text)
+
+    def test_governance_classifier_matches_soft_structural_review_rules(self):
+        governance = batch_label_embeddings.classify_label_governance("prestige tv drama episodes")
+
+        self.assertEqual(governance["label_type"], "soft_structural")
+        self.assertTrue(governance["explainable"])
+        self.assertEqual(governance["display_label"], "prestige TV drama")
+        self.assertTrue(governance["needs_review"])
+
+        hard_structural = batch_label_embeddings.classify_label_governance("feature films")
+        self.assertEqual(hard_structural["label_type"], "hard_structural")
+        self.assertFalse(hard_structural["explainable"])
+        self.assertIsNone(hard_structural["display_label"])
+        self.assertFalse(hard_structural["needs_review"])
+
+
 class LabelRepairSaveTests(unittest.TestCase):
     class FakeCursor:
         def __init__(self, existing_row):
@@ -446,6 +568,7 @@ class LabelRepairSaveTests(unittest.TestCase):
             "hard_structural",
             False,
             None,
+            False,
             None,
             0,
             None,
@@ -481,6 +604,7 @@ class LabelRepairSaveTests(unittest.TestCase):
             "weak",
             False,
             None,
+            True,
             None,
             1,
             None,
@@ -506,8 +630,83 @@ class LabelRepairSaveTests(unittest.TestCase):
         executed_sql = "\n".join(sql for sql, _params in cur.executed)
         self.assertIn("INSERT INTO embedding_label_history", executed_sql)
         self.assertIn("old_label", executed_sql)
+        self.assertIn("old_needs_review", executed_sql)
         self.assertIn("UPDATE embedding_labels", executed_sql)
         self.assertIn("label = %s", executed_sql)
+
+    def test_valid_review_replacement_updates_existing_usable_label_with_history(self):
+        existing_row = (
+            120,
+            "prestige tv drama episodes",
+            "soft_structural",
+            True,
+            "prestige TV drama",
+            True,
+            datetime(2026, 6, 1, 8, 30),
+            2,
+            None,
+        )
+        cur = self.FakeCursor(existing_row)
+        label_result = {
+            "label": "prestige drama",
+            "label_type": "semantic",
+            "validation_status": "valid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            120,
+            label_result,
+            label_repair_status="review_label",
+            selection_reason="needs_review",
+            repair_cooldown_days=7,
+            review_mode=True,
+        )
+
+        self.assertTrue(saved)
+        self.assertEqual(status, "updated_review_label")
+        executed_sql = "\n".join(sql for sql, _params in cur.executed)
+        self.assertIn("INSERT INTO embedding_label_history", executed_sql)
+        self.assertIn("old_needs_review", executed_sql)
+        self.assertIn("review_attempt_count = COALESCE(review_attempt_count, 0) + 1", executed_sql)
+        update_params = cur.executed[-1][1]
+        self.assertEqual(update_params, ("prestige drama", "semantic_candidate", True, "prestige drama", False, 120))
+
+    def test_invalid_review_response_does_not_overwrite_existing_usable_label(self):
+        existing_row = (
+            121,
+            "light-hearted tv episodes",
+            "soft_structural",
+            True,
+            "light-hearted TV stories",
+            True,
+            datetime(2026, 6, 1, 8, 30),
+            2,
+            None,
+        )
+        cur = self.FakeCursor(existing_row)
+        label_result = {
+            "label": gpt_utils.UNCLEAR_LABEL,
+            "label_type": "unclear",
+            "validation_status": "invalid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            121,
+            label_result,
+            label_repair_status="review_label",
+            selection_reason="needs_review",
+            repair_cooldown_days=7,
+            review_mode=True,
+        )
+
+        self.assertFalse(saved)
+        self.assertEqual(status, "repair_cooldown_scheduled")
+        executed_sql = "\n".join(sql for sql, _params in cur.executed)
+        self.assertIn("next_review_at = NOW() + (%s * INTERVAL '1 day')", executed_sql)
+        self.assertNotIn("INSERT INTO embedding_label_history", executed_sql)
+        self.assertNotIn("label = %s", executed_sql)
 
     def test_hybrid_refresh_existing_allows_labeled_dimensions_only_in_importance_portion(self):
         coverage_rows = [
@@ -638,6 +837,8 @@ class PositiveLabelSelectionTests(unittest.TestCase):
 
         self.assertIn("CREATE TABLE IF NOT EXISTS public.embedding_label_history", sql)
         self.assertIn("old_label text", sql)
+        self.assertIn("old_needs_review boolean", sql)
+        self.assertIn("old_review_attempt_count integer", sql)
         self.assertIn("new_label text", sql)
         self.assertIn("CREATE OR REPLACE VIEW public.embedding_label_governance_v", sql)
         self.assertIn("LEFT JOIN public.shap_impact si ON si.dimension = el.dimension", sql)
