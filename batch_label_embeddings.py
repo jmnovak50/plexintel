@@ -5,6 +5,7 @@ load_dotenv()
 import argparse
 import csv
 import math
+from datetime import datetime, timezone
 
 from pgvector.psycopg2 import register_vector
 
@@ -30,6 +31,8 @@ from gpt_utils import (
 CSV_FIELDNAMES = [
     "dimension",
     "selection_mode",
+    "label_repair_status",
+    "selection_reason",
     "unlock_count_total",
     "marginal_unlock_count",
     "marginal_weighted_unlock_score",
@@ -69,6 +72,13 @@ CSV_FIELDNAMES = [
     "stats_source",
 ]
 
+DEFAULT_REPAIR_COOLDOWN_DAYS = 7
+USABLE_LABEL_SQL_TEMPLATE = """
+{alias}.explainable IS TRUE
+AND {alias}.display_label IS NOT NULL
+AND BTRIM({alias}.display_label) <> ''
+"""
+
 
 def connect_db():
     conn = connect_bootstrap_db()
@@ -88,9 +98,71 @@ def _should_persist_label(label: str) -> bool:
     return bool(label and label != UNCLEAR_LABEL)
 
 
+def _usable_label_sql(alias: str) -> str:
+    return USABLE_LABEL_SQL_TEMPLATE.format(alias=alias).strip()
+
+
+def is_saved_label_usable_for_explanation(label_row) -> bool:
+    if not label_row:
+        return False
+    if isinstance(label_row, dict):
+        explainable = label_row.get("explainable")
+        display_label = label_row.get("display_label")
+    else:
+        explainable = getattr(label_row, "explainable", None)
+        display_label = getattr(label_row, "display_label", None)
+    return explainable is True and display_label is not None and str(display_label).strip() != ""
+
+
+def _label_repair_status(label_row) -> tuple[str, str]:
+    if not label_row:
+        return "missing_label", "missing_label"
+    if is_saved_label_usable_for_explanation(label_row):
+        return "usable_label", "usable_label"
+
+    if isinstance(label_row, dict):
+        label_type = label_row.get("label_type")
+        explainable = label_row.get("explainable")
+        display_label = label_row.get("display_label")
+    else:
+        label_type = getattr(label_row, "label_type", None)
+        explainable = getattr(label_row, "explainable", None)
+        display_label = getattr(label_row, "display_label", None)
+
+    if label_type == "weak":
+        return "unusable_label", "weak_label"
+    if explainable is not True:
+        return "unusable_label", "not_explainable"
+    if display_label is None:
+        return "unusable_label", "missing_display_label"
+    if str(display_label).strip() == "":
+        return "unusable_label", "blank_display_label"
+    return "unusable_label", "unusable_label"
+
+
+def _is_label_review_due(label_row, now=None) -> bool:
+    if not label_row:
+        return True
+    next_review_at = (
+        label_row.get("next_review_at")
+        if isinstance(label_row, dict)
+        else getattr(label_row, "next_review_at", None)
+    )
+    if not next_review_at:
+        return True
+    now = now or datetime.now(timezone.utc)
+    if next_review_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    elif next_review_at.tzinfo is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return next_review_at <= now
+
+
 def _blank_coverage_fields(selection_mode: str) -> dict:
     return {
         "selection_mode": selection_mode,
+        "label_repair_status": "",
+        "selection_reason": "",
         "unlock_count_total": "",
         "marginal_unlock_count": "",
         "marginal_weighted_unlock_score": "",
@@ -216,6 +288,7 @@ def get_dimension_stats_for_dimensions(cur, dimensions: list[int]):
 
 def get_coverage_dimension_candidates(cur, dim_type="all"):
     dim_min, dim_max = _get_dimension_range(dim_type)
+    usable_existing_label_sql = _usable_label_sql("el_existing")
     query = """
         SELECT
             si.dimension,
@@ -231,7 +304,19 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
             CASE
                 WHEN s.dimension IS NULL THEN 'coverage'
                 ELSE 'aggregate'
-            END AS stats_source
+            END AS stats_source,
+            CASE
+                WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                ELSE 'unusable_label'
+            END AS label_repair_status,
+            CASE
+                WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                WHEN candidate_label.label_type = 'weak' THEN 'weak_label'
+                WHEN candidate_label.explainable IS NOT TRUE THEN 'not_explainable'
+                WHEN candidate_label.display_label IS NULL THEN 'missing_display_label'
+                WHEN BTRIM(candidate_label.display_label) = '' THEN 'blank_display_label'
+                ELSE 'unusable_label'
+            END AS selection_reason
         FROM recommendations r
         JOIN shap_impact si
           ON si.user_id = r.username
@@ -241,7 +326,18 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
         LEFT JOIN shap_dimension_stats_current s
           ON s.dimension = si.dimension
         WHERE si.shap_value > 0
-          AND candidate_label.dimension IS NULL
+          AND (
+              candidate_label.dimension IS NULL
+              OR candidate_label.label_type = 'weak'
+              OR candidate_label.explainable IS NOT TRUE
+              OR candidate_label.display_label IS NULL
+              OR BTRIM(candidate_label.display_label) = ''
+          )
+          AND (
+              candidate_label.dimension IS NULL
+              OR candidate_label.next_review_at IS NULL
+              OR candidate_label.next_review_at <= NOW()
+          )
           AND si.dimension >= %s
           AND si.dimension < %s
           AND NOT EXISTS (
@@ -252,10 +348,10 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
               WHERE si_existing.user_id = r.username
                 AND si_existing.rating_key = r.rating_key
                 AND si_existing.shap_value > 0
-                AND el_existing.label IS NOT NULL
+                AND {usable_existing_label_sql}
           )
         ORDER BY si.dimension ASC, r.username ASC, r.rating_key ASC
-    """
+    """.format(usable_existing_label_sql=usable_existing_label_sql)
     try:
         cur.execute(query, (dim_min, dim_max))
         return cur.fetchall()
@@ -280,7 +376,19 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
             0.0 AS avg_abs_shap,
             0.0 AS combined_score,
             0 AS user_count,
-            'coverage_raw' AS stats_source
+            'coverage_raw' AS stats_source,
+            CASE
+                WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                ELSE 'unusable_label'
+            END AS label_repair_status,
+            CASE
+                WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                WHEN candidate_label.label_type = 'weak' THEN 'weak_label'
+                WHEN candidate_label.explainable IS NOT TRUE THEN 'not_explainable'
+                WHEN candidate_label.display_label IS NULL THEN 'missing_display_label'
+                WHEN BTRIM(candidate_label.display_label) = '' THEN 'blank_display_label'
+                ELSE 'unusable_label'
+            END AS selection_reason
         FROM recommendations r
         JOIN shap_impact si
           ON si.user_id = r.username
@@ -288,7 +396,18 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
         LEFT JOIN embedding_labels candidate_label
           ON candidate_label.dimension = si.dimension
         WHERE si.shap_value > 0
-          AND candidate_label.dimension IS NULL
+          AND (
+              candidate_label.dimension IS NULL
+              OR candidate_label.label_type = 'weak'
+              OR candidate_label.explainable IS NOT TRUE
+              OR candidate_label.display_label IS NULL
+              OR BTRIM(candidate_label.display_label) = ''
+          )
+          AND (
+              candidate_label.dimension IS NULL
+              OR candidate_label.next_review_at IS NULL
+              OR candidate_label.next_review_at <= NOW()
+          )
           AND si.dimension >= %s
           AND si.dimension < %s
           AND NOT EXISTS (
@@ -299,17 +418,105 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
               WHERE si_existing.user_id = r.username
                 AND si_existing.rating_key = r.rating_key
                 AND si_existing.shap_value > 0
-                AND el_existing.label IS NOT NULL
+                AND {usable_existing_label_sql}
           )
         ORDER BY si.dimension ASC, r.username ASC, r.rating_key ASC
-    """
+    """.format(usable_existing_label_sql=usable_existing_label_sql)
     cur.execute(fallback_query, (dim_min, dim_max))
     return cur.fetchall()
 
 
+def get_coverage_selection_diagnostics(cur, dim_type="all") -> dict:
+    diagnostics = {
+        "uncovered_recommendation_cards": 0,
+        "eligible_missing_dimensions": 0,
+        "eligible_unusable_dimensions": 0,
+        "cooldown_suppressed_dimensions": 0,
+    }
+    if cur is None:
+        return diagnostics
+
+    dim_min, dim_max = _get_dimension_range(dim_type)
+    usable_existing_label_sql = _usable_label_sql("el_existing")
+    query = """
+        WITH coverage_candidates AS (
+            SELECT DISTINCT
+                si.dimension,
+                r.username,
+                r.rating_key,
+                candidate_label.dimension AS saved_dimension,
+                CASE
+                    WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                    ELSE 'unusable_label'
+                END AS label_repair_status,
+                (
+                    candidate_label.dimension IS NULL
+                    OR candidate_label.next_review_at IS NULL
+                    OR candidate_label.next_review_at <= NOW()
+                ) AS review_due
+            FROM recommendations r
+            JOIN shap_impact si
+              ON si.user_id = r.username
+             AND si.rating_key = r.rating_key
+            LEFT JOIN embedding_labels candidate_label
+              ON candidate_label.dimension = si.dimension
+            WHERE si.shap_value > 0
+              AND si.dimension >= %s
+              AND si.dimension < %s
+              AND (
+                  candidate_label.dimension IS NULL
+                  OR candidate_label.label_type = 'weak'
+                  OR candidate_label.explainable IS NOT TRUE
+                  OR candidate_label.display_label IS NULL
+                  OR BTRIM(candidate_label.display_label) = ''
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM shap_impact si_existing
+                  JOIN embedding_labels el_existing
+                    ON el_existing.dimension = si_existing.dimension
+                  WHERE si_existing.user_id = r.username
+                    AND si_existing.rating_key = r.rating_key
+                    AND si_existing.shap_value > 0
+                    AND {usable_existing_label_sql}
+              )
+        )
+        SELECT
+            COUNT(DISTINCT (username, rating_key)) AS uncovered_recommendation_cards,
+            COUNT(DISTINCT dimension) FILTER (
+                WHERE label_repair_status = 'missing_label'
+            ) AS eligible_missing_dimensions,
+            COUNT(DISTINCT dimension) FILTER (
+                WHERE label_repair_status = 'unusable_label'
+                  AND review_due IS TRUE
+            ) AS eligible_unusable_dimensions,
+            COUNT(DISTINCT dimension) FILTER (
+                WHERE label_repair_status = 'unusable_label'
+                  AND review_due IS NOT TRUE
+            ) AS cooldown_suppressed_dimensions
+        FROM coverage_candidates
+    """.format(usable_existing_label_sql=usable_existing_label_sql)
+    try:
+        cur.execute(query, (dim_min, dim_max))
+        row = cur.fetchone()
+    except Exception as exc:
+        if hasattr(cur, "connection"):
+            cur.connection.rollback()
+        print(f"⚠️ Could not compute coverage diagnostics ({exc}).", flush=True)
+        return diagnostics
+
+    if not row:
+        return diagnostics
+    keys = list(diagnostics)
+    return {key: int(value or 0) for key, value in zip(keys, row)}
+
+
 def _coverage_row_to_dict(row) -> dict:
     if isinstance(row, dict):
-        return row
+        normalized = dict(row)
+        normalized.setdefault("label_repair_status", "missing_label")
+        normalized.setdefault("selection_reason", normalized["label_repair_status"])
+        return normalized
 
     fields = [
         "dimension",
@@ -323,8 +530,13 @@ def _coverage_row_to_dict(row) -> dict:
         "combined_score",
         "user_count",
         "stats_source",
+        "label_repair_status",
+        "selection_reason",
     ]
-    return dict(zip(fields, row))
+    normalized = dict(zip(fields, row))
+    normalized.setdefault("label_repair_status", "missing_label")
+    normalized.setdefault("selection_reason", normalized["label_repair_status"])
+    return normalized
 
 
 def _build_coverage_dimension_index(candidate_rows, excluded_dimensions=None):
@@ -356,6 +568,8 @@ def _build_coverage_dimension_index(candidate_rows, excluded_dimensions=None):
                 "combined_score": float(row.get("combined_score") or 0.0),
                 "user_count": int(row.get("user_count") or 0),
                 "stats_source": row.get("stats_source") or "coverage",
+                "label_repair_status": row.get("label_repair_status") or "missing_label",
+                "selection_reason": row.get("selection_reason") or row.get("label_repair_status") or "missing_label",
                 "recommendations": {},
             },
         )
@@ -391,6 +605,8 @@ def _public_coverage_stat(entry: dict) -> dict:
         "combined_score": entry["combined_score"],
         "user_count": entry["user_count"],
         "stats_source": entry["stats_source"],
+        "label_repair_status": entry.get("label_repair_status", ""),
+        "selection_reason": entry.get("selection_reason", ""),
     }
     stat.update(_coverage_totals_for_entry(entry))
     return stat
@@ -529,6 +745,7 @@ def select_automatic_dimensions(
             "importance_selected_count": len(decorated),
         }
 
+    coverage_diagnostics = get_coverage_selection_diagnostics(cur, dim_type=dim_type)
     coverage_rows = get_coverage_dimension_candidates(cur, dim_type=dim_type)
 
     if selection_mode == "coverage":
@@ -542,6 +759,7 @@ def select_automatic_dimensions(
                 "selection_mode": "coverage",
                 "coverage_selected_count": len(selected),
                 "importance_selected_count": 0,
+                "coverage_diagnostics": coverage_diagnostics,
             }
         )
         return selected, summary
@@ -608,6 +826,7 @@ def select_automatic_dimensions(
         "coverage_greedy_potential_unlocked_recommendations": coverage_summary[
             "potential_unlocked_recommendations"
         ],
+        "coverage_diagnostics": coverage_diagnostics,
     }
     return selected, summary
 
@@ -632,6 +851,27 @@ def print_selection_summary(selection_mode: str, selected_dimensions: list[dict]
 
     eligible = summary.get("eligible_unlabeled_recommendations") or 0
     potential = summary.get("potential_unlocked_recommendations") or 0
+    diagnostics = summary.get("coverage_diagnostics") or {}
+    print(
+        "Recommendation cards with no usable positive-SHAP label: "
+        f"{diagnostics.get('uncovered_recommendation_cards', eligible)}",
+        flush=True,
+    )
+    print(
+        "Eligible missing dimensions: "
+        f"{diagnostics.get('eligible_missing_dimensions', 0)}",
+        flush=True,
+    )
+    print(
+        "Eligible unusable dimensions: "
+        f"{diagnostics.get('eligible_unusable_dimensions', 0)}",
+        flush=True,
+    )
+    print(
+        "Dimensions suppressed by cooldown: "
+        f"{diagnostics.get('cooldown_suppressed_dimensions', 0)}",
+        flush=True,
+    )
     print(f"Currently unlabeled recommendation cards eligible for unlock: {eligible}", flush=True)
     if selection_mode == "hybrid":
         print(f"Coverage-selected dimensions: {summary.get('coverage_selected_count', 0)}", flush=True)
@@ -659,16 +899,32 @@ def print_selection_summary(selection_mode: str, selected_dimensions: list[dict]
         flush=True,
     )
     print("", flush=True)
+    selected_reasons = {}
+    for stat in selected_dimensions:
+        if stat.get("selection_mode") not in {"coverage", "hybrid_coverage"}:
+            continue
+        reason = stat.get("selection_reason") or stat.get("label_repair_status") or "unknown"
+        selected_reasons[reason] = selected_reasons.get(reason, 0) + 1
+    if selected_reasons:
+        print(
+            "Selected dimensions by reason: "
+            + ", ".join(f"{reason}={count}" for reason, count in sorted(selected_reasons.items())),
+            flush=True,
+        )
+    else:
+        print("Selected dimensions by reason: none", flush=True)
     print(
-        "Rank | Dimension | Marginal Cards Unlocked | Cumulative Cards | "
-        "Weighted Unlock Score | Aggregate Importance Score",
+        "Rank | Dimension | Label Repair Status | Selection Reason | "
+        "Marginal Cards Unlocked | Cumulative Cards | Weighted Unlock Score | "
+        "Aggregate Importance Score",
         flush=True,
     )
     for rank, stat in enumerate(selected_dimensions, start=1):
         if stat.get("selection_mode") not in {"coverage", "hybrid_coverage"}:
             continue
         print(
-            f"{rank} | {stat['dimension']} | {stat.get('marginal_unlock_count', '')} | "
+            f"{rank} | {stat['dimension']} | {stat.get('label_repair_status', '')} | "
+            f"{stat.get('selection_reason', '')} | {stat.get('marginal_unlock_count', '')} | "
             f"{stat.get('cumulative_unlocked_recommendations', '')} | "
             f"{_format_float(stat.get('marginal_weighted_unlock_score'))} | "
             f"{_format_float(stat.get('combined_score'))}",
@@ -735,6 +991,184 @@ def _format_result_validation(result: dict) -> str:
     return status or notes
 
 
+def _existing_label_row_to_dict(row) -> dict | None:
+    if not row:
+        return None
+    fields = [
+        "dimension",
+        "label",
+        "label_type",
+        "explainable",
+        "display_label",
+        "last_reviewed_at",
+        "review_attempt_count",
+        "next_review_at",
+    ]
+    return dict(zip(fields, row))
+
+
+def get_existing_label_row(cur, dimension: int) -> dict | None:
+    cur.execute(
+        """
+        SELECT
+            dimension,
+            label,
+            label_type,
+            explainable,
+            display_label,
+            last_reviewed_at,
+            review_attempt_count,
+            next_review_at
+        FROM embedding_labels
+        WHERE dimension = %s
+        """,
+        (dimension,),
+    )
+    return _existing_label_row_to_dict(cur.fetchone())
+
+
+def _valid_generated_label(label_result: dict) -> bool:
+    return (
+        _should_persist_label(label_result.get("label"))
+        and label_result.get("validation_status") != "invalid"
+    )
+
+
+def _valid_semantic_repair_label(label_result: dict) -> bool:
+    return (
+        _valid_generated_label(label_result)
+        and label_result.get("validation_status") == "valid"
+        and label_result.get("label_type") == "semantic"
+    )
+
+
+def _mark_label_review_attempt(cur, dimension: int, repair_cooldown_days: int) -> None:
+    cur.execute(
+        """
+        UPDATE embedding_labels
+        SET
+            last_reviewed_at = NOW(),
+            review_attempt_count = COALESCE(review_attempt_count, 0) + 1,
+            next_review_at = NOW() + (%s * INTERVAL '1 day'),
+            updated_at = NOW()
+        WHERE dimension = %s
+        """,
+        (repair_cooldown_days, dimension),
+    )
+
+
+def _history_change_reason(existing_row: dict, label_repair_status: str, selection_reason: str) -> str:
+    _status, derived_reason = _label_repair_status(existing_row)
+    reason = selection_reason or derived_reason
+    return f"coverage_repair:{label_repair_status or 'unusable_label'}:{reason}"
+
+
+def save_label_result(
+    cur,
+    dimension: int,
+    label_result: dict,
+    label_repair_status: str = "",
+    selection_reason: str = "",
+    repair_cooldown_days: int = DEFAULT_REPAIR_COOLDOWN_DAYS,
+) -> tuple[bool, str]:
+    existing_row = get_existing_label_row(cur, dimension)
+    existing_status, existing_reason = _label_repair_status(existing_row)
+    effective_status = label_repair_status or existing_status
+    effective_reason = selection_reason or existing_reason
+
+    if not _valid_generated_label(label_result):
+        if existing_row and existing_status == "unusable_label":
+            _mark_label_review_attempt(cur, dimension, repair_cooldown_days)
+            return False, "repair_cooldown_scheduled"
+        return False, "invalid_label_not_saved"
+
+    generated_label = label_result["label"]
+    if not existing_row:
+        cur.execute(
+            """
+            INSERT INTO embedding_labels (
+                dimension,
+                label,
+                created_at,
+                label_type,
+                explainable,
+                display_label,
+                needs_review,
+                updated_at,
+                last_reviewed_at,
+                review_attempt_count,
+                next_review_at
+            )
+            VALUES (
+                %s,
+                %s,
+                NOW(),
+                'semantic_candidate',
+                TRUE,
+                %s,
+                FALSE,
+                NOW(),
+                NOW(),
+                0,
+                NULL
+            )
+            """,
+            (dimension, generated_label, generated_label),
+        )
+        return True, "inserted_missing_label"
+
+    if existing_status == "usable_label":
+        return False, "existing_usable_label_preserved"
+
+    if not _valid_semantic_repair_label(label_result):
+        _mark_label_review_attempt(cur, dimension, repair_cooldown_days)
+        return False, "non_semantic_repair_not_saved"
+
+    cur.execute(
+        """
+        INSERT INTO embedding_label_history (
+            dimension,
+            old_label,
+            old_label_type,
+            old_explainable,
+            old_display_label,
+            new_label,
+            change_reason,
+            changed_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+        """,
+        (
+            dimension,
+            existing_row.get("label"),
+            existing_row.get("label_type"),
+            existing_row.get("explainable"),
+            existing_row.get("display_label"),
+            generated_label,
+            _history_change_reason(existing_row, effective_status, effective_reason),
+        ),
+    )
+    cur.execute(
+        """
+        UPDATE embedding_labels
+        SET
+            label = %s,
+            label_type = 'semantic_candidate',
+            explainable = TRUE,
+            display_label = %s,
+            needs_review = FALSE,
+            created_at = NOW(),
+            updated_at = NOW(),
+            last_reviewed_at = NOW(),
+            review_attempt_count = 0,
+            next_review_at = NULL
+        WHERE dimension = %s
+        """,
+        (generated_label, generated_label, dimension),
+    )
+    return True, "updated_unusable_label"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", action="store_true", help="Generate labels using the configured LLM provider")
@@ -758,6 +1192,12 @@ def main():
         default=0.80,
         help="Hybrid-mode share of dimensions to select through coverage ranking",
     )
+    parser.add_argument(
+        "--repair_cooldown_days",
+        type=int,
+        default=DEFAULT_REPAIR_COOLDOWN_DAYS,
+        help="Days to wait before retrying an unusable saved label after a failed repair attempt",
+    )
     dimension_group = parser.add_mutually_exclusive_group()
     dimension_group.add_argument("--dimension", type=int, help="Process one exact embedding dimension")
     dimension_group.add_argument("--dimensions", nargs="+", type=int, help="Process exact embedding dimensions")
@@ -771,6 +1211,8 @@ def main():
 
     if not 0.0 <= args.coverage_share <= 1.0:
         parser.error("--coverage_share must be between 0.0 and 1.0")
+    if args.repair_cooldown_days < 0:
+        parser.error("--repair_cooldown_days must be zero or greater")
 
     csv_rows = []
     provider_name = None
@@ -889,6 +1331,8 @@ def main():
                 {
                     "dimension": dimension,
                     "selection_mode": dim_stats.get("selection_mode", args.selection_mode),
+                    "label_repair_status": dim_stats.get("label_repair_status", ""),
+                    "selection_reason": dim_stats.get("selection_reason", ""),
                     "unlock_count_total": dim_stats.get("unlock_count_total", ""),
                     "marginal_unlock_count": dim_stats.get("marginal_unlock_count", ""),
                     "marginal_weighted_unlock_score": dim_stats.get("marginal_weighted_unlock_score", ""),
@@ -938,16 +1382,19 @@ def main():
                 }
             )
 
-        if args.save_label and _should_persist_label(generated_label):
-            cur.execute(
-                """
-                INSERT INTO embedding_labels (dimension, label, created_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (dimension)
-                DO UPDATE SET label = EXCLUDED.label, created_at = EXCLUDED.created_at
-                """,
-                (dimension, generated_label),
+        if args.save_label:
+            saved, save_status = save_label_result(
+                cur,
+                dimension,
+                label_result,
+                label_repair_status=dim_stats.get("label_repair_status", ""),
+                selection_reason=dim_stats.get("selection_reason", ""),
+                repair_cooldown_days=args.repair_cooldown_days,
             )
+            if saved:
+                print(f"✅ Saved label for dim {dimension}: {save_status}", flush=True)
+            elif save_status in {"repair_cooldown_scheduled", "non_semantic_repair_not_saved"}:
+                print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
         conn.commit()
 
     if args.export_csv:

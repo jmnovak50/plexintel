@@ -36,7 +36,7 @@ CREATE VIEW public.expanded_recs_w_label_v AS
                     max(si.shap_value) AS max_shap
                    FROM public.shap_impact si
                      JOIN public.embedding_labels el ON (si.dimension = el.dimension)
-                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username) AND (si.shap_value > (0)::double precision) AND (el.explainable IS TRUE) AND (el.display_label IS NOT NULL))
+                  WHERE ((si.rating_key = r.rating_key) AND (si.user_id = r.username) AND (si.shap_value > (0)::double precision) AND (el.explainable IS TRUE) AND (el.display_label IS NOT NULL) AND (BTRIM(el.display_label) <> ''::text))
                   GROUP BY el.display_label
                   ORDER BY (max(si.shap_value)) DESC
                  LIMIT 3) top_labels) AS semantic_themes

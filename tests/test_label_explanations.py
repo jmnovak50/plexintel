@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+import io
 import sys
 import types
+from datetime import datetime, timedelta, timezone
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,6 +162,78 @@ class DimensionRoutingTests(unittest.TestCase):
 
 
 class CoverageSelectionTests(unittest.TestCase):
+    def test_existing_explainable_label_excludes_dimension(self):
+        saved_label = {
+            "label_type": "semantic_candidate",
+            "explainable": True,
+            "display_label": "space operas",
+        }
+
+        self.assertTrue(batch_label_embeddings.is_saved_label_usable_for_explanation(saved_label))
+        self.assertEqual(batch_label_embeddings._label_repair_status(saved_label), ("usable_label", "usable_label"))
+
+    def test_hard_structural_label_does_not_falsely_cover_a_recommendation_card(self):
+        saved_label = {
+            "label_type": "hard_structural",
+            "explainable": False,
+            "display_label": None,
+        }
+
+        self.assertFalse(batch_label_embeddings.is_saved_label_usable_for_explanation(saved_label))
+        self.assertEqual(
+            batch_label_embeddings._label_repair_status(saved_label),
+            ("unusable_label", "not_explainable"),
+        )
+
+    def test_weak_label_can_be_selected_for_repair(self):
+        saved_label = {
+            "label_type": "weak",
+            "explainable": False,
+            "display_label": None,
+            "next_review_at": None,
+        }
+
+        self.assertEqual(batch_label_embeddings._label_repair_status(saved_label), ("unusable_label", "weak_label"))
+        self.assertTrue(batch_label_embeddings._is_label_review_due(saved_label))
+
+    def test_display_label_null_can_be_selected_for_repair(self):
+        saved_label = {
+            "label_type": "semantic_candidate",
+            "explainable": True,
+            "display_label": None,
+            "next_review_at": None,
+        }
+
+        self.assertEqual(
+            batch_label_embeddings._label_repair_status(saved_label),
+            ("unusable_label", "missing_display_label"),
+        )
+        self.assertTrue(batch_label_embeddings._is_label_review_due(saved_label))
+
+    def test_valid_display_label_covers_the_card(self):
+        saved_label = {
+            "label_type": "semantic_candidate",
+            "explainable": True,
+            "display_label": "  noir mysteries  ",
+        }
+
+        self.assertTrue(batch_label_embeddings.is_saved_label_usable_for_explanation(saved_label))
+        self.assertEqual(batch_label_embeddings._label_repair_status(saved_label), ("usable_label", "usable_label"))
+
+    def test_cooldown_prevents_daily_repeat_attempts(self):
+        now = datetime(2026, 6, 6, tzinfo=timezone.utc)
+        saved_label = {
+            "label_type": "weak",
+            "explainable": False,
+            "display_label": None,
+            "next_review_at": now + timedelta(days=1),
+        }
+
+        self.assertFalse(batch_label_embeddings._is_label_review_due(saved_label, now=now))
+
+        saved_label["next_review_at"] = now - timedelta(seconds=1)
+        self.assertTrue(batch_label_embeddings._is_label_review_due(saved_label, now=now))
+
     def test_dimension_with_most_unique_unlabeled_recommendations_is_selected_first(self):
         rows = [
             coverage_candidate(10, "alice", 1),
@@ -204,6 +279,43 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertEqual(selected[0]["dimension"], 11)
         self.assertAlmostEqual(selected[0]["marginal_weighted_unlock_score"], 0.9)
 
+    def test_selection_summary_prints_repair_diagnostics(self):
+        selected = [
+            {
+                "dimension": 10,
+                "selection_mode": "coverage",
+                "label_repair_status": "unusable_label",
+                "selection_reason": "weak_label",
+                "marginal_unlock_count": 1,
+                "cumulative_unlocked_recommendations": 1,
+                "marginal_weighted_unlock_score": 0.5,
+                "combined_score": 2.0,
+            }
+        ]
+        summary = {
+            "eligible_unlabeled_recommendations": 1,
+            "potential_unlocked_recommendations": 1,
+            "coverage_diagnostics": {
+                "uncovered_recommendation_cards": 2,
+                "eligible_missing_dimensions": 3,
+                "eligible_unusable_dimensions": 4,
+                "cooldown_suppressed_dimensions": 5,
+            },
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            batch_label_embeddings.print_selection_summary("coverage", selected, summary)
+
+        text = output.getvalue()
+        self.assertIn("Recommendation cards with no usable positive-SHAP label: 2", text)
+        self.assertIn("Eligible missing dimensions: 3", text)
+        self.assertIn("Eligible unusable dimensions: 4", text)
+        self.assertIn("Dimensions suppressed by cooldown: 5", text)
+        self.assertIn("Selected dimensions by reason: weak_label=1", text)
+        self.assertIn("Label Repair Status", text)
+        self.assertIn("unusable_label | weak_label", text)
+
     def test_sql_candidate_query_matches_positive_unlabeled_view_logic(self):
         class FakeCursor:
             def __init__(self):
@@ -226,9 +338,17 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertIn("LEFT JOIN shap_dimension_stats_current s", sql)
         self.assertIn("si.shap_value > 0", sql)
         self.assertIn("candidate_label.dimension IS NULL", sql)
+        self.assertIn("candidate_label.label_type = 'weak'", sql)
+        self.assertIn("candidate_label.explainable IS NOT TRUE", sql)
+        self.assertIn("candidate_label.display_label IS NULL", sql)
+        self.assertIn("BTRIM(candidate_label.display_label) = ''", sql)
+        self.assertIn("candidate_label.next_review_at <= NOW()", sql)
         self.assertIn("NOT EXISTS", sql)
         self.assertIn("JOIN embedding_labels el_existing", sql)
-        self.assertIn("el_existing.label IS NOT NULL", sql)
+        self.assertIn("el_existing.explainable IS TRUE", sql)
+        self.assertIn("el_existing.display_label IS NOT NULL", sql)
+        self.assertIn("BTRIM(el_existing.display_label) <> ''", sql)
+        self.assertNotIn("el_existing.label IS NOT NULL", sql)
 
     def test_existing_labeled_dimensions_can_be_excluded_from_coverage_selection(self):
         rows = [
@@ -305,6 +425,89 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertEqual(len({stat["dimension"] for stat in selected}), 3)
         self.assertEqual(summary["coverage_selected_count"], 2)
         self.assertEqual(summary["importance_selected_count"], 1)
+
+
+class LabelRepairSaveTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, existing_row):
+            self.existing_row = existing_row
+            self.executed = []
+
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params))
+
+        def fetchone(self):
+            return self.existing_row
+
+    def test_invalid_unclear_llm_response_does_not_overwrite_existing_label(self):
+        existing_row = (
+            42,
+            "old structural label",
+            "hard_structural",
+            False,
+            None,
+            None,
+            0,
+            None,
+        )
+        cur = self.FakeCursor(existing_row)
+        label_result = {
+            "label": gpt_utils.UNCLEAR_LABEL,
+            "label_type": "unclear",
+            "validation_status": "invalid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            42,
+            label_result,
+            label_repair_status="unusable_label",
+            selection_reason="not_explainable",
+            repair_cooldown_days=7,
+        )
+
+        self.assertFalse(saved)
+        self.assertEqual(status, "repair_cooldown_scheduled")
+        executed_sql = "\n".join(sql for sql, _params in cur.executed)
+        self.assertIn("review_attempt_count = COALESCE(review_attempt_count, 0) + 1", executed_sql)
+        self.assertIn("next_review_at = NOW() + (%s * INTERVAL '1 day')", executed_sql)
+        self.assertNotIn("INSERT INTO embedding_label_history", executed_sql)
+        self.assertNotIn("label = %s", executed_sql)
+
+    def test_valid_semantic_repair_preserves_old_label_history(self):
+        existing_row = (
+            84,
+            "old weak label",
+            "weak",
+            False,
+            None,
+            None,
+            1,
+            None,
+        )
+        cur = self.FakeCursor(existing_row)
+        label_result = {
+            "label": "spy thrillers",
+            "label_type": "semantic",
+            "validation_status": "valid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            84,
+            label_result,
+            label_repair_status="unusable_label",
+            selection_reason="weak_label",
+            repair_cooldown_days=7,
+        )
+
+        self.assertTrue(saved)
+        self.assertEqual(status, "updated_unusable_label")
+        executed_sql = "\n".join(sql for sql, _params in cur.executed)
+        self.assertIn("INSERT INTO embedding_label_history", executed_sql)
+        self.assertIn("old_label", executed_sql)
+        self.assertIn("UPDATE embedding_labels", executed_sql)
+        self.assertIn("label = %s", executed_sql)
 
     def test_hybrid_refresh_existing_allows_labeled_dimensions_only_in_importance_portion(self):
         coverage_rows = [
@@ -410,6 +613,7 @@ class PositiveLabelSelectionTests(unittest.TestCase):
         self.assertIn("si.shap_value > (0)::double precision", sql)
         self.assertIn("el.explainable IS TRUE", sql)
         self.assertIn("el.display_label IS NOT NULL", sql)
+        self.assertIn("BTRIM(el.display_label) <> ''::text", sql)
         self.assertIn("GROUP BY el.display_label", sql)
         self.assertIn("string_agg(top_labels.display_label", sql)
         self.assertIn("ORDER BY top_labels.max_shap DESC", sql)
@@ -426,9 +630,15 @@ class PositiveLabelSelectionTests(unittest.TestCase):
             "ADD COLUMN IF NOT EXISTS display_label text",
             "ADD COLUMN IF NOT EXISTS needs_review boolean DEFAULT false",
             "ADD COLUMN IF NOT EXISTS updated_at timestamp without time zone DEFAULT now()",
+            "ADD COLUMN IF NOT EXISTS last_reviewed_at timestamp without time zone",
+            "ADD COLUMN IF NOT EXISTS review_attempt_count integer NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS next_review_at timestamp without time zone",
         ):
             self.assertIn(column, sql)
 
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.embedding_label_history", sql)
+        self.assertIn("old_label text", sql)
+        self.assertIn("new_label text", sql)
         self.assertIn("CREATE OR REPLACE VIEW public.embedding_label_governance_v", sql)
         self.assertIn("LEFT JOIN public.shap_impact si ON si.dimension = el.dimension", sql)
         self.assertIn("WHEN el.dimension < 768 THEN 'media'::text", sql)
@@ -436,6 +646,7 @@ class PositiveLabelSelectionTests(unittest.TestCase):
         self.assertIn("GROUP BY label_type, side, explainable, needs_review", sql)
         self.assertIn("el.explainable IS TRUE", sql)
         self.assertIn("el.display_label IS NOT NULL", sql)
+        self.assertIn("BTRIM(el.display_label) <> ''::text", sql)
 
 
 class LabelCoveragePromptTests(unittest.TestCase):
