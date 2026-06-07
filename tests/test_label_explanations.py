@@ -550,6 +550,27 @@ class ReviewSelectionTests(unittest.TestCase):
         self.assertIsNone(hard_structural["display_label"])
         self.assertFalse(hard_structural["needs_review"])
 
+        season_structural = batch_label_embeddings.classify_label_governance("season finale titles")
+        self.assertEqual(season_structural["label_type"], "soft_structural")
+        self.assertTrue(season_structural["needs_review"])
+
+    def test_governance_classifier_reclassifies_dates_and_negative_constructions(self):
+        date_label = batch_label_embeddings.classify_label_governance("1990s action releases")
+        self.assertEqual(date_label["label_type"], "metadata")
+        self.assertFalse(date_label["explainable"])
+        self.assertIsNone(date_label["display_label"])
+        self.assertFalse(date_label["needs_review"])
+
+        range_label = batch_label_embeddings.classify_label_governance("movies released 1990-1999")
+        self.assertEqual(range_label["label_type"], "metadata")
+        self.assertFalse(range_label["explainable"])
+
+        negative_label = batch_label_embeddings.classify_label_governance("non-comedy mysteries")
+        self.assertEqual(negative_label["label_type"], "semantic_candidate")
+        self.assertTrue(negative_label["explainable"])
+        self.assertEqual(negative_label["display_label"], "non-comedy mysteries")
+        self.assertTrue(negative_label["needs_review"])
+
 
 class LabelRepairSaveTests(unittest.TestCase):
     class FakeCursor:
@@ -635,6 +656,26 @@ class LabelRepairSaveTests(unittest.TestCase):
         self.assertIn("old_needs_review", executed_sql)
         self.assertIn("UPDATE embedding_labels", executed_sql)
         self.assertIn("label = %s", executed_sql)
+
+    def test_save_uses_application_governance_not_llm_proposed_type(self):
+        cur = self.FakeCursor(existing_row=None)
+        label_result = {
+            "label": "movies released 1990-1999",
+            "label_type": "semantic",
+            "validation_status": "valid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            122,
+            label_result,
+            repair_cooldown_days=7,
+        )
+
+        self.assertTrue(saved)
+        self.assertEqual(status, "inserted_missing_label")
+        insert_params = cur.executed[-1][1]
+        self.assertEqual(insert_params, (122, "movies released 1990-1999", "metadata", False, None, False))
 
     def test_valid_review_replacement_updates_existing_usable_label_with_history(self):
         existing_row = (
@@ -894,6 +935,7 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertIn('"coverage_low_overlap_count": 0', prompt_text)
         self.assertIn('"coverage_low_overlap_percent": 0', prompt_text)
         self.assertIn('"label_confidence": "high, medium, low, or unclear"', prompt_text)
+        self.assertIn('"proposed_label_type": "semantic, cluster, mechanical, or unclear"', prompt_text)
         self.assertNotIn("cyborg / modified-human identity", gpt_utils.SYSTEM_PROMPT)
         self.assertNotIn("cyborg / modified-human identity", prompt_text)
         self.assertEqual(prompt_bundle["minimum_label_coverage_percent"], 80)
@@ -940,7 +982,7 @@ class LabelCoveragePromptTests(unittest.TestCase):
             {
               "label": "spy action movies",
               "label_confidence": "medium",
-              "label_type": "semantic",
+              "proposed_label_type": "semantic",
               "coverage_high_count": 7,
               "coverage_high_total": 10,
               "coverage_low_overlap_count": 2,
@@ -957,6 +999,7 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(result["label"], "spy action movies")
         self.assertEqual(result["label_confidence"], "medium")
         self.assertEqual(result["label_type"], "semantic")
+        self.assertEqual(result["proposed_label_type"], "semantic")
         self.assertEqual(result["coverage_high_count"], 7)
         self.assertEqual(result["coverage_high_total"], 10)
         self.assertEqual(result["coverage_high_percent"], 70)
@@ -1275,6 +1318,10 @@ class ReviewCsvExportTests(unittest.TestCase):
         self.assertEqual(row["label"], "")
         self.assertEqual(row["label_type"], "")
         self.assertEqual(row["proposed_label_type"], "")
+        self.assertEqual(row["final_label_type"], "")
+        self.assertEqual(row["final_explainable"], "")
+        self.assertEqual(row["final_needs_review"], "")
+        self.assertEqual(row["final_display_label"], "")
 
         build_prompt.assert_called_once()
         self.assertEqual(build_prompt.call_args.kwargs["existing_label"], "prestige tv drama episodes")
@@ -1283,6 +1330,106 @@ class ReviewCsvExportTests(unittest.TestCase):
         save_label.assert_not_called()
         call_llm.assert_not_called()
         self.assertEqual(fake_conn.cursor_obj.executed, [])
+
+    def test_csv_exposes_llm_proposed_type_separately_from_final_governance(self):
+        selected = [
+            {
+                "dimension": 12,
+                "selection_mode": "review",
+                "label_repair_status": "review_label",
+                "selection_reason": "needs_review",
+                "existing_label": "old comedy label",
+                "existing_display_label": "old comedy",
+                "existing_label_type": "semantic_candidate",
+                "existing_explainable": True,
+                "existing_needs_review": True,
+                "last_reviewed_at": "",
+                "review_attempt_count": 0,
+                "next_review_at": "",
+                "usage_count": 10,
+                "sum_abs_shap": 5.0,
+                "avg_abs_shap": 0.5,
+                "combined_score": 9.0,
+                "user_count": 3,
+                "stats_source": "review_aggregate",
+            }
+        ]
+        prompt_bundle = {
+            "prompt_text": "prompt",
+            "summary": "summary",
+            "skipped_reason": "",
+            "valid_positive_count": 6,
+            "valid_negative_count": 4,
+            "flagged_item_count": 0,
+        }
+        label_result = {
+            "label": "non-comedy mysteries",
+            "label_confidence": "medium",
+            "proposed_label_type": "semantic",
+            "label_type": "semantic",
+            "validation_status": "valid",
+            "validation_notes": [],
+            "evidence": ["", "", ""],
+        }
+        fake_conn = self.FakeConnection()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "review.csv"
+            argv = [
+                "batch_label_embeddings.py",
+                "--selection_mode",
+                "review",
+                "--label",
+                "--export_csv",
+                str(csv_path),
+            ]
+            with patch.object(sys, "argv", argv):
+                with patch.object(batch_label_embeddings, "ensure_app_schema"):
+                    with patch.object(batch_label_embeddings, "connect_db", return_value=fake_conn):
+                        with patch.object(
+                            batch_label_embeddings,
+                            "resolve_label_backend",
+                            return_value=("ollama", "example-model"),
+                        ):
+                            with patch.object(
+                                batch_label_embeddings,
+                                "select_automatic_dimensions",
+                                return_value=(selected, {"review_diagnostics": {}}),
+                            ):
+                                with patch.object(
+                                    batch_label_embeddings,
+                                    "_fetch_dimension_samples",
+                                    return_value=("media", pd.DataFrame(), pd.DataFrame()),
+                                ):
+                                    with patch.object(
+                                        batch_label_embeddings,
+                                        "build_dimension_prompt",
+                                        return_value=prompt_bundle,
+                                    ):
+                                        with patch.object(
+                                            batch_label_embeddings,
+                                            "call_llm_for_label_result",
+                                            return_value=label_result,
+                                        ):
+                                            with redirect_stdout(io.StringIO()):
+                                                batch_label_embeddings.main()
+
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["proposed_label"], "non-comedy mysteries")
+        self.assertEqual(row["proposed_label_type"], "semantic")
+        self.assertEqual(row["proposed_label_confidence"], "medium")
+        self.assertEqual(row["final_label_type"], "semantic_candidate")
+        self.assertEqual(row["label_type"], "semantic_candidate")
+        self.assertEqual(row["final_explainable"], "True")
+        self.assertEqual(row["explainable"], "True")
+        self.assertEqual(row["final_needs_review"], "True")
+        self.assertEqual(row["needs_review"], "True")
+        self.assertEqual(row["final_display_label"], "non-comedy mysteries")
+        self.assertEqual(row["display_label"], "non-comedy mysteries")
 
 
 if __name__ == "__main__":

@@ -58,9 +58,16 @@ CSV_FIELDNAMES = [
     "proposed_label_type",
     "gpt_label",
     "final_saved_label",
+    "final_label_type",
+    "final_explainable",
+    "final_needs_review",
+    "final_display_label",
     "label",
     "label_confidence",
     "label_type",
+    "explainable",
+    "needs_review",
+    "display_label",
     "coverage_high_count",
     "coverage_high_total",
     "coverage_high_percent",
@@ -92,7 +99,7 @@ AND {alias}.display_label IS NOT NULL
 AND BTRIM({alias}.display_label) <> ''
 """
 WEAK_LABEL_FRAGMENTS = ("unknown", "unclear", "mixed", "generic")
-METADATA_LABEL_FRAGMENTS = ("rating", "released in", "recent", "2025", "2026")
+METADATA_LABEL_FRAGMENTS = ("rating", "released in", "release year", "release years", "recent")
 PROPER_NOUN_LABEL_FRAGMENTS = ("friends", "always sunny", "ray donovan", "gossip girl", "icarly")
 HARD_STRUCTURAL_LABELS = {
     "tv series episode",
@@ -133,8 +140,15 @@ HARD_STRUCTURAL_LABELS = {
     "colon titles with verb-oriented subtitle",
 }
 SOFT_STRUCTURAL_RE = re.compile(
-    r"(^|[^a-z0-9])(episode|episodes|tv|television|movie|movies|film|films|title|titles)([^a-z0-9]|$)"
+    r"(^|[^a-z0-9])(episode|episodes|season|seasons|tv|television|movie|movies|film|films|title|titles)([^a-z0-9]|$)"
 )
+YEAR_LANGUAGE_RE = re.compile(
+    r"(?<!\d)(?:18|19|20)\d{2}s?(?!\d)|\b(?:release|released|premiere|premiered|aired|airing)\b"
+)
+YEAR_RANGE_RE = re.compile(
+    r"(?<!\d)(?:18|19|20)\d{2}s?\s*(?:-|–|—|to|through|thru)\s*(?:18|19|20)\d{2}s?(?!\d)"
+)
+NEGATIVE_SEMANTIC_RE = re.compile(r"(^|[^a-z0-9])non[-\s]+[a-z0-9]+")
 
 
 def connect_db():
@@ -223,7 +237,11 @@ def classify_label_governance(label: str) -> dict:
             "display_label": None,
             "needs_review": True,
         }
-    if _contains_any(label_lc, METADATA_LABEL_FRAGMENTS):
+    if (
+        _contains_any(label_lc, METADATA_LABEL_FRAGMENTS)
+        or YEAR_RANGE_RE.search(label_lc)
+        or YEAR_LANGUAGE_RE.search(label_lc)
+    ):
         return {
             "label_type": "metadata",
             "explainable": False,
@@ -243,6 +261,13 @@ def classify_label_governance(label: str) -> dict:
             "explainable": False,
             "display_label": None,
             "needs_review": False,
+        }
+    if NEGATIVE_SEMANTIC_RE.search(label_lc):
+        return {
+            "label_type": "semantic_candidate",
+            "explainable": True,
+            "display_label": _format_governed_display_label(raw_label),
+            "needs_review": True,
         }
 
     is_soft_structural = bool(SOFT_STRUCTURAL_RE.search(label_lc))
@@ -1346,6 +1371,21 @@ def _format_result_validation(result: dict) -> str:
     return status or notes
 
 
+def _blank_governance() -> dict:
+    return {
+        "label_type": "",
+        "explainable": "",
+        "display_label": "",
+        "needs_review": "",
+    }
+
+
+def _csv_governance_for_label(label_result: dict) -> dict:
+    if not _valid_generated_label(label_result):
+        return _blank_governance()
+    return classify_label_governance(label_result.get("label", ""))
+
+
 def _existing_label_row_to_dict(row) -> dict | None:
     if not row:
         return None
@@ -1786,6 +1826,7 @@ def main():
 
         generated_label = label_result["label"]
         evidence = label_result.get("evidence", ["", "", ""])
+        final_governance = _csv_governance_for_label(label_result)
         final_saved_label = ""
 
         if args.save_label and not args.dry_run:
@@ -1845,12 +1886,22 @@ def main():
                     "label_model": model_name or "",
                     "proposed_label": generated_label,
                     "proposed_label_confidence": label_result.get("label_confidence", ""),
-                    "proposed_label_type": label_result.get("label_type", ""),
+                    "proposed_label_type": label_result.get(
+                        "proposed_label_type",
+                        label_result.get("label_type", ""),
+                    ),
                     "gpt_label": generated_label,
                     "final_saved_label": final_saved_label,
+                    "final_label_type": final_governance["label_type"],
+                    "final_explainable": final_governance["explainable"],
+                    "final_needs_review": final_governance["needs_review"],
+                    "final_display_label": final_governance["display_label"],
                     "label": generated_label,
                     "label_confidence": label_result.get("label_confidence", ""),
-                    "label_type": label_result.get("label_type", ""),
+                    "label_type": final_governance["label_type"],
+                    "explainable": final_governance["explainable"],
+                    "needs_review": final_governance["needs_review"],
+                    "display_label": final_governance["display_label"],
                     "coverage_high_count": label_result.get("coverage_high_count"),
                     "coverage_high_total": label_result.get("coverage_high_total"),
                     "coverage_high_percent": label_result.get("coverage_high_percent"),

@@ -120,7 +120,7 @@ Return ONLY this JSON shape:
 {{
   "label": "short label or UNCLEAR / MIXED SIGNAL",
   "label_confidence": "high, medium, low, or unclear",
-  "label_type": "semantic, cluster, mechanical, or unclear",
+  "proposed_label_type": "semantic, cluster, mechanical, or unclear",
   "coverage_high_count": 0,
   "coverage_high_total": 0,
   "coverage_high_percent": 0,
@@ -368,6 +368,7 @@ def validate_label_result(
             validated["label"] = UNCLEAR_LABEL
             validated["label_confidence"] = "unclear"
             validated["label_type"] = "unclear"
+            validated["proposed_label_type"] = "unclear"
             _add_validation_note(
                 validated,
                 "invalid",
@@ -420,6 +421,7 @@ def validate_label_result(
             validated["label"] = UNCLEAR_LABEL
             validated["label_confidence"] = "unclear"
             validated["label_type"] = "unclear"
+            validated["proposed_label_type"] = "unclear"
             _add_validation_note(
                 validated,
                 "invalid",
@@ -477,10 +479,12 @@ def _normalize_label_result(
     if normalized_low_percent is None:
         normalized_low_percent = _calculate_percent(normalized_low_count, normalized_low_total)
 
+    proposed_label_type = _coerce_label_type(label_type)
     normalized = {
         "label": _coerce_label(label),
         "label_confidence": _coerce_label_confidence(label_confidence),
-        "label_type": _coerce_label_type(label_type),
+        "label_type": proposed_label_type,
+        "proposed_label_type": proposed_label_type,
         "coverage_high_count": normalized_high_count,
         "coverage_high_total": normalized_high_total,
         "coverage_high_percent": normalized_high_percent,
@@ -924,7 +928,7 @@ def _extract_label_result_from_response(
                 coverage_low_total=data.get("coverage_low_total"),
                 coverage_low_overlap_percent=data.get("coverage_low_overlap_percent", data.get("coverage_low_percent")),
                 label_confidence=data.get("label_confidence", data.get("confidence")),
-                label_type=data.get("label_type"),
+                label_type=data.get("proposed_label_type", data.get("label_type")),
                 minimum_label_coverage_percent=minimum_label_coverage_percent,
                 maximum_low_overlap_percent=maximum_low_overlap_percent,
             )
