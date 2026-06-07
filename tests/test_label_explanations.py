@@ -236,6 +236,29 @@ class CoverageSelectionTests(unittest.TestCase):
         saved_label["next_review_at"] = now - timedelta(seconds=1)
         self.assertTrue(batch_label_embeddings._is_label_review_due(saved_label, now=now))
 
+    def test_review_eligibility_respects_future_and_elapsed_cooldown(self):
+        now = datetime(2026, 6, 6, tzinfo=timezone.utc)
+        saved_label = {
+            "needs_review": True,
+            "next_review_at": now + timedelta(days=7),
+        }
+
+        self.assertFalse(batch_label_embeddings.is_review_label_eligible(saved_label, now=now))
+        self.assertTrue(
+            batch_label_embeddings.is_review_label_eligible(
+                saved_label,
+                now=now + timedelta(days=7, seconds=1),
+            )
+        )
+
+        saved_label["needs_review"] = False
+        self.assertFalse(
+            batch_label_embeddings.is_review_label_eligible(
+                saved_label,
+                now=now + timedelta(days=7, seconds=1),
+            )
+        )
+
     def test_dimension_with_most_unique_unlabeled_recommendations_is_selected_first(self):
         rows = [
             coverage_candidate(10, "alice", 1),
@@ -532,6 +555,7 @@ class ReviewSelectionTests(unittest.TestCase):
         self.assertIn("Review candidates with current SHAP activity: 2", text)
         self.assertIn("Review candidates with zero current SHAP activity: 1", text)
         self.assertIn("Dimensions suppressed by cooldown: 1", text)
+        self.assertIn("Review dimensions skipped because next_review_at is in the future: 1", text)
         self.assertIn("Selected dimensions: 1", text)
         self.assertIn("Existing Raw Label", text)
         self.assertIn("780 | user | light-hearted tv episodes", text)
@@ -713,7 +737,95 @@ class LabelRepairSaveTests(unittest.TestCase):
         self.assertIn("old_needs_review", executed_sql)
         self.assertIn("review_attempt_count = COALESCE(review_attempt_count, 0) + 1", executed_sql)
         update_params = cur.executed[-1][1]
-        self.assertEqual(update_params, ("prestige drama", "semantic_candidate", True, "prestige drama", False, 120))
+        self.assertEqual(
+            update_params,
+            ("prestige drama", "semantic_candidate", True, "prestige drama", False, False, 7, 120),
+        )
+        self.assertIn("ELSE NULL", cur.executed[-1][0])
+
+    def test_valid_review_soft_structural_result_gets_future_next_review_at(self):
+        existing_row = (
+            122,
+            "light-hearted tv episodes",
+            "soft_structural",
+            True,
+            "light-hearted TV stories",
+            True,
+            datetime(2026, 6, 1, 8, 30),
+            2,
+            None,
+        )
+        cur = self.FakeCursor(existing_row)
+        label_result = {
+            "label": "prestige tv drama episodes",
+            "label_type": "semantic",
+            "validation_status": "valid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            122,
+            label_result,
+            label_repair_status="review_label",
+            selection_reason="needs_review",
+            repair_cooldown_days=7,
+            review_mode=True,
+        )
+
+        self.assertTrue(saved)
+        self.assertEqual(status, "updated_review_label_cooldown_scheduled")
+        update_sql, update_params = cur.executed[-1]
+        self.assertIn("next_review_at = CASE", update_sql)
+        self.assertIn("NOW() + (%s * INTERVAL '1 day')", update_sql)
+        self.assertEqual(
+            update_params,
+            (
+                "prestige tv drama episodes",
+                "soft_structural",
+                True,
+                "prestige TV drama",
+                True,
+                True,
+                7,
+                122,
+            ),
+        )
+
+    def test_downgraded_review_result_gets_future_next_review_at_without_overwrite(self):
+        existing_row = (
+            123,
+            "light-hearted tv episodes",
+            "soft_structural",
+            True,
+            "light-hearted TV stories",
+            True,
+            datetime(2026, 6, 1, 8, 30),
+            2,
+            None,
+        )
+        cur = self.FakeCursor(existing_row)
+        label_result = {
+            "label": "dominant cluster label",
+            "label_type": "cluster",
+            "validation_status": "downgraded",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            123,
+            label_result,
+            label_repair_status="review_label",
+            selection_reason="needs_review",
+            repair_cooldown_days=7,
+            review_mode=True,
+        )
+
+        self.assertFalse(saved)
+        self.assertEqual(status, "invalid_review_replacement_not_saved")
+        executed_sql = "\n".join(sql for sql, _params in cur.executed)
+        self.assertIn("review_attempt_count = COALESCE(review_attempt_count, 0) + 1", executed_sql)
+        self.assertIn("next_review_at = NOW() + (%s * INTERVAL '1 day')", executed_sql)
+        self.assertNotIn("label = %s", executed_sql)
 
     def test_invalid_review_response_does_not_overwrite_existing_usable_label(self):
         existing_row = (
@@ -1322,6 +1434,7 @@ class ReviewCsvExportTests(unittest.TestCase):
         self.assertEqual(row["final_explainable"], "")
         self.assertEqual(row["final_needs_review"], "")
         self.assertEqual(row["final_display_label"], "")
+        self.assertEqual(row["review_cooldown_until"], "")
 
         build_prompt.assert_called_once()
         self.assertEqual(build_prompt.call_args.kwargs["existing_label"], "prestige tv drama episodes")

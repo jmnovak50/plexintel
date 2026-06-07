@@ -6,7 +6,7 @@ import argparse
 import csv
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pgvector.psycopg2 import register_vector
 
@@ -62,6 +62,7 @@ CSV_FIELDNAMES = [
     "final_explainable",
     "final_needs_review",
     "final_display_label",
+    "review_cooldown_until",
     "label",
     "label_confidence",
     "label_type",
@@ -337,6 +338,17 @@ def _is_label_review_due(label_row, now=None) -> bool:
     elif next_review_at.tzinfo is not None and now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     return next_review_at <= now
+
+
+def is_review_label_eligible(label_row, now=None) -> bool:
+    if not label_row:
+        return False
+    needs_review = (
+        label_row.get("needs_review")
+        if isinstance(label_row, dict)
+        else getattr(label_row, "needs_review", None)
+    )
+    return needs_review is True and _is_label_review_due(label_row, now=now)
 
 
 def _blank_coverage_fields(selection_mode: str) -> dict:
@@ -1208,6 +1220,11 @@ def print_selection_summary(selection_mode: str, selected_dimensions: list[dict]
             f"{diagnostics.get('cooldown_suppressed_dimensions', 0)}",
             flush=True,
         )
+        print(
+            "Review dimensions skipped because next_review_at is in the future: "
+            f"{diagnostics.get('cooldown_suppressed_dimensions', 0)}",
+            flush=True,
+        )
         print(f"Selected dimensions: {len(selected_dimensions)}", flush=True)
         print(
             "Rank | Dimension | Side | Existing Raw Label | Existing Display Label | "
@@ -1369,6 +1386,13 @@ def _format_result_validation(result: dict) -> str:
     if status and notes:
         return f"{status}: {notes}"
     return status or notes
+
+
+def _format_review_cooldown_until(cooldown_days: int, now=None) -> str:
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now + timedelta(days=cooldown_days)).isoformat(timespec="seconds")
 
 
 def _blank_governance() -> dict:
@@ -1579,7 +1603,10 @@ def save_label_result(
                 updated_at = NOW(),
                 last_reviewed_at = NOW(),
                 review_attempt_count = COALESCE(review_attempt_count, 0) + 1,
-                next_review_at = NULL
+                next_review_at = CASE
+                    WHEN %s IS TRUE THEN NOW() + (%s * INTERVAL '1 day')
+                    ELSE NULL
+                END
             WHERE dimension = %s
             """,
             (
@@ -1588,9 +1615,13 @@ def save_label_result(
                 governance["explainable"],
                 governance["display_label"],
                 governance["needs_review"],
+                governance["needs_review"],
+                repair_cooldown_days,
                 dimension,
             ),
         )
+        if governance["needs_review"]:
+            return True, "updated_review_label_cooldown_scheduled"
         return True, "updated_review_label"
 
     if existing_status == "usable_label":
@@ -1779,6 +1810,7 @@ def main():
             scope = "all dimensions" if args.refresh_existing else "unlabeled dimensions"
         print(f"ℹ️ No {scope} selected for labeling.", flush=True)
 
+    review_cooldown_events = []
     for dim_stats in top_dims:
         dimension = dim_stats["dimension"]
         mode, positive_df, negative_df = _fetch_dimension_samples(dimension)
@@ -1828,6 +1860,8 @@ def main():
         evidence = label_result.get("evidence", ["", "", ""])
         final_governance = _csv_governance_for_label(label_result)
         final_saved_label = ""
+        save_status = ""
+        review_cooldown_until = ""
 
         if args.save_label and not args.dry_run:
             saved, save_status = save_label_result(
@@ -1848,6 +1882,24 @@ def main():
                 "invalid_review_replacement_not_saved",
             }:
                 print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
+            if dim_stats.get("selection_mode") == "review" and save_status in {
+                "updated_review_label_cooldown_scheduled",
+                "repair_cooldown_scheduled",
+                "invalid_review_replacement_not_saved",
+            }:
+                review_cooldown_until = _format_review_cooldown_until(args.repair_cooldown_days)
+                review_cooldown_events.append(
+                    {
+                        "dimension": dimension,
+                        "status": save_status,
+                        "cooldown_until": review_cooldown_until,
+                    }
+                )
+                print(
+                    f"ℹ️ Review dim {dimension} remains unresolved; "
+                    f"cooldown expiration date: {review_cooldown_until}",
+                    flush=True,
+                )
 
         if args.export_csv:
             csv_rows.append(
@@ -1896,6 +1948,7 @@ def main():
                     "final_explainable": final_governance["explainable"],
                     "final_needs_review": final_governance["needs_review"],
                     "final_display_label": final_governance["display_label"],
+                    "review_cooldown_until": review_cooldown_until,
                     "label": generated_label,
                     "label_confidence": label_result.get("label_confidence", ""),
                     "label_type": final_governance["label_type"],
@@ -1927,6 +1980,19 @@ def main():
                 }
             )
         conn.commit()
+
+    if review_cooldown_events:
+        print(
+            "Review unresolved dimensions placed on cooldown: "
+            f"{len(review_cooldown_events)}",
+            flush=True,
+        )
+        for event in review_cooldown_events:
+            print(
+                f"  Dimension {event['dimension']} | {event['status']} | "
+                f"cooldown expiration date: {event['cooldown_until']}",
+                flush=True,
+            )
 
     if args.export_csv:
         with open(args.export_csv, "w", newline="", encoding="utf-8") as handle:
