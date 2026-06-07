@@ -507,6 +507,8 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     label_dim_type = get_setting_value("pipeline.label_dim_type", default="all")
     label_coverage_share = get_setting_value("pipeline.label_coverage_share", default=0.80)
     refresh_existing_labels = get_setting_value("pipeline.refresh_existing_labels", default=False)
+    if str(label_selection_mode) not in {"importance", "coverage", "hybrid"}:
+        label_selection_mode = "coverage"
 
     stages = [
         ("tautulli_incremental", [py, f"{root}/fetch_tautulli_data.py", "--mode", "incremental"]),

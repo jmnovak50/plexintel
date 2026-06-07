@@ -314,9 +314,10 @@ class AppSettingsTests(unittest.TestCase):
         self.assertEqual(mode_definition.label, "Label Selection Mode")
         self.assertEqual(mode_definition.value_type, "string")
         self.assertEqual(mode_definition.default, "coverage")
-        self.assertEqual(mode_definition.choices, ("importance", "coverage", "hybrid", "review"))
+        self.assertEqual(mode_definition.choices, ("importance", "coverage", "hybrid"))
         self.assertEqual(app_settings.parse_value(mode_definition, "hybrid"), "hybrid")
-        self.assertEqual(app_settings.parse_value(mode_definition, "review"), "review")
+        with self.assertRaises(app_settings.SettingsValidationError):
+            app_settings.parse_value(mode_definition, "review")
 
         self.assertEqual(limit_definition.label, "Label Batch Limit")
         self.assertEqual(limit_definition.value_type, "integer")

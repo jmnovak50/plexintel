@@ -150,7 +150,7 @@ class PipelineStageTests(unittest.TestCase):
         self.assertEqual(batch_label[batch_label.index("--limit") + 1], "40")
         self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "user")
 
-    def test_build_pipeline_stages_passes_review_mode_without_hybrid_share(self):
+    def test_build_pipeline_stages_does_not_use_review_mode_for_scheduled_labeling(self):
         values = {
             "pipeline.labeling_enabled": True,
             "pipeline.label_selection_mode": "review",
@@ -167,7 +167,7 @@ class PipelineStageTests(unittest.TestCase):
             stages = pipeline_service.build_pipeline_stages()
 
         batch_label = dict(stages)["batch_label"]
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "review")
+        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "coverage")
         self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
         self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
         self.assertNotIn("--coverage_share", batch_label)

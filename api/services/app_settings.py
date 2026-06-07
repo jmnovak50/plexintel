@@ -1088,12 +1088,12 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "string",
         default="coverage",
         env_aliases=("PIPELINE_LABEL_SELECTION_MODE",),
-        choices=("importance", "coverage", "hybrid", "review"),
+        choices=("importance", "coverage", "hybrid"),
         description=(
             "Automatic dimension selection strategy for scheduled batch labeling. coverage is the daily default because "
             "it only targets dimensions that can unlock themes for SHAP-enabled recommendation cards. importance and "
-            "hybrid are better suited to broader label expansion runs. review targets existing labels marked for "
-            "governance review."
+            "hybrid are better suited to broader label expansion runs. Governance review is a manual labeling mode and "
+            "is not used by scheduled pipeline jobs."
         ),
     ),
     _setting(
@@ -1133,7 +1133,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         maximum=1.0,
         description=(
             "Hybrid-mode share of the label batch allocated to coverage-driven dimensions. Ignored when selection mode "
-            "is coverage, importance, or review."
+            "is coverage or importance."
         ),
     ),
     _setting(
