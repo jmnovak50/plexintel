@@ -34,6 +34,14 @@ CSV_FIELDNAMES = [
     "selection_mode",
     "label_repair_status",
     "selection_reason",
+    "existing_label",
+    "existing_display_label",
+    "existing_label_type",
+    "existing_explainable",
+    "existing_needs_review",
+    "last_reviewed_at",
+    "review_attempt_count",
+    "next_review_at",
     "unlock_count_total",
     "marginal_unlock_count",
     "marginal_weighted_unlock_score",
@@ -45,8 +53,12 @@ CSV_FIELDNAMES = [
     "prompt_text",
     "label_provider",
     "label_model",
-    "label",
+    "proposed_label",
+    "proposed_label_confidence",
+    "proposed_label_type",
     "gpt_label",
+    "final_saved_label",
+    "label",
     "label_confidence",
     "label_type",
     "coverage_high_count",
@@ -665,7 +677,7 @@ def _review_row_to_dict(row) -> dict:
             "existing_display_label",
             "existing_label_type",
             "existing_explainable",
-            "needs_review",
+            "existing_needs_review",
             "last_reviewed_at",
             "review_attempt_count",
             "next_review_at",
@@ -679,6 +691,7 @@ def _review_row_to_dict(row) -> dict:
         normalized = dict(zip(fields, row))
 
     dimension = int(normalized["dimension"])
+    existing_needs_review = normalized.get("existing_needs_review", normalized.get("needs_review"))
     normalized.update(
         {
             "dimension": dimension,
@@ -686,6 +699,8 @@ def _review_row_to_dict(row) -> dict:
             "label_repair_status": "review_label",
             "selection_reason": "needs_review",
             "side": get_dimension_mode(dimension),
+            "existing_needs_review": existing_needs_review,
+            "needs_review": existing_needs_review,
             "usage_count": int(normalized.get("usage_count") or 0),
             "sum_abs_shap": float(normalized.get("sum_abs_shap") or 0.0),
             "avg_abs_shap": float(normalized.get("avg_abs_shap") or 0.0),
@@ -760,7 +775,7 @@ def get_review_dimension_candidates(cur, limit=25, dim_type="all") -> list[dict]
             el.display_label AS existing_display_label,
             el.label_type AS existing_label_type,
             el.explainable AS existing_explainable,
-            el.needs_review,
+            el.needs_review AS existing_needs_review,
             el.last_reviewed_at,
             COALESCE(el.review_attempt_count, 0) AS review_attempt_count,
             el.next_review_at,
@@ -1732,6 +1747,13 @@ def main():
             positive_df,
             negative_df,
             dimension_mode=mode,
+            existing_label=dim_stats.get("existing_label") if dim_stats.get("selection_mode") == "review" else None,
+            existing_display_label=(
+                dim_stats.get("existing_display_label") if dim_stats.get("selection_mode") == "review" else None
+            ),
+            existing_label_type=(
+                dim_stats.get("existing_label_type") if dim_stats.get("selection_mode") == "review" else None
+            ),
         )
         skipped_reason = prompt_bundle["skipped_reason"]
         label_result = _default_label_result(skipped_reason)
@@ -1764,6 +1786,27 @@ def main():
 
         generated_label = label_result["label"]
         evidence = label_result.get("evidence", ["", "", ""])
+        final_saved_label = ""
+
+        if args.save_label and not args.dry_run:
+            saved, save_status = save_label_result(
+                cur,
+                dimension,
+                label_result,
+                label_repair_status=dim_stats.get("label_repair_status", ""),
+                selection_reason=dim_stats.get("selection_reason", ""),
+                repair_cooldown_days=args.repair_cooldown_days,
+                review_mode=dim_stats.get("selection_mode") == "review",
+            )
+            if saved:
+                final_saved_label = generated_label
+                print(f"✅ Saved label for dim {dimension}: {save_status}", flush=True)
+            elif save_status in {
+                "repair_cooldown_scheduled",
+                "non_semantic_repair_not_saved",
+                "invalid_review_replacement_not_saved",
+            }:
+                print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
 
         if args.export_csv:
             csv_rows.append(
@@ -1772,6 +1815,14 @@ def main():
                     "selection_mode": dim_stats.get("selection_mode", args.selection_mode),
                     "label_repair_status": dim_stats.get("label_repair_status", ""),
                     "selection_reason": dim_stats.get("selection_reason", ""),
+                    "existing_label": dim_stats.get("existing_label", ""),
+                    "existing_display_label": dim_stats.get("existing_display_label", ""),
+                    "existing_label_type": dim_stats.get("existing_label_type", ""),
+                    "existing_explainable": dim_stats.get("existing_explainable", ""),
+                    "existing_needs_review": dim_stats.get("existing_needs_review", dim_stats.get("needs_review", "")),
+                    "last_reviewed_at": dim_stats.get("last_reviewed_at", ""),
+                    "review_attempt_count": dim_stats.get("review_attempt_count", ""),
+                    "next_review_at": dim_stats.get("next_review_at", ""),
                     "unlock_count_total": dim_stats.get("unlock_count_total", ""),
                     "marginal_unlock_count": dim_stats.get("marginal_unlock_count", ""),
                     "marginal_weighted_unlock_score": dim_stats.get("marginal_weighted_unlock_score", ""),
@@ -1792,8 +1843,12 @@ def main():
                     "prompt_text": prompt_bundle["prompt_text"],
                     "label_provider": provider_name or "",
                     "label_model": model_name or "",
-                    "label": generated_label,
+                    "proposed_label": generated_label,
+                    "proposed_label_confidence": label_result.get("label_confidence", ""),
+                    "proposed_label_type": label_result.get("label_type", ""),
                     "gpt_label": generated_label,
+                    "final_saved_label": final_saved_label,
+                    "label": generated_label,
                     "label_confidence": label_result.get("label_confidence", ""),
                     "label_type": label_result.get("label_type", ""),
                     "coverage_high_count": label_result.get("coverage_high_count"),
@@ -1820,25 +1875,6 @@ def main():
                     "stats_source": dim_stats.get("stats_source", "unknown"),
                 }
             )
-
-        if args.save_label and not args.dry_run:
-            saved, save_status = save_label_result(
-                cur,
-                dimension,
-                label_result,
-                label_repair_status=dim_stats.get("label_repair_status", ""),
-                selection_reason=dim_stats.get("selection_reason", ""),
-                repair_cooldown_days=args.repair_cooldown_days,
-                review_mode=dim_stats.get("selection_mode") == "review",
-            )
-            if saved:
-                print(f"✅ Saved label for dim {dimension}: {save_status}", flush=True)
-            elif save_status in {
-                "repair_cooldown_scheduled",
-                "non_semantic_repair_not_saved",
-                "invalid_review_replacement_not_saved",
-            }:
-                print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
         conn.commit()
 
     if args.export_csv:

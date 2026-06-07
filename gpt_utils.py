@@ -79,6 +79,7 @@ Dimension type:
 Dimension-specific guidance:
 {dimension_specific_guidance}
 
+{review_context}
 Rules:
 - Find the strongest reusable semantic separator between HIGH and LOW examples.
 - Use all available evidence: titles, genres, media type, plot hints, and cast/director only when they reveal an obvious cluster.
@@ -741,6 +742,32 @@ def _get_dimension_guidance_text(dimension_mode: str) -> str:
     )
 
 
+def _format_review_context(
+    existing_label: str | None = None,
+    existing_display_label: str | None = None,
+    existing_label_type: str | None = None,
+) -> str:
+    if not any(
+        _clean_whitespace(value)
+        for value in (existing_label, existing_display_label, existing_label_type)
+    ):
+        return ""
+
+    return f"""
+Review context:
+Existing label: {_clean_whitespace(existing_label)}
+Existing display label: {_clean_whitespace(existing_display_label)}
+Existing label type: {_clean_whitespace(existing_label_type)}
+
+Review instructions:
+- Re-evaluate the existing label using only the current HIGH/LOW evidence.
+- The HIGH/LOW examples are the source of truth; treat the existing label only as governance context.
+- Do not preserve the existing wording unless the evidence independently supports it.
+- UNCLEAR / MIXED SIGNAL remains a valid outcome.
+- Do not force a replacement merely because this row is in review mode.
+""".strip()
+
+
 def build_dimension_prompt(
     dimension: int,
     positive_df: pd.DataFrame,
@@ -749,6 +776,9 @@ def build_dimension_prompt(
     min_valid_items: int = MIN_VALID_ITEMS,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
+    existing_label: str | None = None,
+    existing_display_label: str | None = None,
+    existing_label_type: str | None = None,
 ) -> dict:
     positive_bundle = prepare_dimension_items(
         positive_df,
@@ -789,6 +819,11 @@ def build_dimension_prompt(
         dimension=dimension,
         dimension_scope=_get_dimension_scope_text(dimension_mode),
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
+        review_context=_format_review_context(
+            existing_label=existing_label,
+            existing_display_label=existing_display_label,
+            existing_label_type=existing_label_type,
+        ),
         min_valid_items=min_valid_items,
         minimum_label_coverage_percent=minimum_label_coverage_percent,
         maximum_low_overlap_percent=maximum_low_overlap_percent,
@@ -834,11 +869,19 @@ def _build_user_prompt(
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
     high_item_count: int = DEFAULT_TOP_POSITIVE_ITEMS,
     low_item_count: int = DEFAULT_TOP_NEGATIVE_ITEMS,
+    existing_label: str | None = None,
+    existing_display_label: str | None = None,
+    existing_label_type: str | None = None,
 ) -> str:
     return USER_PROMPT_TEMPLATE.format(
         dimension=dimension,
         dimension_scope=_get_dimension_scope_text(dimension_mode),
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
+        review_context=_format_review_context(
+            existing_label=existing_label,
+            existing_display_label=existing_display_label,
+            existing_label_type=existing_label_type,
+        ),
         min_valid_items=min_valid_items,
         minimum_label_coverage_percent=minimum_label_coverage_percent,
         maximum_low_overlap_percent=maximum_low_overlap_percent,

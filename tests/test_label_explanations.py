@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 import unittest
 import io
 import sys
+import tempfile
 import types
 from datetime import datetime, timedelta, timezone
 from contextlib import redirect_stdout
@@ -897,6 +899,41 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(prompt_bundle["minimum_label_coverage_percent"], 80)
         self.assertEqual(prompt_bundle["maximum_low_overlap_percent"], 35)
 
+    def test_review_prompt_includes_existing_governance_without_forcing_replacement(self):
+        positive_df = pd.DataFrame(
+            [
+                {"title": "Spy One", "year": 2001, "media_type": "movie", "genre_tags": "Action, Spy"},
+                {"title": "Spy Two", "year": 2002, "media_type": "movie", "genre_tags": "Action, Spy"},
+                {"title": "Spy Three", "year": 2003, "media_type": "movie", "genre_tags": "Action, Spy"},
+            ]
+        )
+        negative_df = pd.DataFrame(
+            [
+                {"title": "Quiet Drama", "year": 2004, "media_type": "movie", "genre_tags": "Drama"},
+                {"title": "Slow Romance", "year": 2005, "media_type": "movie", "genre_tags": "Romance"},
+            ]
+        )
+
+        prompt_bundle = gpt_utils.build_dimension_prompt(
+            12,
+            positive_df,
+            negative_df,
+            min_valid_items=1,
+            existing_label="prestige tv drama episodes",
+            existing_display_label="prestige TV drama",
+            existing_label_type="soft_structural",
+        )
+        prompt_text = prompt_bundle["prompt_text"]
+
+        self.assertIn("Existing label: prestige tv drama episodes", prompt_text)
+        self.assertIn("Existing display label: prestige TV drama", prompt_text)
+        self.assertIn("Existing label type: soft_structural", prompt_text)
+        self.assertIn("Re-evaluate the existing label using only the current HIGH/LOW evidence.", prompt_text)
+        self.assertIn("The HIGH/LOW examples are the source of truth", prompt_text)
+        self.assertIn("Do not preserve the existing wording unless the evidence independently supports it.", prompt_text)
+        self.assertIn("UNCLEAR / MIXED SIGNAL remains a valid outcome.", prompt_text)
+        self.assertIn("Do not force a replacement merely because this row is in review mode.", prompt_text)
+
     def test_json_label_response_normalizes_coverage_fields(self):
         result = gpt_utils._extract_label_result_from_response(
             """
@@ -1094,6 +1131,158 @@ class LabelCoveragePromptTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "model not found"):
                     gpt_utils.call_llm_for_label_result("prompt", max_retries=1)
+
+
+class ReviewCsvExportTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self):
+            self.executed = []
+            self.closed = False
+
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params))
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            self.closed = True
+
+    class FakeConnection:
+        def __init__(self):
+            self.cursor_obj = ReviewCsvExportTests.FakeCursor()
+            self.commits = 0
+            self.closed = False
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def commit(self):
+            self.commits += 1
+
+        def close(self):
+            self.closed = True
+
+    def test_review_dry_run_export_keeps_existing_governance_and_proposals_separate(self):
+        reviewed_at = datetime(2026, 6, 1, 8, 30)
+        next_review_at = datetime(2026, 6, 10, 8, 30)
+        selected = [
+            {
+                "dimension": 12,
+                "selection_mode": "review",
+                "label_repair_status": "review_label",
+                "selection_reason": "needs_review",
+                "existing_label": "prestige tv drama episodes",
+                "existing_display_label": "prestige TV drama",
+                "existing_label_type": "soft_structural",
+                "existing_explainable": True,
+                "existing_needs_review": True,
+                "last_reviewed_at": reviewed_at,
+                "review_attempt_count": 2,
+                "next_review_at": next_review_at,
+                "usage_count": 10,
+                "sum_abs_shap": 5.0,
+                "avg_abs_shap": 0.5,
+                "combined_score": 9.0,
+                "user_count": 3,
+                "stats_source": "review_aggregate",
+            }
+        ]
+        prompt_bundle = {
+            "prompt_text": "Review context:\nExisting label: prestige tv drama episodes",
+            "summary": "summary",
+            "skipped_reason": "",
+            "valid_positive_count": 6,
+            "valid_negative_count": 4,
+            "flagged_item_count": 0,
+        }
+        fake_conn = self.FakeConnection()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "review.csv"
+            argv = [
+                "batch_label_embeddings.py",
+                "--selection_mode",
+                "review",
+                "--dry_run",
+                "--save_label",
+                "--export_csv",
+                str(csv_path),
+            ]
+            with patch.object(sys, "argv", argv):
+                with patch.object(batch_label_embeddings, "ensure_app_schema"):
+                    with patch.object(batch_label_embeddings, "connect_db", return_value=fake_conn):
+                        with patch.object(
+                            batch_label_embeddings,
+                            "select_automatic_dimensions",
+                            return_value=(selected, {"review_diagnostics": {}}),
+                        ):
+                            with patch.object(
+                                batch_label_embeddings,
+                                "_fetch_dimension_samples",
+                                return_value=("media", pd.DataFrame(), pd.DataFrame()),
+                            ):
+                                with patch.object(
+                                    batch_label_embeddings,
+                                    "build_dimension_prompt",
+                                    return_value=prompt_bundle,
+                                ) as build_prompt:
+                                    with patch.object(
+                                        batch_label_embeddings,
+                                        "save_label_result",
+                                    ) as save_label:
+                                        with patch.object(
+                                            batch_label_embeddings,
+                                            "call_llm_for_label_result",
+                                        ) as call_llm:
+                                            with redirect_stdout(io.StringIO()):
+                                                batch_label_embeddings.main()
+
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        for column in (
+            "existing_label",
+            "existing_display_label",
+            "existing_label_type",
+            "existing_explainable",
+            "existing_needs_review",
+            "last_reviewed_at",
+            "review_attempt_count",
+            "next_review_at",
+            "proposed_label",
+            "gpt_label",
+            "final_saved_label",
+        ):
+            self.assertIn(column, row)
+
+        self.assertEqual(row["existing_label"], "prestige tv drama episodes")
+        self.assertEqual(row["existing_display_label"], "prestige TV drama")
+        self.assertEqual(row["existing_label_type"], "soft_structural")
+        self.assertEqual(row["existing_explainable"], "True")
+        self.assertEqual(row["existing_needs_review"], "True")
+        self.assertEqual(row["last_reviewed_at"], "2026-06-01 08:30:00")
+        self.assertEqual(row["review_attempt_count"], "2")
+        self.assertEqual(row["next_review_at"], "2026-06-10 08:30:00")
+        self.assertEqual(row["proposed_label"], "")
+        self.assertEqual(row["gpt_label"], "")
+        self.assertEqual(row["final_saved_label"], "")
+        self.assertEqual(row["label"], "")
+        self.assertEqual(row["label_type"], "")
+        self.assertEqual(row["proposed_label_type"], "")
+
+        build_prompt.assert_called_once()
+        self.assertEqual(build_prompt.call_args.kwargs["existing_label"], "prestige tv drama episodes")
+        self.assertEqual(build_prompt.call_args.kwargs["existing_display_label"], "prestige TV drama")
+        self.assertEqual(build_prompt.call_args.kwargs["existing_label_type"], "soft_structural")
+        save_label.assert_not_called()
+        call_llm.assert_not_called()
+        self.assertEqual(fake_conn.cursor_obj.executed, [])
 
 
 if __name__ == "__main__":
