@@ -30,6 +30,8 @@ interface Recommendation {
   predicted_probability: number;
   genres: string | null;
   semantic_themes: string | null;
+  title_traits: string[];
+  taste_match: string[];
   season_number: number | null;
   episode_number: number | null;
   show_rating_key?: number | null;
@@ -178,38 +180,6 @@ function feedbackActionLabel(action: FeedbackAction | null | undefined) {
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return count === 1 ? singular : plural;
-}
-
-function splitSemanticThemes(semanticThemes: string) {
-  const themes: string[] = [];
-  let current = '';
-  let parenDepth = 0;
-
-  for (const char of semanticThemes) {
-    if (char === '(') {
-      parenDepth += 1;
-    } else if (char === ')') {
-      parenDepth = Math.max(0, parenDepth - 1);
-    }
-
-    if (char === ',' && parenDepth === 0) {
-      const theme = current.trim();
-      if (theme) {
-        themes.push(theme);
-      }
-      current = '';
-      continue;
-    }
-
-    current += char;
-  }
-
-  const finalTheme = current.trim();
-  if (finalTheme) {
-    themes.push(finalTheme);
-  }
-
-  return themes;
 }
 
 const BULK_FEEDBACK_ACTIONS: Array<{
@@ -518,27 +488,68 @@ function RecommendationPoster({
   );
 }
 
-function RecommendationThemeChips({
-  semanticThemes,
-  compact = false,
+function RecommendationChipGroup({
+  label,
+  chips,
+  chipClassName,
+  compact,
 }: {
-  semanticThemes: string | null;
-  compact?: boolean;
+  label: string;
+  chips: string[];
+  chipClassName: string;
+  compact: boolean;
 }) {
-  if (!semanticThemes) {
+  if (chips.length === 0) {
     return null;
   }
 
   return (
-    <div className="flex flex-wrap gap-1">
-      {splitSemanticThemes(semanticThemes).map((tag, index) => (
-        <span
-          key={`${tag}-${index}`}
-          className={`inline-block min-w-0 max-w-full whitespace-normal break-words rounded-full bg-blue-100 text-left leading-snug text-blue-800 ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
-        >
-          {tag}
-        </span>
-      ))}
+    <div className="min-w-0">
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">{label}</p>
+      <div className="flex flex-wrap gap-1">
+        {chips.map((chip, index) => (
+          <span
+            key={`${chip}-${index}`}
+            className={`inline-block min-w-0 max-w-full whitespace-normal break-words rounded-full text-left leading-snug ${chipClassName} ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
+          >
+            {chip}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RecommendationExplanation({
+  titleTraits,
+  tasteMatch,
+  compact = false,
+}: {
+  titleTraits: string[];
+  tasteMatch: string[];
+  compact?: boolean;
+}) {
+  const safeTitleTraits = Array.isArray(titleTraits) ? titleTraits : [];
+  const safeTasteMatch = Array.isArray(tasteMatch) ? tasteMatch : [];
+
+  if (safeTitleTraits.length === 0 && safeTasteMatch.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <RecommendationChipGroup
+        label="Title Traits"
+        chips={safeTitleTraits}
+        chipClassName="bg-blue-100 text-blue-800"
+        compact={compact}
+      />
+      <RecommendationChipGroup
+        label="Taste Match"
+        chips={safeTasteMatch}
+        chipClassName="bg-emerald-100 text-emerald-800"
+        compact={compact}
+      />
     </div>
   );
 }
@@ -772,7 +783,14 @@ function DesktopRecommendationsTable({
                   <td className="px-4 py-2">{rec.year ?? '—'}</td>
                   <td className="px-4 py-2">{rec.genres || '—'}</td>
                   <td className="px-4 py-2">
-                    <RecommendationThemeChips semanticThemes={rec.semantic_themes} />
+                    {(rec.title_traits?.length ?? 0) === 0 && (rec.taste_match?.length ?? 0) === 0 ? (
+                      '—'
+                    ) : (
+                      <RecommendationExplanation
+                        titleTraits={rec.title_traits}
+                        tasteMatch={rec.taste_match}
+                      />
+                    )}
                   </td>
                   <td className="px-4 py-2">
                     <RecommendationScore rec={rec} isPending={isPending} statusMessage={statusMessage} />
@@ -887,10 +905,14 @@ function MobileRecommendationsList({
               )}
             </div>
 
-            {rec.semantic_themes && (
+            {((rec.title_traits?.length ?? 0) > 0 || (rec.taste_match?.length ?? 0) > 0) && (
               <div className="mt-4">
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Why this?</p>
-                <RecommendationThemeChips semanticThemes={rec.semantic_themes} compact />
+                <RecommendationExplanation
+                  titleTraits={rec.title_traits}
+                  tasteMatch={rec.taste_match}
+                  compact
+                />
               </div>
             )}
 

@@ -27,6 +27,51 @@ SORTABLE_COLUMNS = {
     "score_band",
 }
 
+# Combined embedding layout: media-side dimensions occupy 0-767 and
+# user-preference dimensions occupy 768-1535.
+TITLE_TRAIT_DIMENSION_PREDICATE = "si.dimension >= 0 AND si.dimension < 768"
+TASTE_MATCH_DIMENSION_PREDICATE = "si.dimension >= 768 AND si.dimension < 1536"
+EXPLANATION_LABEL_LIMIT = 3
+
+
+def _positive_label_array_sql(
+    dimension_predicate: str,
+    *,
+    rating_key_column: str = "recs.rating_key",
+    username_column: str = "recs.username",
+    limit: int = EXPLANATION_LABEL_LIMIT,
+) -> str:
+    """Return a correlated subquery yielding the top positive, explainable SHAP
+    labels as ``text[]``.
+
+    Labels are grouped by ``display_label`` and ordered by their max positive
+    SHAP value (descending). ``dimension_predicate`` restricts which embedding
+    dimensions contribute, letting callers separate media-side title traits from
+    user-side taste matches. Missing labels collapse to an empty array rather
+    than NULL so downstream consumers always receive an array.
+    """
+    return f"""(
+                SELECT COALESCE(
+                    ARRAY_AGG(top_labels.display_label ORDER BY top_labels.max_shap DESC),
+                    ARRAY[]::text[]
+                )
+                FROM (
+                    SELECT el.display_label, MAX(si.shap_value) AS max_shap
+                    FROM public.shap_impact si
+                    JOIN public.embedding_labels el ON si.dimension = el.dimension
+                    WHERE si.rating_key = {rating_key_column}
+                      AND si.user_id = {username_column}
+                      AND si.shap_value > 0
+                      AND el.explainable IS TRUE
+                      AND el.display_label IS NOT NULL
+                      AND BTRIM(el.display_label) <> ''
+                      AND {dimension_predicate}
+                    GROUP BY el.display_label
+                    ORDER BY MAX(si.shap_value) DESC
+                    LIMIT {int(limit)}
+                ) top_labels
+            )"""
+
 
 def _normalize_sort(sort: Optional[list[str]]) -> list[tuple[str, str]]:
     normalized: list[tuple[str, str]] = []
@@ -268,6 +313,8 @@ def _build_recommendations_query(
                 sr.show_title AS title,
                 vr.visible_rollup_score AS predicted_probability,
                 NULL::text AS semantic_themes,
+                ARRAY[]::text[] AS title_traits,
+                ARRAY[]::text[] AS taste_match,
                 sr.year,
                 sr.genres,
                 sr.show_title,
@@ -326,6 +373,8 @@ def _build_recommendations_query(
                 sr.season_title AS title,
                 vr.visible_rollup_score AS predicted_probability,
                 NULL::text AS semantic_themes,
+                ARRAY[]::text[] AS title_traits,
+                ARRAY[]::text[] AS taste_match,
                 sr.year,
                 sr.genres,
                 sr.show_title,
@@ -379,7 +428,9 @@ def _build_recommendations_query(
         sql += _build_order_clause(sort)
         return sql, params
 
-    sql = """
+    title_traits_sql = _positive_label_array_sql(TITLE_TRAIT_DIMENSION_PREDICATE)
+    taste_match_sql = _positive_label_array_sql(TASTE_MATCH_DIMENSION_PREDICATE)
+    sql = f"""
         WITH latest_feedback AS (
             SELECT DISTINCT ON (rating_key)
                 rating_key,
@@ -397,6 +448,8 @@ def _build_recommendations_query(
             recs.title,
             recs.predicted_probability,
             recs.semantic_themes,
+            {title_traits_sql} AS title_traits,
+            {taste_match_sql} AS taste_match,
             recs.year,
             recs.genres,
             recs.show_title,

@@ -39,6 +39,11 @@ from api.services.recommendation_filter_service import (
     leaf_feedback_join,
     leaf_feedback_visibility_clause,
 )
+from api.services.recommendation_query_service import (
+    TASTE_MATCH_DIMENSION_PREDICATE,
+    TITLE_TRAIT_DIMENSION_PREDICATE,
+    _positive_label_array_sql,
+)
 
 
 @asynccontextmanager
@@ -157,10 +162,14 @@ async def get_recommendations(
         conn = connect_db()
         cur = conn.cursor()
 
-        query = latest_feedback_cte() + """
+        title_traits_sql = _positive_label_array_sql(TITLE_TRAIT_DIMENSION_PREDICATE)
+        taste_match_sql = _positive_label_array_sql(TASTE_MATCH_DIMENSION_PREDICATE)
+        query = latest_feedback_cte() + f"""
             SELECT recs.rating_key, recs.username, recs.friendly_name, recs.scored_at, recs.media_type,
                    recs.show_title, recs.title, recs.season_number, recs.episode_number, recs.year,
-                   recs.genres, recs.predicted_probability, recs.semantic_themes
+                   recs.genres, recs.predicted_probability, recs.semantic_themes,
+                   {title_traits_sql} AS title_traits,
+                   {taste_match_sql} AS taste_match
             FROM expanded_recs_w_label_v recs
         """ + leaf_feedback_join("recs") + """
             WHERE recs.username = %s
@@ -172,6 +181,10 @@ async def get_recommendations(
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         results = [dict(zip(columns, row)) for row in rows]
+        for result in results:
+            for theme_field in ("title_traits", "taste_match"):
+                value = result.get(theme_field)
+                result[theme_field] = list(value) if isinstance(value, (list, tuple)) else []
 
         cur.close()
         conn.close()

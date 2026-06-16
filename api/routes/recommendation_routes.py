@@ -37,6 +37,9 @@ def _decorate_recommendation_rows(rows: list[dict]) -> None:
             server_identifier=plex_context["server_identifier"],
         )
         row.pop("poster_path", None)
+        for theme_field in ("title_traits", "taste_match"):
+            value = row.get(theme_field)
+            row[theme_field] = list(value) if isinstance(value, (list, tuple)) else []
 
 
 def get_default_display_threshold() -> float:

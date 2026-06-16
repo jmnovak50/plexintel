@@ -4,6 +4,47 @@ import unittest
 from unittest.mock import patch
 
 from api.routes import recommendation_routes
+from api.services.recommendation_query_service import _build_recommendations_query
+
+
+class RecommendationExplanationThemeSqlTests(unittest.TestCase):
+    def _build(self, view: str, **kwargs):
+        return _build_recommendations_query(
+            username="member",
+            view=view,
+            show_rating_key=kwargs.get("show_rating_key"),
+            season_rating_key=kwargs.get("season_rating_key"),
+            search=None,
+            sort=None,
+            display_threshold=0.70,
+        )
+
+    def test_leaf_query_selects_split_theme_arrays_with_dimension_predicates(self):
+        for view in ("all", "movies", "episodes"):
+            with self.subTest(view=view):
+                sql, _params = self._build(view)
+                self.assertIn("AS title_traits", sql)
+                self.assertIn("AS taste_match", sql)
+                self.assertIn("recs.semantic_themes", sql)
+                self.assertIn("si.dimension >= 0 AND si.dimension < 768", sql)
+                self.assertIn("si.dimension >= 768 AND si.dimension < 1536", sql)
+                self.assertIn("ARRAY_AGG(top_labels.display_label ORDER BY top_labels.max_shap DESC)", sql)
+                self.assertIn("GROUP BY el.display_label", sql)
+                self.assertIn("si.shap_value > 0", sql)
+                self.assertIn("el.explainable IS TRUE", sql)
+                self.assertIn("LIMIT 3", sql)
+
+    def test_show_rollups_return_empty_theme_arrays(self):
+        sql, _params = self._build("shows")
+        self.assertIn("ARRAY[]::text[] AS title_traits", sql)
+        self.assertIn("ARRAY[]::text[] AS taste_match", sql)
+        self.assertNotIn("si.dimension", sql)
+
+    def test_season_rollups_return_empty_theme_arrays(self):
+        sql, _params = self._build("seasons", show_rating_key=15965)
+        self.assertIn("ARRAY[]::text[] AS title_traits", sql)
+        self.assertIn("ARRAY[]::text[] AS taste_match", sql)
+        self.assertNotIn("si.dimension", sql)
 
 
 class RecommendationPagingTests(unittest.TestCase):
@@ -65,6 +106,24 @@ class RecommendationPagingTests(unittest.TestCase):
             rows[0]["plex_item_url"],
             "https://app.plex.tv/desktop/#!/server/server/details?key=%2Flibrary%2Fmetadata%2F1",
         )
+
+    def test_decorate_rows_normalizes_missing_theme_arrays(self):
+        rows = [
+            {"rating_key": 1, "title_traits": ("Heist plot",), "taste_match": None},
+            {"rating_key": 2},
+        ]
+
+        with patch.object(
+            recommendation_routes,
+            "get_plex_item_url_context",
+            return_value={"web_base_url": "", "server_identifier": "server"},
+        ):
+            recommendation_routes._decorate_recommendation_rows(rows)
+
+        self.assertEqual(rows[0]["title_traits"], ["Heist plot"])
+        self.assertEqual(rows[0]["taste_match"], [])
+        self.assertEqual(rows[1]["title_traits"], [])
+        self.assertEqual(rows[1]["taste_match"], [])
 
     def test_feedback_rollup_tracks_suppressing_descendants(self):
         sql = recommendation_routes._feedback_rollup_cte("show_rating_key", "group_rating_key")
