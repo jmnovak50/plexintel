@@ -32,9 +32,61 @@ WATCH_EMBED_MIN_ENGAGEMENT = get_setting_value("training.watch_embed_min_engagem
 DB_URL = get_database_url()
 SHAP_TV_DISPLAY_LEVEL = "show"
 TV_ROLLUP_TOP_FRACTION = 0.20
+RECOMMENDATIONS_TABLE = "recommendations"
+RECOMMENDATIONS_STAGING_TABLE = "recommendations_new"
+RECOMMENDATION_SWAP_COLUMNS = [
+    "username",
+    "rating_key",
+    "predicted_probability",
+    "model_name",
+    "scored_at",
+    "rank",
+    "was_recommended",
+    "shown_at",
+    "watched_after",
+    "explanation",
+    "cosine_similarity",
+    "embedding_theme",
+]
 
 def get_engine():
     return create_engine(DB_URL)
+
+def prepare_recommendations_staging_table(engine):
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS public.{RECOMMENDATIONS_STAGING_TABLE}"))
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE public.{RECOMMENDATIONS_STAGING_TABLE}
+                (LIKE public.{RECOMMENDATIONS_TABLE} INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+                """
+            )
+        )
+        conn.execute(text(f"ALTER TABLE public.{RECOMMENDATIONS_STAGING_TABLE} ALTER COLUMN id DROP DEFAULT"))
+        conn.execute(text(f"ALTER TABLE public.{RECOMMENDATIONS_STAGING_TABLE} ALTER COLUMN id DROP NOT NULL"))
+    print(f"🧱 Prepared public.{RECOMMENDATIONS_STAGING_TABLE} for staged recommendations")
+
+def drop_recommendations_staging_table(engine):
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS public.{RECOMMENDATIONS_STAGING_TABLE}"))
+
+def swap_recommendations_from_staging(engine):
+    columns_sql = ", ".join(RECOMMENDATION_SWAP_COLUMNS)
+    with engine.begin() as conn:
+        conn.execute(text(f"LOCK TABLE public.{RECOMMENDATIONS_TABLE} IN EXCLUSIVE MODE"))
+        conn.execute(text(f"DELETE FROM public.{RECOMMENDATIONS_TABLE}"))
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO public.{RECOMMENDATIONS_TABLE} ({columns_sql})
+                SELECT {columns_sql}
+                FROM public.{RECOMMENDATIONS_STAGING_TABLE}
+                """
+            )
+        )
+        conn.execute(text(f"DROP TABLE public.{RECOMMENDATIONS_STAGING_TABLE}"))
+    print("🔁 Atomically swapped staged recommendations into public.recommendations")
 
 def ensure_shap_snapshot_schema(conn):
     """
@@ -587,7 +639,12 @@ def cosine_similarity_batch(user_embeddings, media_embeddings):
     similarities = dot_products / (norms_user * norms_media)
     return similarities
 
-def score_and_store(username, skip_shap=False):
+def score_and_store(
+    username,
+    skip_shap=False,
+    recommendations_table=RECOMMENDATIONS_TABLE,
+    replace_existing=True,
+):
     import shap
     print("📥 Loading model...")
     model = joblib.load("xgb_model.pkl")
@@ -701,9 +758,16 @@ def score_and_store(username, skip_shap=False):
     output = df[['username', 'rating_key', 'predicted_probability', 'model_name', 'scored_at', 'rank', 'cosine_similarity', 'explanation']]
     engine = get_engine()
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM recommendations WHERE username = :username"), {"username": username})
-        output.to_sql("recommendations", conn, if_exists="append", index=False)
-    print(f"✅ Replaced recommendations for {username} with {len(output)} scored items.")
+        if replace_existing:
+            conn.execute(
+                text(f"DELETE FROM public.{RECOMMENDATIONS_TABLE} WHERE username = :username"),
+                {"username": username},
+            )
+        output.to_sql(recommendations_table, conn, if_exists="append", index=False, schema="public")
+    if recommendations_table == RECOMMENDATIONS_TABLE:
+        print(f"✅ Replaced recommendations for {username} with {len(output)} scored items.")
+    else:
+        print(f"✅ Staged recommendations for {username} with {len(output)} scored items.")
     if skip_shap:
         print("⏩ Skipping SHAP impact generation.")
         return None
@@ -798,19 +862,30 @@ if __name__ == "__main__":
 
     if args.all_users:
         engine = get_engine()
-        with engine.begin() as conn:
-            conn.execute(text("TRUNCATE recommendations"))
-        if not args.skip_shap:
-            reset_shap_snapshot_tables()
-        users = get_all_users()
-        print(f"🔁 Scoring for all users: {users}")
-        shap_target_summaries = []
-        for user in users:
-            summary = score_and_store(user, skip_shap=args.skip_shap)
-            if summary:
-                shap_target_summaries.append(summary)
-        if shap_target_summaries:
-            print("\n📊 All-user SHAP targeting summary")
-            print(format_shap_targeting_summary(shap_target_summaries))
+        prepare_recommendations_staging_table(engine)
+        swapped_recommendations = False
+        try:
+            if not args.skip_shap:
+                reset_shap_snapshot_tables()
+            users = get_all_users()
+            print(f"🔁 Scoring for all users: {users}")
+            shap_target_summaries = []
+            for user in users:
+                summary = score_and_store(
+                    user,
+                    skip_shap=args.skip_shap,
+                    recommendations_table=RECOMMENDATIONS_STAGING_TABLE,
+                    replace_existing=False,
+                )
+                if summary:
+                    shap_target_summaries.append(summary)
+            swap_recommendations_from_staging(engine)
+            swapped_recommendations = True
+            if shap_target_summaries:
+                print("\n📊 All-user SHAP targeting summary")
+                print(format_shap_targeting_summary(shap_target_summaries))
+        finally:
+            if not swapped_recommendations:
+                drop_recommendations_staging_table(engine)
     else:
         score_and_store(args.user, skip_shap=args.skip_shap)

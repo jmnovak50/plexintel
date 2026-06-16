@@ -14,6 +14,7 @@ from api.services import pipeline_service
 class FakeCursor:
     def __init__(self, conn):
         self.conn = conn
+        self.closed = False
 
     def __enter__(self):
         return self
@@ -29,6 +30,9 @@ class FakeCursor:
 
     def fetchall(self):
         return self.conn.fetchall_results.pop(0)
+
+    def close(self):
+        self.closed = True
 
 
 class FakeConnection:
@@ -171,6 +175,26 @@ class PipelineStageTests(unittest.TestCase):
         self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
         self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
         self.assertNotIn("--coverage_share", batch_label)
+
+
+class PipelineRefreshStatusTests(unittest.TestCase):
+    def test_fetch_score_model_refresh_status_detects_active_score_stage(self):
+        conn = FakeConnection([{"is_refreshing": True}])
+        cur = conn.cursor()
+
+        self.assertTrue(pipeline_service.fetch_score_model_refresh_status(cur))
+
+        executed_sql = " ".join(sql for sql, _params in conn.executed)
+        self.assertIn("current_stage_key = %s", executed_sql)
+        self.assertEqual(conn.executed[0][1], ("score_model",))
+
+    def test_is_score_model_refreshing_closes_owned_connection(self):
+        conn = FakeConnection([{"is_refreshing": False}])
+
+        with patch.object(pipeline_service, "connect_db", return_value=conn):
+            self.assertFalse(pipeline_service.is_score_model_refreshing())
+
+        self.assertTrue(conn.closed)
 
 
 class PipelineRunTests(unittest.TestCase):

@@ -85,6 +85,32 @@ def _row_value(row: Any, key: str, index: int = 0) -> Any:
     return row[index]
 
 
+def fetch_score_model_refresh_status(cur) -> bool:
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.pipeline_runs
+            WHERE current_stage_key = %s
+              AND status NOT IN ('success', 'failed', 'cancelled')
+        ) AS is_refreshing
+        """,
+        ("score_model",),
+    )
+    row = cur.fetchone()
+    return bool(_row_value(row, "is_refreshing"))
+
+
+def is_score_model_refreshing() -> bool:
+    conn = connect_db(cursor_factory=RealDictCursor)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        return fetch_score_model_refresh_status(cur)
+    finally:
+        cur.close()
+        conn.close()
+
+
 def _env_float(name: str, default: float) -> float:
     raw_value = os.getenv(name, "").strip()
     if not raw_value:

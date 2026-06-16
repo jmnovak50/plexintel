@@ -12,6 +12,7 @@ from api.services.poster_service import (
     get_plex_item_url_context,
 )
 from api.services.app_settings import get_setting_value
+from api.services.pipeline_service import fetch_score_model_refresh_status, is_score_model_refreshing
 from api.services.recommendation_query_service import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -130,11 +131,13 @@ def get_recommendations(
             (plex_username,),
         )
         feedback_keys = [row["rating_key"] for row in cur.fetchall()]
+        is_refreshing = fetch_score_model_refresh_status(cur)
 
         return {
             "username": plex_username,
             "recommendations": rec_rows,
             "last_updated": rec_rows[0]["scored_at"] if rec_rows else None,
+            "is_refreshing": is_refreshing,
             "feedback_keys": feedback_keys,
             "display_threshold": display_threshold,
             "has_more": has_more,
@@ -158,3 +161,12 @@ def get_recommendations(
             cur.close()
         if "conn" in locals() and not conn.closed:
             conn.close()
+
+
+@router.get("/recommendations/refresh-status")
+def get_recommendations_refresh_status(request: Request):
+    token = request.session.get("plex_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    return {"is_refreshing": is_score_model_refreshing()}

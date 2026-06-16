@@ -56,10 +56,15 @@ interface RecommendationsResponse {
   username?: string | null;
   recommendations?: Recommendation[];
   last_updated?: string | null;
+  is_refreshing?: boolean;
   has_more?: boolean;
   next_offset?: number | null;
   limit?: number;
   offset?: number;
+}
+
+interface RecommendationRefreshStatusResponse {
+  is_refreshing?: boolean;
 }
 
 interface FeedbackApiResponse {
@@ -401,11 +406,24 @@ async function loadRecommendationsData({
   return res.json() as Promise<RecommendationsResponse>;
 }
 
+async function loadRecommendationRefreshStatus(signal?: AbortSignal) {
+  const res = await fetch('/api/recommendations/refresh-status', {
+    credentials: 'include',
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(await extractErrorMessage(res, `Failed to load refresh status (${res.status})`));
+  }
+  const data = await res.json() as RecommendationRefreshStatusResponse;
+  return Boolean(data.is_refreshing);
+}
+
 function normalizeRecommendationsResponse(data: RecommendationsResponse) {
   return {
     recommendations: Array.isArray(data.recommendations) ? data.recommendations : [],
     username: typeof data.username === 'string' ? data.username : null,
     lastUpdated: typeof data.last_updated === 'string' ? data.last_updated : null,
+    isRefreshing: Boolean(data.is_refreshing),
     hasMore: Boolean(data.has_more),
     nextOffset: typeof data.next_offset === 'number' ? data.next_offset : null,
   };
@@ -905,6 +923,7 @@ export default function Recommendations() {
   const [plexUser, setPlexUser] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false);
@@ -941,6 +960,7 @@ export default function Recommendations() {
     });
     setPlexUser(normalized.username);
     setLastUpdated(normalized.lastUpdated);
+    setIsRefreshing(normalized.isRefreshing);
     setHasMore(normalized.hasMore);
     setNextOffset(normalized.nextOffset);
   };
@@ -987,6 +1007,40 @@ export default function Recommendations() {
       controller.abort();
     };
   }, [viewMode, selectedShow, selectedSeason, debouncedSearch, minScore, sortOrder]);
+
+  useEffect(() => {
+    let mounted = true;
+    let requestInFlight = false;
+    const controller = new AbortController();
+
+    const refreshStatus = () => {
+      if (requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+      loadRecommendationRefreshStatus(controller.signal)
+        .then((nextIsRefreshing) => {
+          if (!mounted) return;
+          setIsRefreshing(nextIsRefreshing);
+        })
+        .catch((error) => {
+          if (!mounted || controller.signal.aborted) return;
+          console.error(error);
+        })
+        .finally(() => {
+          requestInFlight = false;
+        });
+    };
+
+    refreshStatus();
+    const intervalId = window.setInterval(refreshStatus, 15000);
+
+    return () => {
+      mounted = false;
+      controller.abort();
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -1285,6 +1339,11 @@ export default function Recommendations() {
       {lastUpdated && (
         <div className={`mb-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
           Last updated: {new Date(lastUpdated).toLocaleString()}
+        </div>
+      )}
+      {isRefreshing && (
+        <div className={`mb-4 rounded-md border px-3 py-2 text-sm ${darkMode ? 'border-amber-500/40 bg-amber-950/40 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+          Recommendations are currently being refreshed. You are seeing the last best version.
         </div>
       )}
 

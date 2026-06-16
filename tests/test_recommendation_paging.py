@@ -93,6 +93,9 @@ class RecommendationPagingTests(unittest.TestCase):
             def fetchall(self):
                 return []
 
+            def fetchone(self):
+                return {"is_refreshing": False}
+
             def close(self):
                 self.closed = True
 
@@ -130,6 +133,15 @@ class RecommendationPagingTests(unittest.TestCase):
         self.assertIn("ELSE COALESCE(lf.suppress, FALSE)", rec_sql)
         self.assertIn("END = FALSE", rec_sql)
 
+    def test_refresh_status_route_returns_score_model_status(self):
+        class FakeRequest:
+            session = {"plex_token": "token"}
+
+        with patch.object(recommendation_routes, "is_score_model_refreshing", return_value=True):
+            response = recommendation_routes.get_recommendations_refresh_status(FakeRequest())
+
+        self.assertEqual(response, {"is_refreshing": True})
+
     def test_show_rollups_require_visible_recommendation_descendants(self):
         class FakeRequest:
             session = {"plex_token": "token"}
@@ -145,6 +157,9 @@ class RecommendationPagingTests(unittest.TestCase):
 
             def fetchall(self):
                 return []
+
+            def fetchone(self):
+                return {"is_refreshing": False}
 
             def close(self):
                 self.closed = True
@@ -206,6 +221,9 @@ class RecommendationPagingTests(unittest.TestCase):
 
             def fetchall(self):
                 return []
+
+            def fetchone(self):
+                return {"is_refreshing": False}
 
             def close(self):
                 self.closed = True
