@@ -857,6 +857,215 @@ def select_review_dimensions(cur, limit=25, dim_type="all") -> tuple[list[dict],
     }
 
 
+ELIGIBLE_CANDIDATE_REASON_SQL = """
+        CASE
+            WHEN el.dimension IS NULL THEN 'new_unlabeled_dimension'
+            WHEN COALESCE(el.needs_review, false) = true
+                 AND (el.next_review_at IS NULL OR el.next_review_at <= now())
+                THEN 'review_due'
+            ELSE 'not_due'
+        END
+""".strip()
+
+
+def get_eligible_dimension_diagnostics(cur, dim_type="all") -> dict:
+    """
+    Count active SHAP dimensions by candidate_reason. Driven by shap_impact and
+    LEFT JOINed to embedding_labels so brand-new dimensions are counted as
+    new_unlabeled even when they do not yet exist in embedding_labels.
+    """
+    diagnostics = {
+        "new_unlabeled": 0,
+        "review_due": 0,
+        "not_due": 0,
+    }
+    if cur is None:
+        return diagnostics
+
+    dim_min, dim_max = _get_dimension_range(dim_type)
+    query = """
+        WITH active_dims AS (
+            SELECT si.dimension
+            FROM shap_impact si
+            WHERE si.dimension >= %s
+              AND si.dimension < %s
+            GROUP BY si.dimension
+        ),
+        eligible_dims AS (
+            SELECT
+                {candidate_reason_sql} AS candidate_reason
+            FROM active_dims ad
+            LEFT JOIN embedding_labels el
+              ON el.dimension = ad.dimension
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE candidate_reason = 'new_unlabeled_dimension') AS new_unlabeled,
+            COUNT(*) FILTER (WHERE candidate_reason = 'review_due') AS review_due,
+            COUNT(*) FILTER (WHERE candidate_reason = 'not_due') AS not_due
+        FROM eligible_dims
+    """.format(candidate_reason_sql=ELIGIBLE_CANDIDATE_REASON_SQL)
+    try:
+        cur.execute(query, (dim_min, dim_max))
+        row = cur.fetchone()
+    except Exception as exc:
+        if hasattr(cur, "connection"):
+            cur.connection.rollback()
+        print(f"⚠️ Could not compute eligible diagnostics ({exc}).", flush=True)
+        return diagnostics
+
+    if not row:
+        return diagnostics
+    keys = list(diagnostics)
+    return {key: int(value or 0) for key, value in zip(keys, row)}
+
+
+def get_eligible_dimension_candidates(cur, limit=25, dim_type="all") -> list[dict]:
+    """
+    Select eligible dimensions directly from shap_impact, LEFT JOINing
+    embedding_labels so the result includes both brand-new unlabeled dimensions
+    and review-due labels (needs_review with a null or expired next_review_at).
+    Cooldown is preserved: not_due dimensions are excluded by the WHERE clause.
+    """
+    dim_min, dim_max = _get_dimension_range(dim_type)
+    query = """
+        WITH active_dims AS (
+            SELECT
+                si.dimension,
+                MAX(ABS(si.shap_value)) AS max_abs_impact,
+                COUNT(*) AS shap_rows
+            FROM shap_impact si
+            WHERE si.dimension >= %s
+              AND si.dimension < %s
+            GROUP BY si.dimension
+        ),
+        eligible_dims AS (
+            SELECT
+                ad.dimension,
+                ad.max_abs_impact,
+                ad.shap_rows,
+                el.label AS existing_label,
+                el.display_label AS existing_display_label,
+                el.label_type AS existing_label_type,
+                el.explainable AS existing_explainable,
+                el.needs_review AS existing_needs_review,
+                el.last_reviewed_at,
+                COALESCE(el.review_attempt_count, 0) AS review_attempt_count,
+                el.next_review_at,
+                {candidate_reason_sql} AS candidate_reason
+            FROM active_dims ad
+            LEFT JOIN embedding_labels el
+              ON el.dimension = ad.dimension
+        )
+        SELECT
+            dimension,
+            max_abs_impact,
+            shap_rows,
+            existing_label,
+            existing_display_label,
+            existing_label_type,
+            existing_explainable,
+            existing_needs_review,
+            last_reviewed_at,
+            review_attempt_count,
+            next_review_at,
+            candidate_reason
+        FROM eligible_dims
+        WHERE candidate_reason IN ('new_unlabeled_dimension', 'review_due')
+        ORDER BY
+            CASE candidate_reason
+                WHEN 'new_unlabeled_dimension' THEN 1
+                WHEN 'review_due' THEN 2
+                ELSE 3
+            END,
+            max_abs_impact DESC,
+            dimension ASC
+        LIMIT %s
+    """.format(candidate_reason_sql=ELIGIBLE_CANDIDATE_REASON_SQL)
+    cur.execute(query, (dim_min, dim_max, limit))
+    return [_eligible_row_to_dict(row) for row in cur.fetchall()]
+
+
+def _eligible_row_to_dict(row) -> dict:
+    if isinstance(row, dict):
+        normalized = dict(row)
+    else:
+        fields = [
+            "dimension",
+            "max_abs_impact",
+            "shap_rows",
+            "existing_label",
+            "existing_display_label",
+            "existing_label_type",
+            "existing_explainable",
+            "existing_needs_review",
+            "last_reviewed_at",
+            "review_attempt_count",
+            "next_review_at",
+            "candidate_reason",
+        ]
+        normalized = dict(zip(fields, row))
+
+    dimension = int(normalized["dimension"])
+    candidate_reason = normalized.get("candidate_reason")
+    shap_rows = int(normalized.get("shap_rows") or 0)
+    max_abs_impact = float(normalized.get("max_abs_impact") or 0.0)
+
+    # review_due rows route through the existing review path so review_mode
+    # plumbing (history + cooldown reschedule) and existing-label prompt context
+    # are reused. new_unlabeled_dimension rows use a distinct selection_mode so
+    # save_label_result takes the insert path with no existing-label context.
+    if candidate_reason == "review_due":
+        selection_mode = "review"
+        label_repair_status = "review_label"
+    else:
+        selection_mode = "eligible_new"
+        label_repair_status = "missing_label"
+
+    enriched = {
+        "dimension": dimension,
+        "selection_mode": selection_mode,
+        "label_repair_status": label_repair_status,
+        "selection_reason": candidate_reason,
+        "candidate_reason": candidate_reason,
+        "side": get_dimension_mode(dimension),
+        "existing_label": normalized.get("existing_label"),
+        "existing_display_label": normalized.get("existing_display_label"),
+        "existing_label_type": normalized.get("existing_label_type"),
+        "existing_explainable": normalized.get("existing_explainable"),
+        "existing_needs_review": normalized.get("existing_needs_review"),
+        "needs_review": normalized.get("existing_needs_review"),
+        "last_reviewed_at": normalized.get("last_reviewed_at"),
+        "review_attempt_count": int(normalized.get("review_attempt_count") or 0),
+        "next_review_at": normalized.get("next_review_at"),
+        "max_abs_impact": max_abs_impact,
+        "usage_count": shap_rows,
+        "sum_abs_shap": 0.0,
+        "avg_abs_shap": 0.0,
+        "combined_score": max_abs_impact,
+        "user_count": 0,
+        "stats_source": "eligible",
+    }
+    return _with_selection_fields(enriched, selection_mode)
+
+
+def select_eligible_dimensions(cur, limit=25, dim_type="all") -> tuple[list[dict], dict]:
+    diagnostics = get_eligible_dimension_diagnostics(cur, dim_type=dim_type)
+    selected = get_eligible_dimension_candidates(cur, limit=limit, dim_type=dim_type)
+    new_selected = sum(
+        1 for stat in selected if stat.get("candidate_reason") == "new_unlabeled_dimension"
+    )
+    review_selected = sum(
+        1 for stat in selected if stat.get("candidate_reason") == "review_due"
+    )
+    return selected, {
+        "selection_mode": "eligible",
+        "eligible_diagnostics": diagnostics,
+        "eligible_selected_count": len(selected),
+        "eligible_new_selected_count": new_selected,
+        "eligible_review_selected_count": review_selected,
+    }
+
+
 def _coverage_row_to_dict(row) -> dict:
     if isinstance(row, dict):
         normalized = dict(row)
@@ -1094,6 +1303,9 @@ def select_automatic_dimensions(
     if selection_mode == "review":
         return select_review_dimensions(cur, limit=limit, dim_type=dim_type)
 
+    if selection_mode == "eligible":
+        return select_eligible_dimensions(cur, limit=limit, dim_type=dim_type)
+
     coverage_diagnostics = get_coverage_selection_diagnostics(cur, dim_type=dim_type)
     coverage_rows = get_coverage_dimension_candidates(cur, dim_type=dim_type)
 
@@ -1196,6 +1408,37 @@ def print_selection_summary(selection_mode: str, selected_dimensions: list[dict]
     if selection_mode == "importance":
         print(f"Selected dimensions: {len(selected_dimensions)}", flush=True)
         print("Ranking source: aggregate/global SHAP importance", flush=True)
+        return
+
+    if selection_mode == "eligible":
+        diagnostics = summary.get("eligible_diagnostics") or {}
+        new_unlabeled = diagnostics.get("new_unlabeled", 0)
+        review_due = diagnostics.get("review_due", 0)
+        not_due = diagnostics.get("not_due", 0)
+        new_selected = summary.get("eligible_new_selected_count", 0)
+        review_selected = summary.get("eligible_review_selected_count", 0)
+        print(f"New unlabeled candidates: {new_unlabeled}", flush=True)
+        print(f"Review-due candidates: {review_due}", flush=True)
+        print(f"Skipped because not due (labeled or in cooldown): {not_due}", flush=True)
+        print(f"Selected dimensions for labeling: {len(selected_dimensions)}", flush=True)
+        print(
+            "Selected breakdown: "
+            f"new_unlabeled={new_selected}, review_due={review_selected}",
+            flush=True,
+        )
+        print(
+            "Rank | Dimension | Side | Candidate Reason | SHAP Rows | "
+            "Max Abs Impact | Existing Display Label",
+            flush=True,
+        )
+        for rank, stat in enumerate(selected_dimensions, start=1):
+            print(
+                f"{rank} | {stat['dimension']} | {stat.get('side', '')} | "
+                f"{stat.get('candidate_reason', '')} | {stat.get('usage_count', 0)} | "
+                f"{_format_float(stat.get('max_abs_impact'))} | "
+                f"{stat.get('existing_display_label') or ''}",
+                flush=True,
+            )
         return
 
     if selection_mode == "review":
@@ -1704,7 +1947,7 @@ def main():
     parser.add_argument("--dim_type", choices=["media", "user", "all"], default="all")
     parser.add_argument(
         "--selection_mode",
-        choices=["importance", "coverage", "hybrid", "review"],
+        choices=["importance", "coverage", "hybrid", "review", "eligible"],
         default="importance",
         help="Automatic dimension selection strategy",
     )
@@ -1806,6 +2049,8 @@ def main():
     if not top_dims:
         if args.selection_mode == "review":
             scope = "review dimensions"
+        elif args.selection_mode == "eligible":
+            scope = "eligible dimensions (no new unlabeled or review-due candidates)"
         else:
             scope = "all dimensions" if args.refresh_existing else "unlabeled dimensions"
         print(f"ℹ️ No {scope} selected for labeling.", flush=True)

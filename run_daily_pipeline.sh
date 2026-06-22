@@ -69,11 +69,11 @@ echo "🎓 Re-training model..."
 echo "🔮 Scoring recommendations..."
 "$PY" "$APP/score_model.py" --all-users
 
-echo "🏷  Auto-labeling SHAP dimensions in coverage mode..."
+echo "🏷  Auto-labeling SHAP dimensions in eligible mode..."
 LABEL_ARGS=(
   "$PY"
   "$APP/batch_label_embeddings.py"
-  --selection_mode coverage
+  --selection_mode eligible
   --limit 25
   --dim_type all
   --label
@@ -82,7 +82,7 @@ LABEL_ARGS=(
 )
 case "$REFRESH_EXISTING_LABELS" in
   true|TRUE|True|1|yes|YES|Yes|on|ON|On)
-    echo "⚠️  Adding --refresh_existing to the coverage label stage."
+    echo "⚠️  Adding --refresh_existing to the eligible label stage."
     LABEL_ARGS+=(--refresh_existing)
     ;;
 esac

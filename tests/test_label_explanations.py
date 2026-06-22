@@ -596,6 +596,195 @@ class ReviewSelectionTests(unittest.TestCase):
         self.assertTrue(negative_label["needs_review"])
 
 
+class EligibleSelectionTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, diagnostics_row=None, candidate_rows=None):
+            self.diagnostics_row = diagnostics_row or (0, 0, 0)
+            self.candidate_rows = candidate_rows or []
+            self.executed = []
+
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params))
+
+        def fetchone(self):
+            return self.diagnostics_row
+
+        def fetchall(self):
+            return self.candidate_rows
+
+    @staticmethod
+    def _new_row(dimension=100, max_abs_impact=5.0, shap_rows=50):
+        return (
+            dimension,
+            max_abs_impact,
+            shap_rows,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            "new_unlabeled_dimension",
+        )
+
+    @staticmethod
+    def _review_due_row(dimension=770, max_abs_impact=3.0, shap_rows=20):
+        return (
+            dimension,
+            max_abs_impact,
+            shap_rows,
+            "light-hearted tv episodes",
+            "light-hearted TV stories",
+            "soft_structural",
+            True,
+            True,
+            datetime(2026, 6, 1, 8, 30),
+            2,
+            None,
+            "review_due",
+        )
+
+    def test_candidate_query_uses_shap_impact_as_driving_source(self):
+        cur = self.FakeCursor()
+
+        batch_label_embeddings.get_eligible_dimension_candidates(cur, limit=25, dim_type="all")
+
+        sql, params = cur.executed[0]
+        self.assertEqual(params, (0, 1536, 25))
+        self.assertIn("WITH active_dims AS", sql)
+        self.assertIn("FROM shap_impact si", sql)
+        self.assertIn("MAX(ABS(si.shap_value)) AS max_abs_impact", sql)
+        self.assertIn("LEFT JOIN embedding_labels el", sql)
+        self.assertIn("WHEN el.dimension IS NULL THEN 'new_unlabeled_dimension'", sql)
+        self.assertIn("COALESCE(el.needs_review, false) = true", sql)
+        self.assertIn("el.next_review_at IS NULL OR el.next_review_at <= now()", sql)
+        self.assertIn("ELSE 'not_due'", sql)
+        self.assertIn(
+            "WHERE candidate_reason IN ('new_unlabeled_dimension', 'review_due')",
+            sql,
+        )
+        self.assertIn("WHEN 'new_unlabeled_dimension' THEN 1", sql)
+        self.assertIn("WHEN 'review_due' THEN 2", sql)
+        self.assertIn("max_abs_impact DESC", sql)
+
+    def test_media_dim_type_scopes_the_query_range(self):
+        cur = self.FakeCursor()
+
+        batch_label_embeddings.get_eligible_dimension_candidates(cur, limit=10, dim_type="media")
+
+        _sql, params = cur.executed[0]
+        self.assertEqual(params, (0, 768, 10))
+
+    def test_new_and_review_due_rows_are_classified_and_routed(self):
+        candidate_rows = [self._new_row(), self._review_due_row()]
+        cur = self.FakeCursor(diagnostics_row=(431, 104, 419), candidate_rows=candidate_rows)
+
+        selected, summary = batch_label_embeddings.select_automatic_dimensions(
+            cur,
+            limit=25,
+            dim_type="all",
+            selection_mode="eligible",
+        )
+
+        diagnostics_sql, diagnostics_params = cur.executed[0]
+        _candidate_sql, candidate_params = cur.executed[1]
+        self.assertEqual(diagnostics_params, (0, 1536))
+        self.assertIn("COUNT(*) FILTER (WHERE candidate_reason = 'new_unlabeled_dimension')", diagnostics_sql)
+        self.assertEqual(candidate_params, (0, 1536, 25))
+
+        self.assertEqual(summary["selection_mode"], "eligible")
+        self.assertEqual(summary["eligible_selected_count"], 2)
+        self.assertEqual(summary["eligible_new_selected_count"], 1)
+        self.assertEqual(summary["eligible_review_selected_count"], 1)
+        self.assertEqual(summary["eligible_diagnostics"]["new_unlabeled"], 431)
+        self.assertEqual(summary["eligible_diagnostics"]["review_due"], 104)
+        self.assertEqual(summary["eligible_diagnostics"]["not_due"], 419)
+
+        new_stat, review_stat = selected
+        self.assertEqual(new_stat["dimension"], 100)
+        self.assertEqual(new_stat["candidate_reason"], "new_unlabeled_dimension")
+        self.assertEqual(new_stat["selection_mode"], "eligible_new")
+        self.assertEqual(new_stat["label_repair_status"], "missing_label")
+        self.assertIsNone(new_stat["existing_label"])
+        self.assertEqual(new_stat["usage_count"], 50)
+        self.assertEqual(new_stat["side"], "media")
+
+        self.assertEqual(review_stat["dimension"], 770)
+        self.assertEqual(review_stat["candidate_reason"], "review_due")
+        self.assertEqual(review_stat["selection_mode"], "review")
+        self.assertEqual(review_stat["existing_label"], "light-hearted tv episodes")
+        self.assertEqual(review_stat["existing_display_label"], "light-hearted TV stories")
+        self.assertEqual(review_stat["existing_label_type"], "soft_structural")
+        self.assertEqual(review_stat["review_attempt_count"], 2)
+        self.assertEqual(review_stat["side"], "user")
+
+    def test_not_due_dimensions_are_excluded_by_the_candidate_query(self):
+        # not_due rows are filtered by the SQL WHERE clause, so the cursor only
+        # ever returns new_unlabeled and review_due rows.
+        cur = self.FakeCursor(
+            diagnostics_row=(0, 0, 419),
+            candidate_rows=[],
+        )
+
+        selected, summary = batch_label_embeddings.select_eligible_dimensions(
+            cur,
+            limit=25,
+            dim_type="all",
+        )
+
+        self.assertEqual(selected, [])
+        self.assertEqual(summary["eligible_diagnostics"]["not_due"], 419)
+        _candidate_sql, _params = cur.executed[1]
+        self.assertNotIn("'not_due'", _candidate_sql.split("WHERE candidate_reason IN")[1])
+
+    def test_eligible_summary_logs_required_counts(self):
+        selected = [
+            {
+                "dimension": 100,
+                "selection_mode": "eligible_new",
+                "candidate_reason": "new_unlabeled_dimension",
+                "side": "media",
+                "usage_count": 50,
+                "max_abs_impact": 5.0,
+                "existing_display_label": None,
+            },
+            {
+                "dimension": 770,
+                "selection_mode": "review",
+                "candidate_reason": "review_due",
+                "side": "user",
+                "usage_count": 20,
+                "max_abs_impact": 3.0,
+                "existing_display_label": "light-hearted TV stories",
+            },
+        ]
+        summary = {
+            "eligible_diagnostics": {
+                "new_unlabeled": 431,
+                "review_due": 104,
+                "not_due": 419,
+            },
+            "eligible_new_selected_count": 1,
+            "eligible_review_selected_count": 1,
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            batch_label_embeddings.print_selection_summary("eligible", selected, summary)
+
+        text = output.getvalue()
+        self.assertIn("New unlabeled candidates: 431", text)
+        self.assertIn("Review-due candidates: 104", text)
+        self.assertIn("Skipped because not due (labeled or in cooldown): 419", text)
+        self.assertIn("Selected dimensions for labeling: 2", text)
+        self.assertIn("Selected breakdown: new_unlabeled=1, review_due=1", text)
+        self.assertIn("Candidate Reason", text)
+        self.assertIn("100 | media | new_unlabeled_dimension", text)
+        self.assertIn("770 | user | review_due", text)
+
+
 class LabelRepairSaveTests(unittest.TestCase):
     class FakeCursor:
         def __init__(self, existing_row):
