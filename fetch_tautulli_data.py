@@ -13,6 +13,11 @@ from ollama_embeddings import embed_texts
 from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
 from api.services.app_settings import get_setting_value
+from api.services.tautulli_api import (
+    TautulliApiError,
+    delete_tautulli_cache,
+    tautulli_request,
+)
 from api.services.user_sync_service import (
     fetch_tautulli_users as fetch_tautulli_users_for_sync,
     sync_users_from_tautulli as sync_users_from_tautulli_for_contacts,
@@ -50,40 +55,23 @@ def clear_tautulli_cache():
     Clear Tautulli's metadata cache so new/changed items show up.
     Uses the same TAUTULLI_URL and TAUTULLI_API_KEY as the rest of the script.
     """
-    params = {
-        "apikey": get_tautulli_api_key(),
-        "cmd": "delete_cache",
-    }
     try:
-        tautulli_url = get_tautulli_base_url()
-        if not tautulli_url:
-            raise ValueError("Tautulli base URL is not configured")
-        resp = requests.get(f"{tautulli_url}/api/v2", params=params, timeout=30)
-        resp.raise_for_status()
+        delete_tautulli_cache(timeout=30)
         print("✅ Cleared Tautulli cache via delete_cache")
     except Exception as e:
         print(f"❌ ERROR clearing Tautulli cache: {e}")
 
 # ✅ Fetch data from Tautulli API
 def fetch_tautulli_data(endpoint, params=None):
-    if params is None:
-        params = {}
-    params["cmd"] = endpoint  
-    params["apikey"] = get_tautulli_api_key()
-
     try:
-        response = requests.get(get_tautulli_api_url(), params=params)
-        # print(f"🔍 DEBUG: API call to {endpoint} returned status {response.status_code}")
-
-        try:
-            data = response.json()
-            # print(f"🔍 DEBUG: Raw API Response: {json.dumps(data, indent=2)}")
-            return data.get("response", {}).get("data", {})
-        except json.JSONDecodeError:
-            # print(f"❌ ERROR: Invalid JSON response: {response.text}")
-            return {}
-    except requests.exceptions.RequestException as e:
-        print(f"❌ ERROR: Network error occurred: {e}")
+        return tautulli_request(
+            endpoint,
+            params=dict(params or {}),
+            timeout=30,
+            require_data=True,
+        )
+    except TautulliApiError as e:
+        print(f"❌ ERROR: Tautulli API error occurred: {e}")
         return {}
     
 # 👥 ---------- User sync helpers (Tautulli → users table) ----------

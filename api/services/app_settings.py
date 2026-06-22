@@ -1629,28 +1629,17 @@ def build_settings_overrides(updates: dict[str, Any] | None = None, clear_keys: 
 
 
 def test_tautulli_settings(*, updates: dict[str, Any] | None = None, clear_keys: Iterable[str] | None = None) -> dict[str, Any]:
+    from api.services.tautulli_api import resolve_tautulli_config, tautulli_request
+
     overrides = build_settings_overrides(updates, clear_keys)
-    api_url = get_setting_value("tautulli.api_url", overrides=overrides)
-    api_key = get_setting_value("tautulli.api_key", overrides=overrides)
-    base_url = get_setting_value("tautulli.base_url", overrides=overrides)
-
-    if not api_url or not api_key:
-        raise SettingsValidationError("Tautulli API URL and API key are required")
-
-    response = requests.get(
-        api_url,
-        params={"apikey": api_key, "cmd": "get_users"},
-        timeout=15,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("response", {}).get("data")
+    config = resolve_tautulli_config(overrides=overrides)
+    data = tautulli_request("get_users", config=config, timeout=15)
     user_count = len(data.get("users", [])) if isinstance(data, dict) else None
 
     return {
         "ok": True,
-        "api_url": api_url,
-        "base_url": base_url,
+        "api_url": config.api_url,
+        "base_url": config.base_url,
         "user_count": user_count,
     }
 
