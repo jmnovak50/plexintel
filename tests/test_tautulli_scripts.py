@@ -112,37 +112,12 @@ class TautulliRecentlyAddedSyncTests(unittest.TestCase):
     def test_main_skips_when_lock_is_held(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             lock_path = Path(tmp_dir) / "sync.lock"
+            log_path = Path(tmp_dir) / "sync.log"
             first_lock = tautulli_recently_added_sync._open_lock(lock_path)
             try:
                 self.assertIsNotNone(first_lock)
-                with patch.object(tautulli_recently_added_sync, "delete_tautulli_cache") as mock_delete:
-                    result = tautulli_recently_added_sync.main([
-                        "--debounce-seconds",
-                        "0",
-                        "--lock-path",
-                        str(lock_path),
-                    ])
-
-                self.assertEqual(result, 0)
-                mock_delete.assert_not_called()
-            finally:
-                if first_lock is not None:
-                    first_lock.close()
-
-    def test_main_clears_cache_then_runs_incremental_sync(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            lock_path = Path(tmp_dir) / "sync.lock"
-            with patch.object(
-                tautulli_recently_added_sync,
-                "_resolve_event_config",
-                return_value=self.config,
-            ):
-                with patch.object(tautulli_recently_added_sync, "delete_tautulli_cache") as mock_delete:
-                    with patch.object(
-                        tautulli_recently_added_sync,
-                        "run_incremental_sync",
-                        return_value=0,
-                    ) as mock_sync:
+                with patch.dict("os.environ", {"PLEXINTEL_TAUTULLI_SYNC_LOG": str(log_path)}):
+                    with patch.object(tautulli_recently_added_sync, "delete_tautulli_cache") as mock_delete:
                         result = tautulli_recently_added_sync.main([
                             "--debounce-seconds",
                             "0",
@@ -150,9 +125,44 @@ class TautulliRecentlyAddedSyncTests(unittest.TestCase):
                             str(lock_path),
                         ])
 
+                self.assertEqual(result, 0)
+                mock_delete.assert_not_called()
+                self.assertIn("already running", log_path.read_text(encoding="utf-8"))
+            finally:
+                if first_lock is not None:
+                    first_lock.close()
+
+    def test_main_clears_cache_then_runs_incremental_sync(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lock_path = Path(tmp_dir) / "sync.lock"
+            log_path = Path(tmp_dir) / "sync.log"
+            log_text = ""
+            with patch.dict("os.environ", {"PLEXINTEL_TAUTULLI_SYNC_LOG": str(log_path)}):
+                with patch.object(
+                    tautulli_recently_added_sync,
+                    "_resolve_event_config",
+                    return_value=self.config,
+                ):
+                    with patch.object(tautulli_recently_added_sync, "delete_tautulli_cache") as mock_delete:
+                        with patch.object(
+                            tautulli_recently_added_sync,
+                            "run_incremental_sync",
+                            return_value=0,
+                        ) as mock_sync:
+                            result = tautulli_recently_added_sync.main([
+                                "--debounce-seconds",
+                                "0",
+                                "--lock-path",
+                                str(lock_path),
+                            ])
+                            log_text = log_path.read_text(encoding="utf-8")
+
         self.assertEqual(result, 0)
         mock_delete.assert_called_once_with(config=self.config, timeout=30)
         mock_sync.assert_called_once()
+        self.assertIn("Recently Added sync invoked", log_text)
+        self.assertIn("Tautulli cache cleared", log_text)
+        self.assertIn("PlexIntel incremental sync complete", log_text)
 
     def test_main_fails_without_running_sync_when_cache_clear_fails(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

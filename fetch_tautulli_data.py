@@ -740,6 +740,10 @@ def run_incremental_load():
     if not conn:
         print("❌ ERROR: Could not connect to database.")
         return
+
+    # Clear before listing libraries so Admin/manual pipeline runs see newly-added
+    # media that Tautulli may still be serving from its cached metadata views.
+    clear_tautulli_cache()
     
     # 0. Sync Plex/Tautulli users into the `users` table
     try:

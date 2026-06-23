@@ -45,7 +45,64 @@ class FakeWatchConnection:
         self.rollback_count += 1
 
 
+class FakeIncrementalCursor:
+    def __init__(self):
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((compact_sql(sql), params))
+
+    def fetchall(self):
+        return []
+
+
+class FakeIncrementalConnection:
+    def __init__(self):
+        self.cursor_obj = FakeIncrementalCursor()
+        self.commit_count = 0
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def commit(self):
+        self.commit_count += 1
+
+    def close(self):
+        self.closed = True
+
+
 class TautulliWatchReconciliationTests(unittest.TestCase):
+    def test_incremental_load_clears_cache_before_listing_libraries(self):
+        conn = FakeIncrementalConnection()
+        events = []
+
+        def fake_clear_cache():
+            events.append("clear_cache")
+
+        def fake_get_library_media_info(section_id, limit=None):
+            events.append(f"library_{section_id}")
+            return []
+
+        with patch.object(tautulli_sync, "connect_to_db", return_value=(conn, conn.cursor_obj)):
+            with patch.object(tautulli_sync, "clear_tautulli_cache", side_effect=fake_clear_cache):
+                with patch.object(tautulli_sync, "sync_users_from_tautulli"):
+                    with patch.object(
+                        tautulli_sync,
+                        "get_library_media_info",
+                        side_effect=fake_get_library_media_info,
+                    ):
+                        with patch.object(tautulli_sync, "backfill_missing_header_records"):
+                            with patch.object(tautulli_sync, "backfill_missing_plex_guids"):
+                                with patch.object(tautulli_sync, "sync_new_watch_history"):
+                                    with patch.object(tautulli_sync, "get_setting_value", return_value=False):
+                                        tautulli_sync.run_incremental_load()
+
+        self.assertIn("clear_cache", events)
+        self.assertIn("library_1", events)
+        self.assertLess(events.index("clear_cache"), events.index("library_1"))
+        self.assertTrue(conn.closed)
+
     def test_fetch_pages_detects_malformed_payload(self):
         with patch.object(tautulli_sync, "fetch_tautulli_data", return_value={}):
             result = tautulli_sync.fetch_watch_history_pages(page_size=2)

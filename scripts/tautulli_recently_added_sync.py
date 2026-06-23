@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
@@ -24,6 +25,25 @@ from api.services.tautulli_api import (  # noqa: E402
 
 DEFAULT_LOCK_PATH = Path("/tmp/plexintel-tautulli-sync.lock")
 DEFAULT_DEBOUNCE_SECONDS = 90
+DEFAULT_LOG_PATH = REPO_ROOT / "logs" / "tautulli_recently_added_sync.log"
+
+
+def _log_path() -> Path:
+    configured = os.environ.get("PLEXINTEL_TAUTULLI_SYNC_LOG")
+    return Path(configured) if configured else DEFAULT_LOG_PATH
+
+
+def _log(message: str, *, error: bool = False) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    line = f"[{timestamp}] {message}"
+    print(line, file=sys.stderr if error else sys.stdout)
+    try:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        return
 
 
 def _env_float(name: str, default: float) -> float:
@@ -77,6 +97,7 @@ def run_incremental_sync() -> int:
         "--mode",
         "incremental",
     ]
+    _log(f"Running incremental sync command: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=str(REPO_ROOT), check=False)
     return int(result.returncode)
 
@@ -99,33 +120,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    _log(
+        "Recently Added sync invoked "
+        f"pid={os.getpid()} debounce={args.debounce_seconds:g}s lock={args.lock_path}"
+    )
+
     lock_file = _open_lock(args.lock_path)
     if lock_file is None:
-        print("PlexIntel Tautulli sync already running; skipping this event.")
+        _log("PlexIntel Tautulli sync already running; skipping this event.")
         return 0
 
     with lock_file:
         if args.debounce_seconds > 0:
-            print(f"Waiting {args.debounce_seconds:g}s for recently-added batch to settle.")
+            _log(f"Waiting {args.debounce_seconds:g}s for recently-added batch to settle.")
             time.sleep(args.debounce_seconds)
 
         try:
             config = _resolve_event_config()
+            _log(f"Resolved Tautulli API URL: {config.api_url}")
             delete_tautulli_cache(config=config, timeout=30)
         except TautulliApiError as exc:
-            print(f"Failed to clear Tautulli cache: {exc}", file=sys.stderr)
+            _log(f"Failed to clear Tautulli cache: {exc}", error=True)
             return 1
 
-        print("Tautulli cache cleared. Running PlexIntel incremental sync.")
+        _log("Tautulli cache cleared. Running PlexIntel incremental sync.")
         return_code = run_incremental_sync()
         if return_code != 0:
-            print(
+            _log(
                 f"PlexIntel incremental sync failed with exit code {return_code}.",
-                file=sys.stderr,
+                error=True,
             )
             return return_code
 
-        print("PlexIntel incremental sync complete.")
+        _log("PlexIntel incremental sync complete.")
         return 0
 
 
