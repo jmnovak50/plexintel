@@ -528,13 +528,13 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     today = datetime.now().strftime("%Y-%m-%d")
     csv_path = str(REPO_ROOT / f"shap_labels_{today}.csv")
     labeling_enabled = get_setting_value("pipeline.labeling_enabled", default=True)
-    label_selection_mode = get_setting_value("pipeline.label_selection_mode", default="coverage")
+    label_selection_mode = get_setting_value("pipeline.label_selection_mode", default="eligible")
     label_batch_limit = get_setting_value("pipeline.label_batch_limit", default=25)
     label_dim_type = get_setting_value("pipeline.label_dim_type", default="all")
     label_coverage_share = get_setting_value("pipeline.label_coverage_share", default=0.80)
     refresh_existing_labels = get_setting_value("pipeline.refresh_existing_labels", default=False)
-    if str(label_selection_mode) not in {"importance", "coverage", "hybrid"}:
-        label_selection_mode = "coverage"
+    if str(label_selection_mode) not in {"eligible", "importance", "coverage", "hybrid"}:
+        label_selection_mode = "eligible"
 
     stages = [
         ("tautulli_incremental", [py, f"{root}/fetch_tautulli_data.py", "--mode", "incremental"]),

@@ -86,7 +86,7 @@ class PipelineStageTests(unittest.TestCase):
 
         batch_label = dict(stages)["batch_label"]
         self.assertIn("batch_label_embeddings.py", batch_label[1])
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "coverage")
+        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "eligible")
         self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
         self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
         self.assertIn("--label", batch_label)
@@ -171,7 +171,7 @@ class PipelineStageTests(unittest.TestCase):
             stages = pipeline_service.build_pipeline_stages()
 
         batch_label = dict(stages)["batch_label"]
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "coverage")
+        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "eligible")
         self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
         self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
         self.assertNotIn("--coverage_share", batch_label)
