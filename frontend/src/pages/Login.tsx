@@ -6,7 +6,6 @@ import {
   ExternalLink,
   KeyRound,
   Loader2,
-  Sparkles,
   Tv,
 } from "lucide-react";
 
@@ -79,8 +78,12 @@ export default function Login() {
     <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-amber-50/40 px-4 py-10 sm:py-16">
       <div className="mx-auto w-full max-w-lg">
         <header className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-400 text-slate-900 shadow-md shadow-amber-200/60">
-            <Sparkles aria-hidden="true" size={28} strokeWidth={2} />
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl shadow-md shadow-amber-200/60 ring-1 ring-amber-200/50">
+            <img
+              src="/favicon.ico"
+              alt=""
+              className="h-full w-full object-cover"
+            />
           </div>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
             Welcome to PlexIntel
