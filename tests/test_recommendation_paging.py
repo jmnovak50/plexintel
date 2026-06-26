@@ -326,5 +326,143 @@ class RecommendationPagingTests(unittest.TestCase):
         self.assertEqual(rec_params, ("member", "member", 0.70, "member", 15965, 101, 0))
 
 
+class ScoreRangeFilterTests(unittest.TestCase):
+    def test_resolve_default_range(self):
+        display, score_min, score_max = recommendation_routes.resolve_score_range_params(
+            0.70,
+            None,
+            0.70,
+        )
+        self.assertEqual(display, 0.70)
+        self.assertIsNone(score_min)
+        self.assertIsNone(score_max)
+
+    def test_resolve_low_band(self):
+        display, score_min, score_max = recommendation_routes.resolve_score_range_params(
+            0.0,
+            0.20,
+            0.70,
+        )
+        self.assertEqual(display, 0.0)
+        self.assertEqual(score_min, 0.0)
+        self.assertEqual(score_max, 0.20)
+
+    def test_resolve_mid_band(self):
+        display, score_min, score_max = recommendation_routes.resolve_score_range_params(
+            0.50,
+            0.80,
+            0.70,
+        )
+        self.assertEqual(display, 0.0)
+        self.assertEqual(score_min, 0.50)
+        self.assertEqual(score_max, 0.80)
+
+    def test_resolve_invalid_range(self):
+        with self.assertRaises(recommendation_routes.HTTPException):
+            recommendation_routes.resolve_score_range_params(0.80, 0.20, 0.70)
+
+    def _call_recommendations(self, **kwargs):
+        class FakeRequest:
+            session = {"plex_token": "token"}
+
+        class FakeCursor:
+            closed = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchall(self):
+                return []
+
+            def fetchone(self):
+                return {"is_refreshing": False}
+
+            def close(self):
+                self.closed = True
+
+        class FakeConn:
+            closed = False
+
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def cursor(self, *_, **__):
+                return self.cursor_obj
+
+            def close(self):
+                self.closed = True
+
+        conn = FakeConn()
+        defaults = {
+            "view": "all",
+            "show_rating_key": None,
+            "season_rating_key": None,
+            "search": None,
+            "limit": 100,
+            "offset": 0,
+            "sort": None,
+            "min_probability": None,
+            "max_probability": None,
+        }
+        defaults.update(kwargs)
+
+        with patch.object(recommendation_routes, "connect_db", return_value=conn):
+            with patch.object(recommendation_routes, "register_vector"):
+                with patch.object(recommendation_routes, "get_plex_username", return_value="member"):
+                    recommendation_routes.get_recommendations(FakeRequest(), **defaults)
+
+        return conn.cursor_obj.calls[0][0], conn.cursor_obj.calls[0][1]
+
+    def test_default_range_uses_display_threshold_only(self):
+        sql, params = self._call_recommendations(min_probability=0.70)
+
+        self.assertIn("recs.predicted_probability >= %s", sql)
+        self.assertNotIn("recs.predicted_probability <= %s", sql)
+        self.assertEqual(params[2], 0.70)
+
+    def test_low_band_applies_min_and_max_filters(self):
+        sql, params = self._call_recommendations(min_probability=0.0, max_probability=0.20)
+
+        self.assertIn("recs.predicted_probability >= %s", sql)
+        self.assertIn("recs.predicted_probability <= %s", sql)
+        self.assertEqual(params[2], 0.0)
+        self.assertIn(0.0, params)
+        self.assertIn(0.20, params)
+
+    def test_mid_band_applies_both_bounds(self):
+        sql, params = self._call_recommendations(min_probability=0.50, max_probability=0.80)
+
+        self.assertIn("recs.predicted_probability <= %s", sql)
+        self.assertEqual(params[2], 0.0)
+        self.assertIn(0.50, params)
+        self.assertIn(0.80, params)
+
+    def test_invalid_range_returns_400(self):
+        class FakeRequest:
+            session = {"plex_token": "token"}
+
+        with patch.object(recommendation_routes, "connect_db"):
+            with patch.object(recommendation_routes, "register_vector"):
+                with patch.object(recommendation_routes, "get_plex_username", return_value="member"):
+                    with self.assertRaises(recommendation_routes.HTTPException) as ctx:
+                        recommendation_routes.get_recommendations(
+                            FakeRequest(),
+                            view="all",
+                            show_rating_key=None,
+                            season_rating_key=None,
+                            search=None,
+                            limit=100,
+                            offset=0,
+                            sort=None,
+                            min_probability=0.80,
+                            max_probability=0.20,
+                        )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

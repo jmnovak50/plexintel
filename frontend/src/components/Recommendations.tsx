@@ -375,6 +375,7 @@ async function loadRecommendationsData({
   selectedSeason,
   search,
   minScore,
+  maxScore,
   sortOrder,
   offset,
   signal,
@@ -384,6 +385,7 @@ async function loadRecommendationsData({
   selectedSeason: ScopedSelection | null;
   search: string;
   minScore: number;
+  maxScore: number;
   sortOrder: SortState[];
   offset: number;
   signal?: AbortSignal;
@@ -395,6 +397,9 @@ async function loadRecommendationsData({
     offset: String(offset),
     min_probability: (minScore / 100).toFixed(4),
   });
+  if (maxScore < 100) {
+    params.set('max_probability', (maxScore / 100).toFixed(4));
+  }
   const normalizedSearch = search.trim();
   if (normalizedSearch) {
     params.set('search', normalizedSearch);
@@ -1095,6 +1100,7 @@ export default function Recommendations() {
   const [selectedShow, setSelectedShow] = useState<ScopedSelection | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<ScopedSelection | null>(null);
   const [minScore, setMinScore] = useState(70);
+  const [maxScore, setMaxScore] = useState(100);
   const [plexUser, setPlexUser] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -1147,6 +1153,7 @@ export default function Recommendations() {
       selectedSeason,
       search: debouncedSearch,
       minScore,
+      maxScore,
       sortOrder,
       offset,
       signal,
@@ -1181,7 +1188,7 @@ export default function Recommendations() {
     return () => {
       controller.abort();
     };
-  }, [viewMode, selectedShow, selectedSeason, debouncedSearch, minScore, sortOrder]);
+  }, [viewMode, selectedShow, selectedSeason, debouncedSearch, minScore, maxScore, sortOrder]);
 
   useEffect(() => {
     let mounted = true;
@@ -1647,21 +1654,51 @@ export default function Recommendations() {
 
             <div>
               <div className="mb-2 flex items-center justify-between">
-                <label htmlFor="score-range" className="text-xs font-medium text-slate-600">
-                  Minimum score
-                </label>
-                <span className="recs-pill-amber font-semibold">{minScore}%</span>
+                <span className="text-xs font-medium text-slate-600">Score range</span>
+                <span className="recs-pill-amber font-semibold tabular-nums">
+                  {minScore}% – {maxScore}%
+                </span>
               </div>
-              <input
-                id="score-range"
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={minScore}
-                onChange={(e) => setMinScore(Number(e.target.value))}
-                className="recs-score-slider"
-              />
+              <div className="space-y-3">
+                <div>
+                  <label htmlFor="score-range-min" className="mb-1 block text-[11px] font-medium text-slate-500">
+                    Min score
+                  </label>
+                  <input
+                    id="score-range-min"
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={minScore}
+                    onChange={(e) => {
+                      const nextMin = Number(e.target.value);
+                      setMinScore(nextMin);
+                      setMaxScore((prev) => Math.max(nextMin, prev));
+                    }}
+                    className="recs-score-slider"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="score-range-max" className="mb-1 block text-[11px] font-medium text-slate-500">
+                    Max score
+                  </label>
+                  <input
+                    id="score-range-max"
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={maxScore}
+                    onChange={(e) => {
+                      const nextMax = Number(e.target.value);
+                      setMaxScore(nextMax);
+                      setMinScore((prev) => Math.min(prev, nextMax));
+                    }}
+                    className="recs-score-slider"
+                  />
+                </div>
+              </div>
             </div>
           </div>
         </div>

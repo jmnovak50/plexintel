@@ -46,6 +46,33 @@ def get_default_display_threshold() -> float:
     return float(get_setting_value("recommendations.display_threshold", default=0.70))
 
 
+def resolve_score_range_params(
+    min_probability: Optional[float],
+    max_probability: Optional[float],
+    default_threshold: float,
+) -> tuple[float, Optional[float], Optional[float]]:
+    """Map UI min/max probability to display_threshold and optional score filters.
+
+    Default behavior (min at or above site default, no max) keeps the existing
+    display_threshold gate only. Custom ranges (below default or with a max cap)
+    drop the gate to 0.0 and apply score_min/score_max filters instead.
+    """
+    score_min = min_probability if isinstance(min_probability, (int, float)) else default_threshold
+    score_max = max_probability if isinstance(max_probability, (int, float)) else None
+
+    if score_max is not None and score_min > score_max:
+        raise HTTPException(
+            status_code=400,
+            detail="min_probability cannot exceed max_probability",
+        )
+
+    range_is_custom = score_min < default_threshold or score_max is not None
+    if range_is_custom:
+        return 0.0, score_min, score_max
+
+    return score_min, None, None
+
+
 def get_plex_username(token: str) -> str:
     headers = {
         "Accept": "application/json",
@@ -79,6 +106,12 @@ def get_recommendations(
         le=1.0,
         description="Minimum raw predicted_probability to display. Defaults to recommendations.display_threshold.",
     ),
+    max_probability: Optional[float] = Query(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Maximum raw predicted_probability to display (inclusive).",
+    ),
 ):
     print("Session:", request.session)
 
@@ -99,7 +132,13 @@ def get_recommendations(
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         min_probability = min_probability if isinstance(min_probability, (int, float)) else None
-        display_threshold = get_default_display_threshold() if min_probability is None else min_probability
+        max_probability = max_probability if isinstance(max_probability, (int, float)) else None
+        default_threshold = get_default_display_threshold()
+        display_threshold, score_min, score_max = resolve_score_range_params(
+            min_probability,
+            max_probability,
+            default_threshold,
+        )
 
         sql, params = _build_recommendations_query(
             username=plex_username,
@@ -109,6 +148,8 @@ def get_recommendations(
             search=search,
             sort=sort,
             display_threshold=display_threshold,
+            score_min=score_min,
+            score_max=score_max,
         )
 
         sql = _append_paging(sql, params, limit=limit, offset=offset)
