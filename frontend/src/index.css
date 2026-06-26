@@ -22,3 +22,348 @@
     font: inherit;
   }
 }
+
+@layer components {
+  .recs-page {
+    @apply min-h-screen bg-gradient-to-b from-slate-50 via-white to-amber-50/40 text-slate-900;
+  }
+
+  .recs-page.recs-dark {
+    @apply from-slate-950 via-slate-900 to-slate-900 text-slate-100;
+  }
+
+  .recs-surface {
+    @apply rounded-2xl border border-slate-200/80 bg-white shadow-surface;
+  }
+
+  .recs-dark .recs-surface {
+    @apply border-slate-700/80 bg-slate-800 shadow-none;
+  }
+
+  .recs-surface-muted {
+    @apply rounded-xl border border-slate-100 bg-slate-50/80;
+  }
+
+  .recs-dark .recs-surface-muted {
+    @apply border-slate-700 bg-slate-800/60;
+  }
+
+  .recs-input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm transition-colors placeholder:text-slate-400 focus:border-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-200;
+  }
+
+  .recs-dark .recs-input {
+    border-color: rgb(71 85 105);
+    background-color: rgb(30 41 59);
+    color: rgb(241 245 249);
+  }
+
+  .recs-dark .recs-input::placeholder {
+    color: rgb(100 116 139);
+  }
+
+  .recs-dark .recs-input:focus {
+    border-color: rgb(245 158 11);
+    --tw-ring-color: rgb(245 158 11 / 0.3);
+  }
+
+  .recs-btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .recs-dark .recs-btn-secondary {
+    @apply border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700 focus-visible:ring-offset-slate-900;
+  }
+
+  .recs-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+
+  .recs-pill-slate {
+    @apply recs-pill bg-slate-100 text-slate-600;
+  }
+
+  .recs-dark .recs-pill-slate {
+    @apply bg-slate-700 text-slate-300;
+  }
+
+  .recs-pill-amber {
+    @apply recs-pill bg-amber-100 text-amber-800;
+  }
+
+  .recs-dark .recs-pill-amber {
+    @apply bg-amber-900/40 text-amber-200;
+  }
+
+  .recs-view-pill {
+    @apply shrink-0 snap-start rounded-full border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2;
+  }
+
+  .recs-view-pill-inactive {
+    @apply recs-view-pill border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/60 hover:text-slate-900;
+  }
+
+  .recs-dark .recs-view-pill-inactive {
+    @apply border-slate-600 bg-slate-800 text-slate-200 hover:border-amber-600/50 hover:bg-amber-900/20 hover:text-slate-50;
+  }
+
+  .recs-view-pill-active {
+    @apply recs-view-pill border-amber-300 bg-amber-100 text-amber-900;
+  }
+
+  .recs-dark .recs-view-pill-active {
+    @apply border-amber-600/50 bg-amber-900/40 text-amber-100;
+  }
+
+  .recs-score-slider {
+    @apply h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-amber-500;
+  }
+
+  .recs-dark .recs-score-slider {
+    @apply bg-slate-700;
+  }
+
+  .recs-breadcrumb-pill {
+    @apply inline-flex items-center rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition-colors hover:border-amber-200 hover:bg-amber-50/60 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400;
+  }
+
+  .recs-dark .recs-breadcrumb-pill {
+    @apply border-slate-600 bg-slate-800 text-slate-100 hover:border-amber-600/50 hover:bg-amber-900/20;
+  }
+
+  .recs-dark h1,
+  .recs-dark .text-slate-900 {
+    color: rgb(248 250 252);
+  }
+
+  .recs-dark .text-slate-800 {
+    color: rgb(241 245 249);
+  }
+
+  .recs-dark .text-slate-700 {
+    color: rgb(226 232 240);
+  }
+
+  .recs-dark .text-slate-600 {
+    color: rgb(203 213 225);
+  }
+
+  .recs-dark .text-slate-500 {
+    color: rgb(186 199 213);
+  }
+
+  .recs-dark .text-slate-400 {
+    color: rgb(148 163 184);
+  }
+
+  .recs-dark .border-slate-100,
+  .recs-dark .border-slate-200 {
+    border-color: rgb(51 65 85);
+  }
+
+  .recs-dark thead {
+    background-color: rgb(30 41 59 / 0.95);
+  }
+
+  .recs-dark thead th {
+    color: rgb(186 199 213);
+  }
+
+  .recs-dark tbody tr:hover {
+    background-color: rgb(120 53 15 / 0.12);
+  }
+
+  .recs-dark .recs-pill-slate {
+    background-color: rgb(51 65 85);
+    color: rgb(226 232 240);
+  }
+
+  .recs-dark .recs-pill-amber {
+    background-color: rgb(120 53 15 / 0.45);
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .border-amber-200.bg-amber-50 {
+    border-color: rgb(180 83 9 / 0.45);
+    background-color: rgb(120 53 15 / 0.25);
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .border-amber-200.bg-amber-50 .text-amber-600,
+  .recs-dark .border-amber-200.bg-amber-50 .text-amber-700,
+  .recs-dark .border-amber-200.bg-amber-50 .text-amber-800,
+  .recs-dark .border-amber-200.bg-amber-50 .text-amber-900 {
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .border-red-200.bg-red-50 {
+    border-color: rgb(185 28 28 / 0.45);
+    background-color: rgb(127 29 29 / 0.25);
+    color: rgb(254 202 202);
+  }
+
+  .recs-dark .border-red-200.bg-red-50 .text-red-600,
+  .recs-dark .border-red-200.bg-red-50 .text-red-700 {
+    color: rgb(254 202 202);
+  }
+
+  .recs-dark .border-sky-200.bg-sky-50 {
+    border-color: rgb(3 105 161 / 0.45);
+    background-color: rgb(12 74 110 / 0.25);
+    color: rgb(186 230 253);
+  }
+
+  .recs-dark .border-sky-200.bg-sky-50 .text-sky-800 {
+    color: rgb(186 230 253);
+  }
+
+  .recs-dark .bg-slate-50\/80 {
+    background-color: rgb(51 65 85 / 0.5);
+  }
+
+  /* Media type badges */
+  .recs-dark .border-rose-100.bg-rose-50 {
+    border-color: rgb(190 18 60 / 0.35);
+    background-color: rgb(136 19 55 / 0.25);
+  }
+
+  .recs-dark .text-rose-700 {
+    color: rgb(253 164 175);
+  }
+
+  .recs-dark .border-sky-100.bg-sky-50 {
+    border-color: rgb(3 105 161 / 0.35);
+    background-color: rgb(12 74 110 / 0.25);
+  }
+
+  .recs-dark .text-sky-700 {
+    color: rgb(125 211 252);
+  }
+
+  .recs-dark .border-amber-100.bg-amber-50 {
+    border-color: rgb(180 83 9 / 0.35);
+    background-color: rgb(120 53 15 / 0.25);
+  }
+
+  .recs-dark .text-amber-700,
+  .recs-dark .text-amber-400 {
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .border-emerald-100.bg-emerald-50 {
+    border-color: rgb(4 120 87 / 0.35);
+    background-color: rgb(6 78 59 / 0.25);
+  }
+
+  .recs-dark .text-emerald-700,
+  .recs-dark .text-emerald-800 {
+    color: rgb(110 231 183);
+  }
+
+  /* Trait chips */
+  .recs-dark .border-blue-100.bg-blue-50\/80 {
+    border-color: rgb(29 78 216 / 0.35);
+    background-color: rgb(30 58 138 / 0.25);
+  }
+
+  .recs-dark .text-blue-800 {
+    color: rgb(147 197 253);
+  }
+
+  .recs-dark .border-emerald-100.bg-emerald-50\/80 {
+    border-color: rgb(4 120 87 / 0.35);
+    background-color: rgb(6 78 59 / 0.25);
+  }
+
+  /* Score badges */
+  .recs-dark .border-emerald-200.bg-emerald-50.text-emerald-800 {
+    border-color: rgb(4 120 87 / 0.45);
+    background-color: rgb(6 78 59 / 0.3);
+    color: rgb(110 231 183);
+  }
+
+  .recs-dark .border-amber-200.bg-amber-50.text-amber-800 {
+    border-color: rgb(180 83 9 / 0.45);
+    background-color: rgb(120 53 15 / 0.3);
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .border-slate-200.bg-slate-50.text-slate-700 {
+    border-color: rgb(71 85 105);
+    background-color: rgb(51 65 85);
+    color: rgb(226 232 240);
+  }
+
+  .recs-dark .text-emerald-700 {
+    color: rgb(110 231 183);
+  }
+
+  .recs-dark .text-amber-700 {
+    color: rgb(253 230 138);
+  }
+
+  /* Feedback action buttons */
+  .recs-dark .border-blue-200.text-blue-700 {
+    border-color: rgb(29 78 216 / 0.45);
+    color: rgb(147 197 253);
+  }
+
+  .recs-dark .border-blue-200.text-blue-700:hover {
+    background-color: rgb(30 58 138 / 0.25);
+  }
+
+  .recs-dark .border-blue-300.bg-blue-50.text-blue-800 {
+    border-color: rgb(37 99 235 / 0.55);
+    background-color: rgb(30 58 138 / 0.35);
+    color: rgb(191 219 254);
+  }
+
+  .recs-dark .border-red-200.text-red-700 {
+    border-color: rgb(185 28 28 / 0.45);
+    color: rgb(252 165 165);
+  }
+
+  .recs-dark .border-red-200.text-red-700:hover {
+    background-color: rgb(127 29 29 / 0.25);
+  }
+
+  .recs-dark .border-red-300.bg-red-50.text-red-800 {
+    border-color: rgb(220 38 38 / 0.55);
+    background-color: rgb(127 29 29 / 0.35);
+    color: rgb(254 202 202);
+  }
+
+  .recs-dark .border-emerald-200.text-emerald-700 {
+    border-color: rgb(4 120 87 / 0.45);
+    color: rgb(110 231 183);
+  }
+
+  .recs-dark .border-emerald-200.text-emerald-700:hover {
+    background-color: rgb(6 78 59 / 0.25);
+  }
+
+  .recs-dark .border-emerald-300.bg-emerald-50.text-emerald-800 {
+    border-color: rgb(5 150 105 / 0.55);
+    background-color: rgb(6 78 59 / 0.35);
+    color: rgb(167 243 208);
+  }
+
+  .recs-dark .border-amber-200.text-amber-700 {
+    border-color: rgb(180 83 9 / 0.45);
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .border-amber-200.text-amber-700:hover {
+    background-color: rgb(120 53 15 / 0.25);
+  }
+
+  .recs-dark .border-amber-300.bg-amber-50.text-amber-800 {
+    border-color: rgb(217 119 6 / 0.55);
+    background-color: rgb(120 53 15 / 0.35);
+    color: rgb(254 243 199);
+  }
+
+  .recs-dark .bg-slate-200 {
+    background-color: rgb(51 65 85);
+  }
+}

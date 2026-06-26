@@ -1,11 +1,20 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
   Ban,
   BookmarkPlus,
+  CheckCircle2,
+  ChevronRight,
   Clapperboard,
   Layers,
+  Loader2,
+  Moon,
   Play,
   RotateCcw,
+  Search,
+  Sun,
   ThumbsDown,
   ThumbsUp,
   Tv,
@@ -104,19 +113,49 @@ interface EmailPreferencesResponse {
   digest_enabled: boolean;
 }
 
-const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; className: string }> = {
-  movie: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
-  movies: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600' },
-  show: { icon: Tv, label: 'Show', className: 'text-sky-600' },
-  shows: { icon: Tv, label: 'Show', className: 'text-sky-600' },
-  series: { icon: Tv, label: 'Show', className: 'text-sky-600' },
-  tv_show: { icon: Tv, label: 'Show', className: 'text-sky-600' },
-  season: { icon: Layers, label: 'Season', className: 'text-amber-600' },
-  seasons: { icon: Layers, label: 'Season', className: 'text-amber-600' },
-  episode: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
-  episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600' },
+const MEDIA_TYPE_ICONS: Record<string, { icon: LucideIcon; label: string; className: string; badgeClassName: string }> = {
+  movie: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600', badgeClassName: 'border-rose-100 bg-rose-50 text-rose-700' },
+  movies: { icon: Clapperboard, label: 'Movie', className: 'text-rose-600', badgeClassName: 'border-rose-100 bg-rose-50 text-rose-700' },
+  show: { icon: Tv, label: 'Show', className: 'text-sky-600', badgeClassName: 'border-sky-100 bg-sky-50 text-sky-700' },
+  shows: { icon: Tv, label: 'Show', className: 'text-sky-600', badgeClassName: 'border-sky-100 bg-sky-50 text-sky-700' },
+  series: { icon: Tv, label: 'Show', className: 'text-sky-600', badgeClassName: 'border-sky-100 bg-sky-50 text-sky-700' },
+  tv_show: { icon: Tv, label: 'Show', className: 'text-sky-600', badgeClassName: 'border-sky-100 bg-sky-50 text-sky-700' },
+  season: { icon: Layers, label: 'Season', className: 'text-amber-600', badgeClassName: 'border-amber-100 bg-amber-50 text-amber-700' },
+  seasons: { icon: Layers, label: 'Season', className: 'text-amber-600', badgeClassName: 'border-amber-100 bg-amber-50 text-amber-700' },
+  episode: { icon: Play, label: 'Episode', className: 'text-emerald-600', badgeClassName: 'border-emerald-100 bg-emerald-50 text-emerald-700' },
+  episodes: { icon: Play, label: 'Episode', className: 'text-emerald-600', badgeClassName: 'border-emerald-100 bg-emerald-50 text-emerald-700' },
 };
 const RECOMMENDATION_PAGE_LIMIT = 100;
+
+const VIEW_MODE_OPTIONS: Array<{ value: ViewMode; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'movies', label: 'Movies' },
+  { value: 'shows', label: 'Shows' },
+  { value: 'seasons', label: 'Seasons' },
+  { value: 'episodes', label: 'Episodes' },
+];
+
+function getScoreColorClasses(scorePct: number) {
+  if (scorePct >= 80) {
+    return {
+      text: 'text-emerald-700',
+      bar: 'bg-emerald-500',
+      badge: 'border-emerald-200 bg-emerald-50 text-emerald-800 ring-emerald-200',
+    };
+  }
+  if (scorePct >= 60) {
+    return {
+      text: 'text-amber-700',
+      bar: 'bg-amber-500',
+      badge: 'border-amber-200 bg-amber-50 text-amber-800 ring-amber-200',
+    };
+  }
+  return {
+    text: 'text-slate-600',
+    bar: 'bg-slate-400',
+    badge: 'border-slate-200 bg-slate-50 text-slate-700 ring-slate-200',
+  };
+}
 
 const FEEDBACK_ACTIONS: Array<{
   action: FeedbackAction;
@@ -403,14 +442,14 @@ function MediaTypeIcon({ mediaType }: { mediaType: string }) {
   const iconConfig = getMediaTypeConfig(mediaType);
 
   if (!iconConfig) {
-    return <span className="text-xs uppercase tracking-wide text-gray-500">{mediaType}</span>;
+    return <span className="text-xs uppercase tracking-wide text-slate-500">{mediaType}</span>;
   }
 
   const Icon = iconConfig.icon;
 
   return (
     <span
-      className={`inline-flex items-center justify-center ${iconConfig.className}`}
+      className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border ${iconConfig.badgeClassName}`}
       title={iconConfig.label}
     >
       <Icon aria-hidden="true" size={16} strokeWidth={2} />
@@ -423,13 +462,13 @@ function MediaTypeBadge({ mediaType }: { mediaType: string }) {
   const iconConfig = getMediaTypeConfig(mediaType);
 
   if (!iconConfig) {
-    return <span className="text-xs uppercase tracking-wide text-gray-500">{mediaType}</span>;
+    return <span className="text-xs uppercase tracking-wide text-slate-500">{mediaType}</span>;
   }
 
   const Icon = iconConfig.icon;
 
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${iconConfig.className}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold uppercase tracking-wide ${iconConfig.badgeClassName}`}>
       <Icon aria-hidden="true" size={14} strokeWidth={2} />
       <span>{iconConfig.label}</span>
     </span>
@@ -440,12 +479,15 @@ function RecommendationPoster({
   posterUrl,
   plexItemUrl,
   title,
+  size = 'desktop',
 }: {
   posterUrl?: string | null;
   plexItemUrl?: string | null;
   title: string;
+  size?: 'desktop' | 'mobile';
 }) {
   const [hasImageError, setHasImageError] = useState(false);
+  const sizeClass = size === 'mobile' ? 'h-24 w-16' : 'h-20 w-14';
 
   useEffect(() => {
     setHasImageError(false);
@@ -454,7 +496,7 @@ function RecommendationPoster({
   const poster = !posterUrl || hasImageError ? (
     <span
       aria-hidden="true"
-      className="inline-flex h-20 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-gray-200 bg-gray-100 text-[9px] font-semibold uppercase tracking-wide text-gray-400"
+      className={`inline-flex ${sizeClass} shrink-0 items-center justify-center overflow-hidden rounded-lg border border-amber-100 bg-amber-50/60 text-[9px] font-semibold uppercase tracking-wide text-amber-400 shadow-sm`}
     >
       No Art
     </span>
@@ -465,7 +507,7 @@ function RecommendationPoster({
       loading="lazy"
       decoding="async"
       onError={() => setHasImageError(true)}
-      className="h-20 w-14 shrink-0 rounded-md border border-gray-200 bg-gray-100 object-cover"
+      className={`${sizeClass} shrink-0 rounded-lg border border-slate-200/80 bg-slate-100 object-cover shadow-sm`}
     />
   );
 
@@ -481,7 +523,7 @@ function RecommendationPoster({
       aria-label={`Open ${title} in Plex`}
       title={`Open ${title} in Plex`}
       onClick={(event) => event.stopPropagation()}
-      className="inline-flex h-20 w-14 shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className={`inline-flex ${sizeClass} shrink-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400`}
     >
       {poster}
     </a>
@@ -505,12 +547,12 @@ function RecommendationChipGroup({
 
   return (
     <div className="min-w-0">
-      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">{label}</p>
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
       <div className="flex flex-wrap gap-1">
         {chips.map((chip, index) => (
           <span
             key={`${chip}-${index}`}
-            className={`inline-block min-w-0 max-w-full whitespace-normal break-words rounded-full text-left leading-snug ${chipClassName} ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
+            className={`inline-block min-w-0 max-w-full whitespace-normal break-words rounded-full border text-left leading-snug ${chipClassName} ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
           >
             {chip}
           </span>
@@ -541,13 +583,13 @@ function RecommendationExplanation({
       <RecommendationChipGroup
         label="Title Traits"
         chips={safeTitleTraits}
-        chipClassName="bg-blue-100 text-blue-800"
+        chipClassName="border-blue-100 bg-blue-50/80 text-blue-800"
         compact={compact}
       />
       <RecommendationChipGroup
         label="Taste Match"
         chips={safeTasteMatch}
-        chipClassName="bg-emerald-100 text-emerald-800"
+        chipClassName="border-emerald-100 bg-emerald-50/80 text-emerald-800"
         compact={compact}
       />
     </div>
@@ -559,33 +601,55 @@ function RecommendationScore({
   isPending,
   statusMessage,
   compact = false,
+  badge = false,
 }: {
   rec: Recommendation;
   isPending: boolean;
   statusMessage?: string | null;
   compact?: boolean;
+  badge?: boolean;
 }) {
   const scorePct = rec.predicted_probability * 100;
+  const colors = getScoreColorClasses(scorePct);
+
+  if (badge) {
+    return (
+      <div className="flex flex-col items-end text-right">
+        <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-sm font-bold ring-2 ring-inset ${colors.badge}`}>
+          {scorePct.toFixed(1)}%
+        </span>
+        {rec.score_band && (
+          <span className="mt-1 text-[10px] text-slate-500">Band: {rec.score_band}</span>
+        )}
+        {isPending && (
+          <span className="mt-1 text-[10px] text-slate-500">Saving...</span>
+        )}
+        {!isPending && statusMessage && (
+          <span className="mt-1 max-w-[10rem] text-[10px] leading-snug text-slate-500">{statusMessage}</span>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={`flex flex-col ${compact ? 'items-end text-right' : ''}`}>
-      <span className={`${compact ? 'text-lg font-semibold leading-none' : 'mb-1 text-sm'}`}>
+      <span className={`font-semibold ${colors.text} ${compact ? 'text-lg leading-none' : 'mb-1 text-sm'}`}>
         {scorePct.toFixed(1)}%
       </span>
-      <div className={`w-full rounded-full bg-gray-200 ${compact ? 'mt-2 h-1.5 max-w-[6rem]' : 'h-2'}`}>
+      <div className={`w-full rounded-full bg-slate-200 ${compact ? 'mt-2 h-1.5 max-w-[6rem]' : 'h-2'}`}>
         <div
-          className={`rounded-full bg-blue-600 ${compact ? 'h-1.5' : 'h-2'}`}
+          className={`rounded-full ${colors.bar} ${compact ? 'h-1.5' : 'h-2'}`}
           style={{ width: `${scorePct.toFixed(0)}%` }}
         />
       </div>
       {rec.score_band && (
-        <span className="mt-2 text-xs text-gray-500">Band: {rec.score_band}</span>
+        <span className="mt-2 text-xs text-slate-500">Band: {rec.score_band}</span>
       )}
       {isPending && (
-        <span className="mt-2 text-xs text-gray-500">Saving feedback...</span>
+        <span className="mt-2 text-xs text-slate-500">Saving feedback...</span>
       )}
       {!isPending && statusMessage && (
-        <span className="mt-2 text-xs text-gray-500">{statusMessage}</span>
+        <span className="mt-2 text-xs text-slate-500">{statusMessage}</span>
       )}
     </div>
   );
@@ -616,7 +680,7 @@ function FeedbackActionButtons({
       <div className={`flex-col gap-3 ${visibilityClass}`}>
         {groups.map((groupLabel) => (
           <div key={groupLabel} className="space-y-1">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{groupLabel}</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{groupLabel}</p>
             <div className="flex flex-wrap gap-2">
               {FEEDBACK_ACTIONS.filter((config) => config.groupLabel === groupLabel).map((config) => {
                 const Icon = config.icon;
@@ -633,7 +697,7 @@ function FeedbackActionButtons({
                       event.stopPropagation();
                       onAction(rec, config.action);
                     }}
-                    className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${isActive ? config.activeClassName : config.className}`}
+                    className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-60 ${isActive ? config.activeClassName : config.className}`}
                   >
                     <Icon aria-hidden="true" size={14} strokeWidth={2} />
                     <span>{config.label}</span>
@@ -652,7 +716,7 @@ function FeedbackActionButtons({
               onUndo(rec);
             }}
             disabled={isPending}
-            className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+            className="recs-btn-secondary"
           >
             <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
             <span>Undo</span>
@@ -669,7 +733,7 @@ function FeedbackActionButtons({
   return (
     <div className="flex flex-col gap-3">
       <div className="space-y-1">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">All episodes</p>
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">All episodes</p>
         <div className="flex flex-wrap gap-2">
           {BULK_FEEDBACK_ACTIONS.map((config) => {
             const Icon = config.icon;
@@ -686,7 +750,7 @@ function FeedbackActionButtons({
                   event.stopPropagation();
                   onBulkAction(rec, config.action);
                 }}
-                className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${config.className}`}
+                className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-60 ${config.className}`}
               >
                 <Icon aria-hidden="true" size={14} strokeWidth={2} />
                 <span>{config.bulkLabel}</span>
@@ -701,24 +765,81 @@ function FeedbackActionButtons({
 
 function RecommendationTitleCell({
   rec,
-  isCompact = false,
+  layout = 'desktop',
 }: {
   rec: Recommendation;
-  isCompact?: boolean;
+  layout?: 'desktop' | 'mobile';
 }) {
+  if (layout === 'mobile') {
+    return (
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <RecommendationPoster posterUrl={rec.poster_url} plexItemUrl={rec.plex_item_url} title={rec.title} size="mobile" />
+        <div className="min-w-0 flex-1">
+          <p className="text-base font-semibold leading-tight text-slate-900">{rec.title}</p>
+          <div className="mt-1 space-y-0.5 text-sm text-slate-600">
+            {[
+              rec.show_title,
+              [
+                rec.season_number != null ? `S${rec.season_number}` : null,
+                rec.episode_number != null ? `E${rec.episode_number}` : null,
+              ].filter(Boolean).join(' • ') || null,
+              rec.year != null ? String(rec.year) : null,
+            ]
+              .filter(Boolean)
+              .join(' • ')}
+            {rec.genres && (
+              <p className="truncate text-xs text-slate-500">{rec.genres}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`flex ${isCompact ? 'flex-col items-center text-center' : 'items-start gap-3'}`}>
+    <div className="flex items-start gap-3">
       <RecommendationPoster posterUrl={rec.poster_url} plexItemUrl={rec.plex_item_url} title={rec.title} />
-      <div className={isCompact ? 'mt-2' : ''}>
-        <p className="text-sm font-semibold leading-tight text-gray-900">{rec.title}</p>
+      <div>
+        <p className="text-sm font-semibold leading-tight text-slate-900">{rec.title}</p>
       </div>
     </div>
+  );
+}
+
+function SortableTableHeader({
+  label,
+  column,
+  sortOrder,
+  onSort,
+}: {
+  label: string;
+  column: keyof Recommendation;
+  sortOrder: SortState[];
+  onSort: (column: keyof Recommendation, shiftKey?: boolean) => void;
+}) {
+  const activeSort = sortOrder.find((sort) => sort.column === column);
+
+  return (
+    <th
+      className="cursor-pointer select-none px-4 py-3 transition-colors hover:text-slate-900"
+      onClick={(event) => onSort(column, event.shiftKey)}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {activeSort && (
+          activeSort.direction === 'asc'
+            ? <ArrowUp aria-hidden="true" size={12} strokeWidth={2} />
+            : <ArrowDown aria-hidden="true" size={12} strokeWidth={2} />
+        )}
+      </span>
+    </th>
   );
 }
 
 function DesktopRecommendationsTable({
   recommendations,
   pendingKeys,
+  sortOrder,
   onSort,
   onRowClick,
   onAction,
@@ -728,6 +849,7 @@ function DesktopRecommendationsTable({
 }: {
   recommendations: Recommendation[];
   pendingKeys: number[];
+  sortOrder: SortState[];
   onSort: (column: keyof Recommendation, shiftKey?: boolean) => void;
   onRowClick: (rec: Recommendation) => void;
   onAction: (rec: Recommendation, action: FeedbackAction) => void;
@@ -736,16 +858,16 @@ function DesktopRecommendationsTable({
   isRowClickable: (rec: Recommendation) => boolean;
 }) {
   return (
-    <div className="hidden md:block">
-      <div className="overflow-x-auto">
-        <table className="min-w-full rounded-xl border border-gray-200 bg-white text-gray-900 shadow">
-          <thead>
-            <tr className="border-b bg-gray-100 text-left text-sm text-gray-600">
+    <div className="recs-surface hidden overflow-hidden md:block">
+      <div className="max-h-[70vh] overflow-auto">
+        <table className="min-w-full text-slate-900">
+          <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur">
+            <tr className="border-b border-slate-200 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">
               <th className="px-4 py-3 text-center">Type</th>
               <th className="px-4 py-3">Title</th>
               <th className="px-4 py-3">Show</th>
-              <th className="cursor-pointer px-4 py-3" onClick={(event) => onSort('season_number', event.shiftKey)}>Season</th>
-              <th className="cursor-pointer px-4 py-3" onClick={(event) => onSort('episode_number', event.shiftKey)}>Episode</th>
+              <SortableTableHeader label="Season" column="season_number" sortOrder={sortOrder} onSort={onSort} />
+              <SortableTableHeader label="Episode" column="episode_number" sortOrder={sortOrder} onSort={onSort} />
               <th className="px-4 py-3">Year</th>
               <th className="px-4 py-3">Genres</th>
               <th className="px-4 py-3">Why this?</th>
@@ -769,20 +891,20 @@ function DesktopRecommendationsTable({
                       onRowClick(rec);
                     }
                   }}
-                  className={`group border-b transition-colors duration-300 hover:bg-gray-50 ${canOpenRow ? 'cursor-pointer' : ''}`}
+                  className={`group border-b border-slate-100 transition-colors duration-200 hover:bg-amber-50/30 ${canOpenRow ? 'cursor-pointer hover:border-l-2 hover:border-l-amber-400' : ''}`}
                 >
-                  <td className="px-4 py-2 text-center">
+                  <td className="px-4 py-3 text-center">
                     <MediaTypeIcon mediaType={rec.media_type} />
                   </td>
-                  <td className="px-4 py-2">
+                  <td className="px-4 py-3">
                     <RecommendationTitleCell rec={rec} />
                   </td>
-                  <td className="px-4 py-2">{rec.show_title || '—'}</td>
-                  <td className="px-4 py-2">{rec.season_number ?? '—'}</td>
-                  <td className="px-4 py-2">{rec.episode_number ?? '—'}</td>
-                  <td className="px-4 py-2">{rec.year ?? '—'}</td>
-                  <td className="px-4 py-2">{rec.genres || '—'}</td>
-                  <td className="px-4 py-2">
+                  <td className="px-4 py-3 text-sm text-slate-700">{rec.show_title || '—'}</td>
+                  <td className="px-4 py-3 text-sm text-slate-700">{rec.season_number ?? '—'}</td>
+                  <td className="px-4 py-3 text-sm text-slate-700">{rec.episode_number ?? '—'}</td>
+                  <td className="px-4 py-3 text-sm text-slate-700">{rec.year ?? '—'}</td>
+                  <td className="px-4 py-3 text-sm text-slate-600">{rec.genres || '—'}</td>
+                  <td className="px-4 py-3">
                     {(rec.title_traits?.length ?? 0) === 0 && (rec.taste_match?.length ?? 0) === 0 ? (
                       '—'
                     ) : (
@@ -792,10 +914,10 @@ function DesktopRecommendationsTable({
                       />
                     )}
                   </td>
-                  <td className="px-4 py-2">
+                  <td className="px-4 py-3">
                     <RecommendationScore rec={rec} isPending={isPending} statusMessage={statusMessage} />
                   </td>
-                  <td className="px-4 py-2">
+                  <td className="px-4 py-3">
                     <FeedbackActionButtons
                       rec={rec}
                       isPending={isPending}
@@ -853,6 +975,7 @@ function MobileRecommendationsList({
         const statusMessage = canSubmitBulkFeedback(rec.media_type)
           ? getAggregateStatusMessage(rec)
           : getFeedbackStatusMessage(rec);
+        const hasExplanation = (rec.title_traits?.length ?? 0) > 0 || (rec.taste_match?.length ?? 0) > 0;
 
         return (
           <div
@@ -865,58 +988,36 @@ function MobileRecommendationsList({
               }
             }}
             onKeyDown={(event) => handleCardKeyDown(event, rec)}
-            className={`rounded-xl border border-gray-200 bg-white p-4 text-gray-900 shadow-sm ${canOpenRow ? 'cursor-pointer active:bg-gray-50' : ''}`}
+            className={`recs-surface p-4 transition-transform ${canOpenRow ? 'cursor-pointer active:scale-[0.99] active:bg-amber-50/20' : ''}`}
           >
             <div className="flex items-start justify-between gap-3">
               <MediaTypeBadge mediaType={rec.media_type} />
-              <RecommendationScore rec={rec} isPending={isPending} statusMessage={statusMessage} compact />
+              <RecommendationScore rec={rec} isPending={isPending} statusMessage={statusMessage} badge />
             </div>
 
-            <div className="mt-4">
-              <RecommendationTitleCell rec={rec} isCompact />
+            <div className="mt-3">
+              <RecommendationTitleCell rec={rec} layout="mobile" />
             </div>
 
-            <div className="mt-4 space-y-1 text-sm text-gray-600">
-              {rec.show_title && (
-                <div>
-                  <span className="font-medium text-gray-700">Show:</span> {rec.show_title}
+            {hasExplanation && (
+              <details className="mt-4 group/details">
+                <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-wide text-slate-500 [&::-webkit-details-marker]:hidden">
+                  <span className="inline-flex items-center gap-1">
+                    Why this?
+                    <ChevronRight aria-hidden="true" size={14} className="transition-transform group-open/details:rotate-90" />
+                  </span>
+                </summary>
+                <div className="mt-2">
+                  <RecommendationExplanation
+                    titleTraits={rec.title_traits}
+                    tasteMatch={rec.taste_match}
+                    compact
+                  />
                 </div>
-              )}
-              {(rec.season_number != null || rec.episode_number != null) && (
-                <div>
-                  <span className="font-medium text-gray-700">Episode:</span>{' '}
-                  {[
-                    rec.season_number != null ? `Season ${rec.season_number}` : null,
-                    rec.episode_number != null ? `Episode ${rec.episode_number}` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(' • ')}
-                </div>
-              )}
-              {rec.year != null && (
-                <div>
-                  <span className="font-medium text-gray-700">Year:</span> {rec.year}
-                </div>
-              )}
-              {rec.genres && (
-                <div>
-                  <span className="font-medium text-gray-700">Genres:</span> {rec.genres}
-                </div>
-              )}
-            </div>
-
-            {((rec.title_traits?.length ?? 0) > 0 || (rec.taste_match?.length ?? 0) > 0) && (
-              <div className="mt-4">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Why this?</p>
-                <RecommendationExplanation
-                  titleTraits={rec.title_traits}
-                  tasteMatch={rec.taste_match}
-                  compact
-                />
-              </div>
+              </details>
             )}
 
-            <div className="mt-4">
+            <div className="mt-4 border-t border-slate-100 pt-4">
               <FeedbackActionButtons
                 rec={rec}
                 isPending={isPending}
@@ -929,6 +1030,53 @@ function MobileRecommendationsList({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function RecommendationsLoadingSkeleton() {
+  return (
+    <>
+      <div className="space-y-3 md:hidden">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <div key={`mobile-skeleton-${index}`} className="recs-surface animate-pulse p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="h-6 w-20 rounded-full bg-slate-200" />
+              <div className="h-8 w-14 rounded-full bg-slate-200" />
+            </div>
+            <div className="mt-3 flex gap-3">
+              <div className="h-24 w-16 shrink-0 rounded-lg bg-slate-200" />
+              <div className="flex-1 space-y-2">
+                <div className="h-4 w-3/4 rounded bg-slate-200" />
+                <div className="h-3 w-1/2 rounded bg-slate-200" />
+                <div className="h-3 w-2/3 rounded bg-slate-200" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="recs-surface hidden animate-pulse overflow-hidden md:block">
+        <div className="space-y-0 p-4">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={`desktop-skeleton-${index}`} className="flex items-center gap-4 border-b border-slate-100 py-4 last:border-b-0">
+              <div className="h-8 w-8 rounded-lg bg-slate-200" />
+              <div className="h-20 w-14 rounded-lg bg-slate-200" />
+              <div className="flex-1 space-y-2">
+                <div className="h-4 w-1/3 rounded bg-slate-200" />
+                <div className="h-3 w-1/4 rounded bg-slate-200" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function RecommendationsEmptyState({ message }: { message: string }) {
+  return (
+    <div className="recs-surface-muted px-6 py-10 text-center">
+      <p className="text-sm text-slate-600">{message}</p>
     </div>
   );
 }
@@ -1354,209 +1502,269 @@ export default function Recommendations() {
   const emptyRecommendationsMessage = getEmptyRecommendationsMessage(viewMode, selectedShow, selectedSeason);
 
   return (
-    <div className={`mx-auto w-full max-w-7xl overflow-x-hidden px-3 py-4 sm:px-4 ${darkMode ? 'bg-gray-900 text-white' : 'bg-white text-black'}`}>
-      <h1 className="mb-2 text-2xl font-bold md:text-3xl">
-        Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}
-      </h1>
-      {lastUpdated && (
-        <div className={`mb-3 text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-          Last updated: {new Date(lastUpdated).toLocaleString()}
-        </div>
-      )}
-      {isRefreshing && (
-        <div className={`mb-4 rounded-md border px-3 py-2 text-sm ${darkMode ? 'border-amber-500/40 bg-amber-950/40 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-          Recommendations are currently being refreshed. You are seeing the last best version.
-        </div>
-      )}
-
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-3">
-          {isAdmin && (
-            <Link
-              to="/admin"
-              className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100"
-            >
-              Admin View
-            </Link>
-          )}
-          <label className="flex items-center space-x-2 text-sm">
-            <input type="checkbox" checked={darkMode} onChange={() => setDarkMode(!darkMode)} />
-            <span>Dark Mode</span>
-          </label>
-        </div>
-      </div>
-
-      {emailPreferences && (
-        <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-slate-700">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="font-medium text-slate-900">Recommendation emails</p>
-              <p className="mt-1 text-slate-600">
-                {emailPreferences.has_email
-                  ? `Scheduled digests will be sent to ${emailPreferences.email}.`
-                  : 'No email address is currently available for this account.'}
-              </p>
-              {emailPreferencesError && (
-                <p className="mt-2 text-xs text-red-600">{emailPreferencesError}</p>
+    <div className={`recs-page ${darkMode ? 'recs-dark' : ''}`}>
+      <div className="mx-auto w-full max-w-7xl overflow-x-hidden px-3 py-6 sm:px-4 sm:py-8">
+        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900">
+              Recommendations for {recs[0]?.friendly_name || plexUser || 'user'}
+            </h1>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {lastUpdated && (
+                <span className="recs-pill-slate">
+                  Last updated {new Date(lastUpdated).toLocaleString()}
+                </span>
+              )}
+              {isRefreshing && (
+                <span className="recs-pill-amber">
+                  <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+                  Refreshing recommendations
+                </span>
               )}
             </div>
-            <label className="inline-flex items-center gap-2 text-sm text-slate-800">
-              <input
-                type="checkbox"
-                checked={emailPreferences.digest_enabled}
-                disabled={emailPreferencesBusy || !emailPreferences.has_email}
-                onChange={(event) => void updateEmailPreference(event.target.checked)}
-              />
-              <span>{emailPreferences.digest_enabled ? 'Emails enabled' : 'Emails disabled'}</span>
-            </label>
           </div>
-        </div>
-      )}
 
-      {undoState && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-          <span>
-            {feedbackActionLabel(undoState.action)} recorded for <span className="font-medium">{undoState.recommendation.title}</span>.
-          </span>
-          <button
-            type="button"
-            onClick={() => undoFeedback(undoState.recommendation)}
-            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-          >
-            <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
-            <span>Undo</span>
-          </button>
-        </div>
-      )}
-
-      <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <input
-          type="text"
-          placeholder="Search by title, show, genre, or theme..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full rounded-md border border-gray-300 p-2 shadow-sm"
-        />
-
-        <select
-          value={viewMode}
-          onChange={(e) => handleViewSelect(e.target.value as ViewMode)}
-          className="w-full rounded-md border border-gray-300 p-2 shadow-sm"
-        >
-          <option value="all">All</option>
-          <option value="movies">Movies</option>
-          <option value="shows">Shows</option>
-          <option value="seasons">Seasons</option>
-          <option value="episodes">Episodes</option>
-        </select>
-
-        <div className="col-span-1 sm:col-span-2">
-          <label htmlFor="score-range" className="mb-1 block text-sm font-medium text-gray-700">
-            Minimum Score: {minScore}%
-          </label>
-          <input
-            id="score-range"
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            value={minScore}
-            onChange={(e) => setMinScore(Number(e.target.value))}
-            className="w-full"
-          />
-        </div>
-      </div>
-
-      {pageError && (
-        <div className="mb-4 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
-          Error: {pageError}
-        </div>
-      )}
-
-      {pageMessage && (
-        <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
-          {pageMessage}
-        </div>
-      )}
-
-      {(viewMode === 'seasons' || viewMode === 'episodes') && selectedShow && (
-        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-gray-600">
-          <button
-            onClick={() => {
-              setSelectedSeason(null);
-              setViewMode('shows');
-              setPageMessage(null);
-            }}
-            className="text-blue-600 underline hover:text-blue-800"
-          >
-            Back to Shows
-          </button>
-          <span>Show: {selectedShow.title}</span>
-          {viewMode === 'episodes' && selectedSeason && (
-            <>
-              <span>•</span>
-              <button
-                onClick={() => {
-                  setSelectedSeason(null);
-                  setViewMode('seasons');
-                  setPageMessage(null);
-                }}
-                className="text-blue-600 underline hover:text-blue-800"
-              >
-                Back to Seasons
-              </button>
-              <span>Season: {selectedSeason.title}</span>
-            </>
-          )}
-        </div>
-      )}
-
-      {isLoadingRecommendations && recs.length === 0 ? (
-        <div className="rounded-xl border border-gray-200 bg-white px-4 py-6 text-sm text-gray-500 shadow-sm">
-          Loading recommendations...
-        </div>
-      ) : recs.length === 0 ? (
-        <div className="rounded-xl border border-gray-200 bg-white px-4 py-6 text-sm text-gray-500 shadow-sm">
-          {emptyRecommendationsMessage}
-        </div>
-      ) : (
-        <>
-          <MobileRecommendationsList
-            recommendations={recs}
-            pendingKeys={pendingKeys}
-            onRowClick={handleRowClick}
-            onAction={sendFeedback}
-            onBulkAction={sendBulkFeedback}
-            onUndo={undoFeedback}
-            isRowClickable={isRowClickable}
-          />
-          <DesktopRecommendationsTable
-            recommendations={recs}
-            pendingKeys={pendingKeys}
-            onSort={handleSort}
-            onRowClick={handleRowClick}
-            onAction={sendFeedback}
-            onBulkAction={sendBulkFeedback}
-            onUndo={undoFeedback}
-            isRowClickable={isRowClickable}
-          />
-          <div className="mt-4 flex items-center justify-center">
-            {hasMore ? (
-              <button
-                type="button"
-                onClick={() => void loadMoreRecommendations()}
-                disabled={isLoadingMore}
-                className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isLoadingMore ? 'Loading...' : 'Load more'}
-              </button>
-            ) : (
-              <span className="text-sm text-gray-500">Showing all loaded matches</span>
+          <div className="flex flex-wrap items-center gap-2">
+            {isAdmin && (
+              <Link to="/admin" className="recs-btn-secondary px-4 py-2 text-sm">
+                Admin View
+              </Link>
             )}
+            <button
+              type="button"
+              onClick={() => setDarkMode(!darkMode)}
+              className="recs-btn-secondary px-3 py-2"
+              aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-pressed={darkMode}
+            >
+              {darkMode ? (
+                <Sun aria-hidden="true" size={16} strokeWidth={2} />
+              ) : (
+                <Moon aria-hidden="true" size={16} strokeWidth={2} />
+              )}
+              <span className="sr-only">{darkMode ? 'Light mode' : 'Dark mode'}</span>
+            </button>
           </div>
-        </>
-      )}
+        </div>
 
+        {isRefreshing && (
+          <div className="mb-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <Loader2 aria-hidden="true" className="mt-0.5 shrink-0 animate-spin text-amber-600" size={16} strokeWidth={2} />
+            <p>Recommendations are currently being refreshed. You are seeing the last best version.</p>
+          </div>
+        )}
+
+        {emailPreferences && (
+          <div className="recs-surface mb-4 overflow-hidden">
+            <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Email preferences</p>
+            </div>
+            <div className="flex flex-col gap-3 px-4 py-4 text-sm text-slate-700 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="font-medium text-slate-900">Recommendation emails</p>
+                <p className="mt-1 text-slate-600">
+                  {emailPreferences.has_email
+                    ? `Scheduled digests will be sent to ${emailPreferences.email}.`
+                    : 'No email address is currently available for this account.'}
+                </p>
+                {emailPreferencesError && (
+                  <p className="mt-2 flex items-center gap-1 text-xs text-red-600">
+                    <AlertCircle aria-hidden="true" size={14} />
+                    {emailPreferencesError}
+                  </p>
+                )}
+              </div>
+              <label className="inline-flex cursor-pointer items-center gap-3 text-sm text-slate-800">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-400"
+                  checked={emailPreferences.digest_enabled}
+                  disabled={emailPreferencesBusy || !emailPreferences.has_email}
+                  onChange={(event) => void updateEmailPreference(event.target.checked)}
+                />
+                <span>{emailPreferences.digest_enabled ? 'Emails enabled' : 'Emails disabled'}</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {undoState && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <span className="flex items-center gap-2">
+              <CheckCircle2 aria-hidden="true" size={16} className="text-amber-700" />
+              {feedbackActionLabel(undoState.action)} recorded for <span className="font-medium">{undoState.recommendation.title}</span>.
+            </span>
+            <button
+              type="button"
+              onClick={() => undoFeedback(undoState.recommendation)}
+              className="recs-btn-secondary bg-white"
+            >
+              <RotateCcw aria-hidden="true" size={14} strokeWidth={2} />
+              <span>Undo</span>
+            </button>
+          </div>
+        )}
+
+        <div className="recs-surface mb-4 p-4">
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Filters</p>
+          <div className="space-y-4">
+            <div className="relative">
+              <Search
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                size={16}
+                strokeWidth={2}
+              />
+              <input
+                type="text"
+                placeholder="Search by title, show, genre, or theme..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="recs-input pl-9"
+              />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-slate-600">View</p>
+              <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 snap-x snap-mandatory">
+                {VIEW_MODE_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => handleViewSelect(option.value)}
+                    className={viewMode === option.value ? 'recs-view-pill-active' : 'recs-view-pill-inactive'}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <label htmlFor="score-range" className="text-xs font-medium text-slate-600">
+                  Minimum score
+                </label>
+                <span className="recs-pill-amber font-semibold">{minScore}%</span>
+              </div>
+              <input
+                id="score-range"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={minScore}
+                onChange={(e) => setMinScore(Number(e.target.value))}
+                className="recs-score-slider"
+              />
+            </div>
+          </div>
+        </div>
+
+        {pageError && (
+          <div className="mb-4 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <AlertCircle aria-hidden="true" className="mt-0.5 shrink-0" size={16} strokeWidth={2} />
+            <p>Error: {pageError}</p>
+          </div>
+        )}
+
+        {pageMessage && (
+          <div className="mb-4 flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+            <CheckCircle2 aria-hidden="true" className="mt-0.5 shrink-0" size={16} strokeWidth={2} />
+            <p>{pageMessage}</p>
+          </div>
+        )}
+
+        {(viewMode === 'seasons' || viewMode === 'episodes') && selectedShow && (
+          <nav aria-label="Drill-down navigation" className="mb-4 flex flex-wrap items-center gap-2 text-sm">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedSeason(null);
+                setViewMode('shows');
+                setPageMessage(null);
+              }}
+              className="recs-breadcrumb-pill"
+            >
+              Shows
+            </button>
+            <ChevronRight aria-hidden="true" size={14} className="text-slate-400" />
+            <span className="recs-pill-slate max-w-[12rem] truncate" title={selectedShow.title}>
+              {selectedShow.title}
+            </span>
+            {viewMode === 'episodes' && selectedSeason && (
+              <>
+                <ChevronRight aria-hidden="true" size={14} className="text-slate-400" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedSeason(null);
+                    setViewMode('seasons');
+                    setPageMessage(null);
+                  }}
+                  className="recs-breadcrumb-pill"
+                >
+                  Seasons
+                </button>
+                <ChevronRight aria-hidden="true" size={14} className="text-slate-400" />
+                <span className="recs-pill-slate max-w-[12rem] truncate" title={selectedSeason.title}>
+                  {selectedSeason.title}
+                </span>
+              </>
+            )}
+          </nav>
+        )}
+
+        {isLoadingRecommendations && recs.length === 0 ? (
+          <RecommendationsLoadingSkeleton />
+        ) : recs.length === 0 ? (
+          <RecommendationsEmptyState message={emptyRecommendationsMessage} />
+        ) : (
+          <>
+            <MobileRecommendationsList
+              recommendations={recs}
+              pendingKeys={pendingKeys}
+              onRowClick={handleRowClick}
+              onAction={sendFeedback}
+              onBulkAction={sendBulkFeedback}
+              onUndo={undoFeedback}
+              isRowClickable={isRowClickable}
+            />
+            <DesktopRecommendationsTable
+              recommendations={recs}
+              pendingKeys={pendingKeys}
+              sortOrder={sortOrder}
+              onSort={handleSort}
+              onRowClick={handleRowClick}
+              onAction={sendFeedback}
+              onBulkAction={sendBulkFeedback}
+              onUndo={undoFeedback}
+              isRowClickable={isRowClickable}
+            />
+            <div className="mt-6 flex items-center justify-center">
+              {hasMore ? (
+                <button
+                  type="button"
+                  onClick={() => void loadMoreRecommendations()}
+                  disabled={isLoadingMore}
+                  className="recs-btn-secondary px-5 py-2.5 text-sm"
+                >
+                  {isLoadingMore ? (
+                    <>
+                      <Loader2 aria-hidden="true" className="animate-spin" size={16} strokeWidth={2} />
+                      Loading...
+                    </>
+                  ) : (
+                    'Load more'
+                  )}
+                </button>
+              ) : (
+                <span className="text-sm text-slate-500">Showing all loaded matches</span>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
