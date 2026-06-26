@@ -135,6 +135,10 @@ const VIEW_MODE_OPTIONS: Array<{ value: ViewMode; label: string }> = [
   { value: 'episodes', label: 'Episodes' },
 ];
 
+function formatScorePercent(probability: number) {
+  return `${(Number(probability) * 100).toFixed(1)}%`;
+}
+
 function getScoreColorClasses(scorePct: number) {
   if (scorePct >= 80) {
     return {
@@ -611,12 +615,13 @@ function RecommendationScore({
 }) {
   const scorePct = rec.predicted_probability * 100;
   const colors = getScoreColorClasses(scorePct);
+  const scoreLabel = formatScorePercent(rec.predicted_probability);
 
   if (badge) {
     return (
-      <div className="flex flex-col items-end text-right">
-        <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-sm font-bold ring-2 ring-inset ${colors.badge}`}>
-          {scorePct.toFixed(1)}%
+      <div className="flex shrink-0 flex-col items-end text-right">
+        <span className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full border px-2.5 py-1 text-sm font-bold tabular-nums ring-2 ring-inset ${colors.badge}`}>
+          {scoreLabel}
         </span>
         {rec.score_band && (
           <span className="mt-1 text-[10px] text-slate-500">Band: {rec.score_band}</span>
@@ -633,8 +638,8 @@ function RecommendationScore({
 
   return (
     <div className={`flex flex-col ${compact ? 'items-end text-right' : ''}`}>
-      <span className={`font-semibold ${colors.text} ${compact ? 'text-lg leading-none' : 'mb-1 text-sm'}`}>
-        {scorePct.toFixed(1)}%
+      <span className={`font-semibold tabular-nums ${colors.text} ${compact ? 'text-lg leading-none' : 'mb-1 text-sm'}`}>
+        {scoreLabel}
       </span>
       <div className={`w-full rounded-full bg-slate-200 ${compact ? 'mt-2 h-1.5 max-w-[6rem]' : 'h-2'}`}>
         <div
