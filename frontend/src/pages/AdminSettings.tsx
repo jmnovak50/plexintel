@@ -399,9 +399,7 @@ export default function AdminSettings() {
                   {section.fields.map((field) => {
                     const isCleared = clearedKeys.includes(field.key);
                     const sourceText = isCleared ? "Will reset on save" : sourceLabel(field.source);
-                    const sourceClassName = isCleared
-                      ? "bg-amber-100 text-amber-800"
-                      : "bg-slate-100 text-slate-700";
+                    const sourceClassName = isCleared ? "recs-pill-amber text-[11px]" : "recs-pill-slate text-[11px]";
 
                     return (
                       <div key={field.key} className="recs-surface-muted p-4">
@@ -417,9 +415,7 @@ export default function AdminSettings() {
                               )}
                             </div>
                           </div>
-                          <span
-                            className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${sourceClassName}`}
-                          >
+                          <span className={`shrink-0 ${sourceClassName}`}>
                             {sourceText}
                           </span>
                         </div>
