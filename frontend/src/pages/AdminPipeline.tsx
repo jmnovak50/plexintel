@@ -1,6 +1,8 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { CircleStop } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import AppShell from "../components/AppShell";
+import { ErrorBanner, SuccessBanner } from "../components/StatusBanner";
 
 interface AdminMe {
   username: string;
@@ -204,82 +206,51 @@ export default function AdminPipeline() {
   }
 
   return (
-    <div className="min-h-screen bg-stone-100 text-slate-900">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6">
-        <div className="flex flex-col gap-4 border-b border-stone-300 pb-5 md:flex-row md:items-start md:justify-between">
-          <div className="space-y-2">
-            <p className="text-xs uppercase tracking-[0.28em] text-amber-700">Operations</p>
-            <h1 className="text-3xl font-semibold tracking-tight">Pipeline runs</h1>
-            <p className="max-w-2xl text-sm text-slate-600">
-              Monitor nightly training pipeline executions, inspect per-stage logs, and start a manual run. Schedule
-              and enable the in-app scheduler under Settings → Nightly pipeline.
-            </p>
-            <p className="text-sm text-slate-500">
-              Signed in as {me?.display_name || me?.username || "…"}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => void triggerRun()}
-              disabled={triggering || loading}
-              className="inline-flex items-center rounded-md border border-slate-900 bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {triggering ? "Starting…" : "Run pipeline now"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void loadRuns()}
-              className="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
-            >
-              Refresh
-            </button>
-            <Link
-              to="/admin/settings"
-              className="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
-            >
-              Pipeline settings
-            </Link>
-            <Link
-              to="/admin/digest"
-              className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 hover:bg-amber-100"
-            >
-              Digest Studio
-            </Link>
-            <Link
-              to="/admin"
-              className="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
-            >
-              Admin View
-            </Link>
-          </div>
+    <AppShell
+      eyebrow="Operations"
+      title="Pipeline runs"
+      description="Monitor nightly training pipeline executions, inspect per-stage logs, and start a manual run. Schedule and enable the in-app scheduler under Settings → Nightly pipeline."
+      signedInAs={me?.display_name || me?.username || "…"}
+      maxWidthClass="max-w-6xl"
+      headerActions={(
+        <>
+          <button
+            type="button"
+            onClick={() => void triggerRun()}
+            disabled={triggering || loading}
+            className="recs-btn-primary"
+          >
+            {triggering ? "Starting…" : "Run pipeline now"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadRuns()}
+            className="recs-btn-secondary px-4 py-2 text-sm"
+          >
+            Refresh
+          </button>
+        </>
+      )}
+    >
+      {error && <ErrorBanner message={error} />}
+      {status && <SuccessBanner message={status} />}
+
+      {loading ? (
+        <div className="recs-surface-muted px-5 py-6 text-sm text-slate-500">
+          Loading runs…
         </div>
-
-        {error && (
-          <div className="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
-        )}
-        {status && (
-          <div className="rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-            {status}
+      ) : (
+        <section className="recs-surface overflow-hidden">
+          <div className="border-b border-slate-100 bg-slate-50/80 px-5 py-4">
+            <h2 className="text-lg font-semibold text-slate-900">Recent runs</h2>
+            <p className="text-sm text-slate-500">
+              Scheduled runs appear when the in-app scheduler is enabled and a slot completes successfully once per
+              schedule key. Failed scheduled runs retry until success.
+            </p>
           </div>
-        )}
-
-        {loading ? (
-          <div className="rounded-lg border border-stone-200 bg-white px-5 py-6 text-sm text-slate-500 shadow-sm">
-            Loading runs…
-          </div>
-        ) : (
-          <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
-            <div className="border-b border-stone-200 px-5 py-4">
-              <h2 className="text-lg font-semibold text-slate-900">Recent runs</h2>
-              <p className="text-sm text-slate-500">
-                Scheduled runs appear when the in-app scheduler is enabled and a slot completes successfully once per
-                schedule key. Failed scheduled runs retry until success.
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-stone-200 text-sm">
-                <thead className="bg-stone-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-100 text-sm text-slate-900">
+              <thead className="bg-slate-50/95 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-4 py-3">Started</th>
                     <th className="px-4 py-3">Type</th>
@@ -300,7 +271,7 @@ export default function AdminPipeline() {
                   ) : (
                     runs.map((run) => (
                       <Fragment key={run.run_id}>
-                        <tr className="hover:bg-stone-50">
+                        <tr className="hover:bg-amber-50/30">
                           <td className="whitespace-nowrap px-4 py-3 text-slate-800">{formatDate(run.started_at)}</td>
                           <td className="px-4 py-3 capitalize text-slate-700">{run.delivery_type}</td>
                           <td className="px-4 py-3">
@@ -397,7 +368,6 @@ export default function AdminPipeline() {
             </div>
           </section>
         )}
-      </div>
-    </div>
+    </AppShell>
   );
 }

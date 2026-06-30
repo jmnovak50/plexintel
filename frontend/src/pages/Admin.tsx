@@ -1,6 +1,8 @@
 import { Ban, BookmarkPlus, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import AppShell from "../components/AppShell";
+import { ErrorBanner } from "../components/StatusBanner";
 
 interface AdminMe {
   username: string;
@@ -271,154 +273,125 @@ export default function Admin() {
   );
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold">Admin Persona View</h1>
-          <p className="text-sm text-gray-600">
-            Signed in as {me?.display_name || me?.username || "…"}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link
-            to="/admin/pipeline"
-            className="inline-flex items-center rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-900 hover:bg-sky-100"
-          >
-            Pipeline runs
-          </Link>
-          <Link
-            to="/admin/digest"
-            className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 hover:bg-amber-100"
-          >
-            Digest Studio
-          </Link>
-          <Link
-            to="/admin/settings"
-            className="inline-flex items-center rounded-md border border-slate-300 bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
-          >
-            Settings Workspace
-          </Link>
-          <Link
-            to="/recs"
-            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-          >
-            Back to Recommendations
-          </Link>
-        </div>
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
-        </div>
-      )}
+    <AppShell
+      eyebrow="Admin"
+      title="Persona View"
+      description="Inspect recommendations and feedback history for any PlexIntel user."
+      signedInAs={me?.display_name || me?.username || "…"}
+      maxWidthClass="max-w-7xl"
+    >
+      {error && <ErrorBanner message={error} />}
 
       {me?.is_admin ? (
         <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Persona User
-              </label>
-              <select
-                value={selectedUser}
-                onChange={(e) => setSelectedUser(e.target.value)}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {users.map((u) => (
-                  <option key={u.username} value={u.username}>
-                    {formatUserDisplayName(u)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Recommendation View
-              </label>
-              <select
-                value={viewMode}
-                onChange={(e) => setViewMode(e.target.value as "all" | "movies" | "shows" | "seasons" | "episodes")}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                <option value="all">All</option>
-                <option value="movies">Movies</option>
-                <option value="shows">Shows</option>
-                <option value="seasons">Seasons</option>
-                <option value="episodes">Episodes</option>
-              </select>
-            </div>
-            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
-              <div>Last login: {formatDate(selectedUserMeta?.last_login ?? null)}</div>
-              <div>Created: {formatDate(selectedUserMeta?.created_at ?? null)}</div>
+          <div className="recs-surface mb-4 p-4">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Filters</p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">
+                  Persona User
+                </label>
+                <select
+                  value={selectedUser}
+                  onChange={(e) => setSelectedUser(e.target.value)}
+                  className="recs-input"
+                >
+                  {users.map((u) => (
+                    <option key={u.username} value={u.username}>
+                      {formatUserDisplayName(u)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">
+                  Recommendation View
+                </label>
+                <select
+                  value={viewMode}
+                  onChange={(e) => setViewMode(e.target.value as "all" | "movies" | "shows" | "seasons" | "episodes")}
+                  className="recs-input"
+                >
+                  <option value="all">All</option>
+                  <option value="movies">Movies</option>
+                  <option value="shows">Shows</option>
+                  <option value="seasons">Seasons</option>
+                  <option value="episodes">Episodes</option>
+                </select>
+              </div>
+              <div className="recs-surface-muted px-3 py-2 text-sm text-slate-600">
+                <div>Last login: {formatDate(selectedUserMeta?.last_login ?? null)}</div>
+                <div>Created: {formatDate(selectedUserMeta?.created_at ?? null)}</div>
+              </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-            <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-              <p className="text-xs text-gray-500">Loaded recommendations</p>
-              <p className="text-xl font-semibold">{recommendations.length}{recommendationsHasMore ? "+" : ""}</p>
+          <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <div className="recs-surface px-3 py-2">
+              <p className="text-xs text-slate-500">Loaded recommendations</p>
+              <p className="text-xl font-semibold text-slate-900">{recommendations.length}{recommendationsHasMore ? "+" : ""}</p>
               {recommendationsDisplayThreshold != null && (
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-slate-500">
                   Persona threshold {(recommendationsDisplayThreshold * 100).toFixed(0)}%
                 </p>
               )}
             </div>
-            <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-              <p className="text-xs text-gray-500">Feedback events</p>
-              <p className="text-xl font-semibold">{feedbackRows.length}</p>
+            <div className="recs-surface px-3 py-2">
+              <p className="text-xs text-slate-500">Feedback events</p>
+              <p className="text-xl font-semibold text-slate-900">{feedbackRows.length}</p>
             </div>
-            <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-              <p className="text-xs text-gray-500">DB recommendation rows</p>
-              <p className="text-xl font-semibold">{selectedUserMeta?.recommendation_count ?? 0}</p>
+            <div className="recs-surface px-3 py-2">
+              <p className="text-xs text-slate-500">DB recommendation rows</p>
+              <p className="text-xl font-semibold text-slate-900">{selectedUserMeta?.recommendation_count ?? 0}</p>
             </div>
-            <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-              <p className="text-xs text-gray-500">DB feedback rows</p>
-              <p className="text-xl font-semibold">{selectedUserMeta?.feedback_count ?? 0}</p>
-            </div>
-            <div className="border-t px-4 py-3 text-center">
-              {recommendationsHasMore ? (
-                <button
-                  type="button"
-                  onClick={() => void loadMoreRecommendations()}
-                  disabled={recommendationsLoadingMore}
-                  className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {recommendationsLoadingMore ? "Loading..." : "Load more recommendations"}
-                </button>
-              ) : (
-                <span className="text-sm text-gray-500">Showing all loaded matches</span>
-              )}
+            <div className="recs-surface px-3 py-2">
+              <p className="text-xs text-slate-500">DB feedback rows</p>
+              <p className="text-xl font-semibold text-slate-900">{selectedUserMeta?.feedback_count ?? 0}</p>
             </div>
           </div>
 
-          {loading && <p className="text-sm text-gray-500">Loading persona data…</p>}
+          <div className="mb-4 flex items-center justify-center">
+            {recommendationsHasMore ? (
+              <button
+                type="button"
+                onClick={() => void loadMoreRecommendations()}
+                disabled={recommendationsLoadingMore}
+                className="recs-btn-secondary px-5 py-2.5 text-sm"
+              >
+                {recommendationsLoadingMore ? "Loading..." : "Load more recommendations"}
+              </button>
+            ) : (
+              <span className="text-sm text-slate-500">Showing all loaded matches</span>
+            )}
+          </div>
 
-          <div className="rounded-xl border border-gray-200 bg-white shadow">
-            <div className="border-b px-4 py-3">
-              <h2 className="text-lg font-semibold">Recommendations</h2>
+          {loading && <p className="mb-4 text-sm text-slate-500">Loading persona data…</p>}
+
+          <div className="recs-surface mb-6 overflow-hidden">
+            <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+              <h2 className="text-lg font-semibold text-slate-900">Recommendations</h2>
             </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-gray-50 text-gray-600">
+              <table className="min-w-full text-sm text-slate-900">
+                <thead className="bg-slate-50/95 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                   <tr>
-                    <th className="px-3 py-2 text-left">Type</th>
-                    <th className="px-3 py-2 text-left">Title</th>
-                    <th className="px-3 py-2 text-left">Show</th>
-                    <th className="px-3 py-2 text-left">Year</th>
-                    <th className="px-3 py-2 text-left">Score</th>
-                    <th className="px-3 py-2 text-left">Band</th>
+                    <th className="px-3 py-3">Type</th>
+                    <th className="px-3 py-3">Title</th>
+                    <th className="px-3 py-3">Show</th>
+                    <th className="px-3 py-3">Year</th>
+                    <th className="px-3 py-3">Score</th>
+                    <th className="px-3 py-3">Band</th>
                   </tr>
                 </thead>
                 <tbody>
                   {recommendations.map((rec) => (
-                    <tr key={rec.rating_key} className="border-t">
-                      <td className="px-3 py-2">{rec.media_type}</td>
-                      <td className="px-3 py-2">{rec.title}</td>
-                      <td className="px-3 py-2">{rec.show_title || "—"}</td>
-                      <td className="px-3 py-2">{rec.year ?? "—"}</td>
-                      <td className="px-3 py-2">{(rec.predicted_probability * 100).toFixed(1)}%</td>
-                      <td className="px-3 py-2">{rec.score_band || "—"}</td>
+                    <tr key={rec.rating_key} className="border-t border-slate-100 hover:bg-amber-50/30">
+                      <td className="px-3 py-2 text-slate-700">{rec.media_type}</td>
+                      <td className="px-3 py-2 font-medium text-slate-900">{rec.title}</td>
+                      <td className="px-3 py-2 text-slate-700">{rec.show_title || "—"}</td>
+                      <td className="px-3 py-2 text-slate-700">{rec.year ?? "—"}</td>
+                      <td className="px-3 py-2 tabular-nums text-slate-700">{(rec.predicted_probability * 100).toFixed(1)}%</td>
+                      <td className="px-3 py-2 text-slate-700">{rec.score_band || "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -426,21 +399,21 @@ export default function Admin() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-gray-200 bg-white shadow">
-            <div className="border-b px-4 py-3">
-              <h2 className="text-lg font-semibold">Feedback History</h2>
+          <div className="recs-surface overflow-hidden">
+            <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+              <h2 className="text-lg font-semibold text-slate-900">Feedback History</h2>
             </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-gray-50 text-gray-600">
+              <table className="min-w-full text-sm text-slate-900">
+                <thead className="bg-slate-50/95 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                   <tr>
-                    <th className="px-3 py-2 text-left">When</th>
-                    <th className="px-3 py-2 text-left">Action</th>
-                    <th className="px-3 py-2 text-left">Title</th>
-                    <th className="px-3 py-2 text-left">Type</th>
-                    <th className="px-3 py-2 text-left">Reason</th>
-                    <th className="px-3 py-2 text-left">Watchlist</th>
-                    <th className="px-3 py-2 text-left">Suppress</th>
+                    <th className="px-3 py-3">When</th>
+                    <th className="px-3 py-3">Action</th>
+                    <th className="px-3 py-3">Title</th>
+                    <th className="px-3 py-3">Type</th>
+                    <th className="px-3 py-3">Reason</th>
+                    <th className="px-3 py-3">Watchlist</th>
+                    <th className="px-3 py-3">Suppress</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -449,22 +422,22 @@ export default function Admin() {
                     const Icon = visual.icon;
 
                     return (
-                      <tr key={row.id} className="border-t">
-                        <td className="px-3 py-2">{formatDate(row.created_at)}</td>
+                      <tr key={row.id} className="border-t border-slate-100 hover:bg-amber-50/30">
+                        <td className="px-3 py-2 text-slate-700">{formatDate(row.created_at)}</td>
                         <td className="px-3 py-2">
                           <span className={`inline-flex items-center gap-2 ${visual.className}`}>
                             <Icon aria-hidden="true" size={14} strokeWidth={2} />
                             <span>{visual.label}</span>
                           </span>
                         </td>
-                        <td className="px-3 py-2">{row.title || `rating_key ${row.rating_key}`}</td>
-                        <td className="px-3 py-2">{row.media_type || "—"}</td>
-                        <td className="px-3 py-2">{row.reason_label || row.reason_code || "—"}</td>
-                        <td className="px-3 py-2">
+                        <td className="px-3 py-2 text-slate-700">{row.title || `rating_key ${row.rating_key}`}</td>
+                        <td className="px-3 py-2 text-slate-700">{row.media_type || "—"}</td>
+                        <td className="px-3 py-2 text-slate-700">{row.reason_label || row.reason_code || "—"}</td>
+                        <td className="px-3 py-2 text-slate-700">
                           {watchlistStatusLabel(row.plex_watchlist_status)}
                           {row.plex_watchlist_synced_at ? ` · ${formatDate(row.plex_watchlist_synced_at)}` : ""}
                         </td>
-                        <td className="px-3 py-2">{row.suppress ? "Yes" : "No"}</td>
+                        <td className="px-3 py-2 text-slate-700">{row.suppress ? "Yes" : "No"}</td>
                       </tr>
                     );
                   })}
@@ -474,8 +447,8 @@ export default function Admin() {
           </div>
         </>
       ) : (
-        !error && <p className="text-sm text-gray-500">Checking admin access…</p>
+        !error && <p className="text-sm text-slate-500">Checking admin access…</p>
       )}
-    </div>
+    </AppShell>
   );
 }

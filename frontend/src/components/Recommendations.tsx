@@ -20,7 +20,8 @@ import {
   Tv,
   type LucideIcon,
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import AdminNav from './AdminNav';
+import { useTheme } from '../context/ThemeContext';
 
 type FeedbackAction = 'interested' | 'never_watch' | 'watched_like' | 'watched_dislike';
 type ViewMode = 'all' | 'movies' | 'shows' | 'seasons' | 'episodes';
@@ -1095,7 +1096,7 @@ export default function Recommendations() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [recs, setRecs] = useState<Recommendation[]>([]);
-  const [darkMode, setDarkMode] = useState(false);
+  const { darkMode, toggleDarkMode } = useTheme();
   const [viewMode, setViewMode] = useState<ViewMode>('all');
   const [selectedShow, setSelectedShow] = useState<ScopedSelection | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<ScopedSelection | null>(null);
@@ -1537,14 +1538,10 @@ export default function Recommendations() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {isAdmin && (
-              <Link to="/admin" className="recs-btn-secondary px-4 py-2 text-sm">
-                Admin View
-              </Link>
-            )}
+            {isAdmin && <AdminNav />}
             <button
               type="button"
-              onClick={() => setDarkMode(!darkMode)}
+              onClick={toggleDarkMode}
               className="recs-btn-secondary px-3 py-2"
               aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
               aria-pressed={darkMode}

@@ -71,6 +71,20 @@
     @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
+  .recs-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-900 bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .recs-dark .recs-btn-primary {
+    border-color: rgb(245 158 11);
+    background-color: rgb(245 158 11);
+    color: rgb(15 23 42);
+  }
+
+  .recs-dark .recs-btn-primary:hover {
+    background-color: rgb(251 191 36);
+  }
+
   .recs-dark .recs-btn-secondary {
     @apply border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700 focus-visible:ring-offset-slate-900;
   }

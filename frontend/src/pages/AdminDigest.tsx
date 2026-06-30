@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import AppShell from "../components/AppShell";
+import { ErrorBanner, SuccessBanner } from "../components/StatusBanner";
 
 interface AdminMe {
   username: string;
@@ -357,71 +359,34 @@ export default function AdminDigest() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-stone-100 px-4 py-10 text-slate-700">
-        <div className="mx-auto max-w-6xl rounded-lg border border-stone-200 bg-white px-6 py-8 shadow-sm">
+      <AppShell
+        eyebrow="Digest Studio"
+        title="Email digests"
+        description="Loading digest studio…"
+        signedInAs={me?.display_name || me?.username || null}
+        maxWidthClass="max-w-6xl"
+      >
+        <div className="recs-surface-muted px-6 py-8 text-sm text-slate-500">
           Loading digest studio…
         </div>
-      </div>
+      </AppShell>
     );
   }
 
   return (
-    <div className="min-h-screen bg-stone-100 text-slate-900">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6">
-        <div className="flex flex-col gap-4 border-b border-stone-300 pb-5 md:flex-row md:items-start md:justify-between">
-          <div className="space-y-2">
-            <p className="text-xs uppercase tracking-[0.28em] text-amber-700">Digest Studio</p>
-            <h1 className="text-3xl font-semibold tracking-tight">Email digests</h1>
-            <p className="max-w-2xl text-sm text-slate-600">
-              Edit the shared message, preview exactly what users will receive, and send test emails before the
-              scheduled digest runs.
-            </p>
-            <p className="text-sm text-slate-500">
-              Signed in as {me?.display_name || me?.username || "…"}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <Link
-              to="/admin/pipeline"
-              className="inline-flex items-center rounded-md border border-sky-300 bg-sky-50 px-4 py-2 text-sm text-sky-900 hover:bg-sky-100"
-            >
-              Pipeline runs
-            </Link>
-            <Link
-              to="/admin/settings"
-              className="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
-            >
-              SMTP Settings
-            </Link>
-            <Link
-              to="/admin"
-              className="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
-            >
-              Admin View
-            </Link>
-            <Link
-              to="/recs"
-              className="inline-flex items-center rounded-md border border-slate-900 bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800"
-            >
-              Recommendations
-            </Link>
-          </div>
-        </div>
-
-        {error && (
-          <div className="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
-        {status && (
-          <div className="rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-            {status}
-          </div>
-        )}
+    <AppShell
+      eyebrow="Digest Studio"
+      title="Email digests"
+      description="Edit the shared message, preview exactly what users will receive, and send test emails before the scheduled digest runs."
+      signedInAs={me?.display_name || me?.username || "…"}
+      maxWidthClass="max-w-6xl"
+    >
+      {error && <ErrorBanner message={error} />}
+      {status && <SuccessBanner message={status} />}
 
         <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="space-y-4 rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="flex flex-col gap-2 border-b border-stone-200 pb-4 md:flex-row md:items-center md:justify-between">
+          <div className="recs-surface space-y-4 p-5">
+            <div className="flex flex-col gap-2 border-b border-slate-100 pb-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <h2 className="text-xl font-semibold">Shared message</h2>
                 <p className="mt-1 text-sm text-slate-500">
@@ -438,35 +403,35 @@ export default function AdminDigest() {
               <button
                 type="button"
                 onClick={() => applyCommand("bold")}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Bold
               </button>
               <button
                 type="button"
                 onClick={() => applyCommand("italic")}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Italic
               </button>
               <button
                 type="button"
                 onClick={() => applyCommand("strikeThrough")}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Strike
               </button>
               <button
                 type="button"
                 onClick={() => applyCommand("insertUnorderedList")}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Bullets
               </button>
               <button
                 type="button"
                 onClick={() => applyCommand("insertOrderedList")}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Numbers
               </button>
@@ -476,7 +441,7 @@ export default function AdminDigest() {
                   const url = window.prompt("Enter a URL for the link");
                   if (url) applyCommand("createLink", url);
                 }}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Link
               </button>
@@ -486,14 +451,14 @@ export default function AdminDigest() {
                   const url = window.prompt("Enter a public image URL");
                   if (url) applyCommand("insertImage", url);
                 }}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Image URL
               </button>
               <button
                 type="button"
                 onClick={() => applyCommand("removeFormat")}
-                className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-stone-100"
+                className="recs-btn-secondary px-3 py-1.5 text-sm"
               >
                 Clear Format
               </button>
@@ -535,8 +500,8 @@ export default function AdminDigest() {
             </div>
           </div>
 
-          <div className="space-y-4 rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="border-b border-stone-200 pb-4">
+          <div className="recs-surface space-y-4 p-5">
+            <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Preview and test</h2>
               <p className="mt-1 text-sm text-slate-500">
                 Choose a sample user, then preview the exact digest layout or send a test email.
@@ -553,7 +518,7 @@ export default function AdminDigest() {
               <select
                 value={sampleUsername}
                 onChange={(event) => setSampleUsername(event.target.value)}
-                className="w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-sm"
+                className="recs-input"
               >
                 {sampleOptions.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -589,8 +554,8 @@ export default function AdminDigest() {
         </section>
 
         <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="flex flex-col gap-2 border-b border-stone-200 pb-4">
+          <div className="recs-surface p-5">
+            <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Email preview</h2>
               <p className="text-sm text-slate-500">
                 {preview
@@ -614,8 +579,8 @@ export default function AdminDigest() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="border-b border-stone-200 pb-4">
+          <div className="recs-surface p-5">
+            <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Plain text</h2>
               <p className="mt-1 text-sm text-slate-500">Fallback body for email clients that do not render HTML.</p>
             </div>
@@ -626,8 +591,8 @@ export default function AdminDigest() {
         </section>
 
         <section className="grid gap-6 lg:grid-cols-2">
-          <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="border-b border-stone-200 pb-4">
+          <div className="recs-surface p-5">
+            <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Recent runs</h2>
               <p className="mt-1 text-sm text-slate-500">Recent scheduled and test sends.</p>
             </div>
@@ -667,8 +632,8 @@ export default function AdminDigest() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="border-b border-stone-200 pb-4">
+          <div className="recs-surface p-5">
+            <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Recent deliveries</h2>
               <p className="mt-1 text-sm text-slate-500">Latest recipient-level results.</p>
             </div>
@@ -707,7 +672,6 @@ export default function AdminDigest() {
             </div>
           </div>
         </section>
-      </div>
-    </div>
+    </AppShell>
   );
 }
