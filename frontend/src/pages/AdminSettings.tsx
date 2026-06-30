@@ -111,13 +111,13 @@ function SettingHelp({ field }: { field: SettingField }) {
       <button
         type="button"
         aria-label={`Help for ${field.label}`}
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500 transition hover:border-slate-400 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300"
+        className="recs-help-trigger"
       >
         <CircleHelp aria-hidden="true" size={14} strokeWidth={2} />
       </button>
       <span
         role="tooltip"
-        className="pointer-events-none absolute left-0 top-7 z-20 hidden w-72 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-normal leading-5 text-slate-700 shadow-lg group-hover/help:block group-focus-within/help:block"
+        className="recs-help-tooltip"
       >
         <span className="block">{helpText}</span>
         <span className="mt-2 block border-t border-slate-100 pt-2 font-mono text-[11px] text-slate-500">
@@ -343,22 +343,22 @@ export default function AdminSettings() {
                       Changes are stored in Postgres and applied on the next request or script run.
                     </p>
                     {section.key === "email_digests" && (
-                      <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                      <div className="recs-notice-amber mt-3">
                         Gmail and Google Workspace SMTP usually will not accept a normal Google account password.
                         Use an App Password with <span className="font-medium">smtp.gmail.com</span>, or a Workspace
                         SMTP relay / OAuth setup instead.
                       </div>
                     )}
                     {section.key === "pipeline" && (
-                      <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
+                      <div className="recs-notice-sky mt-3">
                         When the in-app scheduler is enabled, disable overlapping cron jobs that execute{" "}
-                        <code className="rounded bg-white px-1">run_daily_pipeline.sh</code>. View history and manual
+                        <code>run_daily_pipeline.sh</code>. View history and manual
                         runs on the{" "}
-                        <Link to="/admin/pipeline" className="font-medium text-sky-800 underline">
+                        <Link to="/admin/pipeline" className="font-medium underline">
                           Pipeline runs
                         </Link>{" "}
-                        page. Optional env: <code className="rounded bg-white px-1">PIPELINE_SCHEDULER_ENABLED</code>,{" "}
-                        <code className="rounded bg-white px-1">PIPELINE_SCHEDULER_INTERVAL_SECONDS</code>.
+                        page. Optional env: <code>PIPELINE_SCHEDULER_ENABLED</code>,{" "}
+                        <code>PIPELINE_SCHEDULER_INTERVAL_SECONDS</code>.
                       </div>
                     )}
                     {testMessages[section.key] && (

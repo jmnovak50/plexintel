@@ -48,6 +48,146 @@
     @apply border-slate-700 bg-slate-800/60;
   }
 
+  .recs-callout {
+    @apply rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-relaxed text-slate-600;
+  }
+
+  .recs-dark .recs-callout {
+    border-color: rgb(71 85 105);
+    background-color: rgb(51 65 85 / 0.55);
+    color: rgb(203 213 225);
+  }
+
+  .recs-dark .recs-callout .font-medium,
+  .recs-dark .recs-callout strong {
+    color: rgb(241 245 249);
+  }
+
+  .recs-notice-amber {
+    @apply rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900;
+  }
+
+  .recs-dark .recs-notice-amber {
+    border-color: rgb(180 83 9 / 0.45);
+    background-color: rgb(120 53 15 / 0.28);
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .recs-notice-amber code {
+    border-radius: 0.25rem;
+    background-color: rgb(51 65 85);
+    color: rgb(254 243 199);
+    padding: 0 0.25rem;
+  }
+
+  .recs-notice-sky {
+    @apply rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950;
+  }
+
+  .recs-dark .recs-notice-sky {
+    border-color: rgb(3 105 161 / 0.45);
+    background-color: rgb(12 74 110 / 0.28);
+    color: rgb(186 230 253);
+  }
+
+  .recs-dark .recs-notice-sky code {
+    border-radius: 0.25rem;
+    background-color: rgb(51 65 85);
+    color: rgb(186 230 253);
+    padding: 0 0.25rem;
+  }
+
+  .recs-dark .recs-notice-sky a {
+    color: rgb(125 211 252);
+  }
+
+  .recs-help-trigger {
+    @apply inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500 transition hover:border-slate-400 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400;
+  }
+
+  .recs-dark .recs-help-trigger {
+    border-color: rgb(71 85 105);
+    background-color: rgb(51 65 85);
+    color: rgb(148 163 184);
+  }
+
+  .recs-dark .recs-help-trigger:hover {
+    color: rgb(226 232 240);
+  }
+
+  .recs-help-tooltip {
+    @apply pointer-events-none absolute left-0 top-7 z-20 hidden w-72 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-normal leading-5 text-slate-700 shadow-lg group-hover/help:block group-focus-within/help:block;
+  }
+
+  .recs-dark .recs-help-tooltip {
+    border-color: rgb(71 85 105);
+    background-color: rgb(30 41 59);
+    color: rgb(226 232 240);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.35);
+  }
+
+  .recs-dark .recs-help-tooltip .border-slate-100 {
+    border-color: rgb(71 85 105);
+  }
+
+  .recs-dark .recs-help-tooltip .text-slate-500 {
+    color: rgb(148 163 184);
+  }
+
+  .recs-editor {
+    @apply min-h-[300px] rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm leading-6 text-slate-900 outline-none focus:border-amber-300 focus:bg-white focus:ring-2 focus:ring-amber-200;
+  }
+
+  .recs-dark .recs-editor {
+    border-color: rgb(71 85 105);
+    background-color: rgb(30 41 59);
+    color: rgb(241 245 249);
+  }
+
+  .recs-dark .recs-editor:focus {
+    border-color: rgb(245 158 11);
+    background-color: rgb(30 41 59);
+    --tw-ring-color: rgb(245 158 11 / 0.3);
+  }
+
+  .recs-pre {
+    @apply overflow-auto whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-6 text-slate-700;
+  }
+
+  .recs-dark .recs-pre {
+    border-color: rgb(71 85 105);
+    background-color: rgb(30 41 59);
+    color: rgb(203 213 225);
+  }
+
+  .recs-btn-amber {
+    @apply inline-flex items-center rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .recs-dark .recs-btn-amber {
+    border-color: rgb(180 83 9 / 0.55);
+    background-color: rgb(120 53 15 / 0.35);
+    color: rgb(253 230 138);
+  }
+
+  .recs-dark .recs-btn-amber:hover {
+    background-color: rgb(120 53 15 / 0.5);
+  }
+
+  .recs-btn-sky {
+    @apply inline-flex items-center rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .recs-dark .recs-btn-sky {
+    border-color: rgb(3 105 161 / 0.45);
+    background-color: rgb(12 74 110 / 0.35);
+    color: rgb(186 230 253);
+  }
+
+  .recs-dark .recs-btn-sky:hover {
+    background-color: rgb(12 74 110 / 0.5);
+  }
+
   .recs-input {
     @apply w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm transition-colors placeholder:text-slate-400 focus:border-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-200;
   }

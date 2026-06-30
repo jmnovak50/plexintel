@@ -476,7 +476,7 @@ export default function AdminDigest() {
               }}
               onFocus={() => normalizeEditorDirection()}
               dangerouslySetInnerHTML={{ __html: editorSeedHtml }}
-              className="min-h-[300px] rounded-md border border-stone-300 bg-stone-50 px-4 py-3 text-left text-sm leading-6 outline-none focus:border-sky-400 focus:bg-white"
+              className="recs-editor"
               style={{ direction: "ltr", unicodeBidi: "normal", textAlign: "left", writingMode: "horizontal-tb" }}
             />
 
@@ -485,7 +485,7 @@ export default function AdminDigest() {
                 type="button"
                 onClick={() => void refreshPreview(sampleUsername, syncEditorHtml())}
                 disabled={previewing}
-                className="rounded-md border border-sky-200 bg-sky-50 px-4 py-2 text-sm text-sky-700 hover:bg-sky-100 disabled:opacity-60"
+                className="recs-btn-sky"
               >
                 {previewing ? "Refreshing Preview…" : "Refresh Preview"}
               </button>
@@ -493,7 +493,7 @@ export default function AdminDigest() {
                 type="button"
                 onClick={() => void saveContent()}
                 disabled={saving}
-                className="rounded-md border border-slate-900 bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-60"
+                className="recs-btn-primary disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {saving ? "Saving…" : "Save Message"}
               </button>
@@ -535,14 +535,14 @@ export default function AdminDigest() {
                   type="button"
                   onClick={() => void sendTest(target)}
                   disabled={testingTarget !== null || !sampleUsername}
-                  className="rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800 hover:bg-amber-100 disabled:opacity-60"
+                  className="recs-btn-amber"
                 >
                   {testingTarget === target ? "Sending…" : choiceLabel(target)}
                 </button>
               ))}
             </div>
 
-            <div className="rounded-md border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-slate-600">
+            <div className="recs-callout">
               SMTP server, port, username, password, encryption, From, and Reply-To are managed in
               <span className="font-medium"> Admin Settings </span>
               so the digest mailer matches Tautulli-style SMTP configuration. Gmail and Google Workspace usually
@@ -563,7 +563,7 @@ export default function AdminDigest() {
                   : "Preview not generated yet."}
               </p>
             </div>
-            <div className="mt-5 rounded-md border border-stone-200 bg-stone-50 p-4">
+            <div className="recs-surface-muted mt-5 p-4">
               {preview ? (
                 <iframe
                   ref={previewFrameRef}
@@ -584,7 +584,7 @@ export default function AdminDigest() {
               <h2 className="text-xl font-semibold">Plain text</h2>
               <p className="mt-1 text-sm text-slate-500">Fallback body for email clients that do not render HTML.</p>
             </div>
-            <pre className="mt-4 max-h-[520px] overflow-auto whitespace-pre-wrap rounded-md border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-slate-700">
+            <pre className="recs-pre mt-4 max-h-[520px]">
               {preview?.text || "Preview not generated yet."}
             </pre>
           </div>
@@ -598,7 +598,7 @@ export default function AdminDigest() {
             </div>
             <div className="mt-4 overflow-x-auto">
               <table className="min-w-full text-sm">
-                <thead className="border-b border-stone-200 text-left text-slate-500">
+                <thead className="border-b border-slate-200 text-left text-slate-500">
                   <tr>
                     <th className="px-2 py-2">Type</th>
                     <th className="px-2 py-2">Status</th>
@@ -608,7 +608,7 @@ export default function AdminDigest() {
                 </thead>
                 <tbody>
                   {runs.map((run) => (
-                    <tr key={run.run_id} className="border-b border-stone-100 align-top">
+                    <tr key={run.run_id} className="border-b border-slate-100 align-top">
                       <td className="px-2 py-3">
                         <div className="font-medium text-slate-800">{run.delivery_type}</div>
                         <div className="text-xs text-slate-500">{run.subject || "No subject"}</div>
@@ -639,7 +639,7 @@ export default function AdminDigest() {
             </div>
             <div className="mt-4 overflow-x-auto">
               <table className="min-w-full text-sm">
-                <thead className="border-b border-stone-200 text-left text-slate-500">
+                <thead className="border-b border-slate-200 text-left text-slate-500">
                   <tr>
                     <th className="px-2 py-2">Recipient</th>
                     <th className="px-2 py-2">Rendered For</th>
@@ -649,7 +649,7 @@ export default function AdminDigest() {
                 </thead>
                 <tbody>
                   {deliveries.map((delivery) => (
-                    <tr key={delivery.delivery_id} className="border-b border-stone-100 align-top">
+                    <tr key={delivery.delivery_id} className="border-b border-slate-100 align-top">
                       <td className="px-2 py-3">
                         <div className="font-medium text-slate-800">{delivery.recipient_username || delivery.recipient_email}</div>
                         <div className="text-xs text-slate-500">{delivery.recipient_email}</div>
