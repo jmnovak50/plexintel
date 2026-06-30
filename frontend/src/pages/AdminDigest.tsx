@@ -384,7 +384,8 @@ export default function AdminDigest() {
       {error && <ErrorBanner message={error} />}
       {status && <SuccessBanner message={status} />}
 
-        <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+      <div className="grid gap-5">
+        <section className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr] lg:gap-6">
           <div className="recs-surface space-y-4 p-5">
             <div className="flex flex-col gap-2 border-b border-slate-100 pb-4 md:flex-row md:items-center md:justify-between">
               <div>
@@ -553,7 +554,7 @@ export default function AdminDigest() {
           </div>
         </section>
 
-        <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <section className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr] lg:gap-6">
           <div className="recs-surface p-5">
             <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Email preview</h2>
@@ -590,7 +591,7 @@ export default function AdminDigest() {
           </div>
         </section>
 
-        <section className="grid gap-6 lg:grid-cols-2">
+        <section className="grid gap-5 lg:grid-cols-2 lg:gap-6">
           <div className="recs-surface p-5">
             <div className="border-b border-slate-100 pb-4">
               <h2 className="text-xl font-semibold">Recent runs</h2>
@@ -672,6 +673,7 @@ export default function AdminDigest() {
             </div>
           </div>
         </section>
+      </div>
     </AppShell>
   );
 }
