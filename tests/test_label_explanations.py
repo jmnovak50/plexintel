@@ -138,6 +138,12 @@ class DimensionRoutingTests(unittest.TestCase):
         self.assertEqual(batch_label_embeddings._get_dimension_range("user"), (768, 1536))
         self.assertEqual(batch_label_embeddings._get_dimension_range("all"), (0, 1536))
 
+    def test_dimension_boundaries_resolve_to_expected_modes(self):
+        self.assertEqual(gpt_utils.get_dimension_mode(0), "media")
+        self.assertEqual(gpt_utils.get_dimension_mode(767), "media")
+        self.assertEqual(gpt_utils.get_dimension_mode(768), "user")
+        self.assertEqual(gpt_utils.get_dimension_mode(1535), "user")
+
     def test_manual_batch_dimensions_keep_requested_order_and_stats(self):
         with patch.object(
             batch_label_embeddings,
@@ -595,6 +601,41 @@ class ReviewSelectionTests(unittest.TestCase):
         self.assertEqual(negative_label["display_label"], "non-comedy mysteries")
         self.assertTrue(negative_label["needs_review"])
 
+    def test_user_governance_rejects_plain_title_trait_display_labels(self):
+        media_label = batch_label_embeddings.classify_label_governance("workplace comedy", dim_type="media")
+        self.assertEqual(media_label["label_type"], "semantic_candidate")
+        self.assertTrue(media_label["explainable"])
+        self.assertEqual(media_label["display_label"], "workplace comedy")
+
+        user_plain_trait = batch_label_embeddings.classify_label_governance("workplace comedy", dim_type="user")
+        self.assertEqual(user_plain_trait["label_type"], "perspective_mismatch")
+        self.assertFalse(user_plain_trait["explainable"])
+        self.assertIsNone(user_plain_trait["display_label"])
+        self.assertTrue(user_plain_trait["needs_review"])
+
+        user_preference = batch_label_embeddings.classify_label_governance(
+            "preference for workplace comedy",
+            dim_type="user",
+        )
+        self.assertEqual(user_preference["label_type"], "semantic_candidate")
+        self.assertTrue(user_preference["explainable"])
+        self.assertEqual(user_preference["display_label"], "preference for workplace comedy")
+        self.assertFalse(user_preference["needs_review"])
+
+    def test_structural_and_unclear_user_labels_are_not_preference_prefixed(self):
+        structural = batch_label_embeddings.classify_label_governance(
+            "non-explainable structural signal",
+            dim_type="user",
+        )
+        self.assertEqual(structural["label_type"], "hard_structural")
+        self.assertFalse(structural["explainable"])
+        self.assertIsNone(structural["display_label"])
+
+        movie_preference = batch_label_embeddings.classify_label_governance("movie preference", dim_type="user")
+        self.assertEqual(movie_preference["label_type"], "hard_structural")
+        self.assertFalse(movie_preference["explainable"])
+        self.assertIsNone(movie_preference["display_label"])
+
 
 class EligibleSelectionTests(unittest.TestCase):
     class FakeCursor:
@@ -889,6 +930,55 @@ class LabelRepairSaveTests(unittest.TestCase):
         self.assertEqual(status, "inserted_missing_label")
         insert_params = cur.executed[-1][1]
         self.assertEqual(insert_params, (122, "movies released 1990-1999", "metadata", False, None, False))
+
+    def test_user_dimension_plain_trait_label_is_not_saved(self):
+        cur = self.FakeCursor(existing_row=None)
+        label_result = {
+            "label": "workplace comedy",
+            "label_type": "semantic",
+            "validation_status": "valid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            800,
+            label_result,
+            repair_cooldown_days=7,
+        )
+
+        self.assertFalse(saved)
+        self.assertEqual(status, "invalid_label_not_saved")
+        self.assertEqual(len(cur.executed), 1)
+
+    def test_user_dimension_preference_framed_label_is_saved(self):
+        cur = self.FakeCursor(existing_row=None)
+        label_result = {
+            "label": "preference for workplace comedy",
+            "label_type": "semantic",
+            "validation_status": "valid",
+        }
+
+        saved, status = batch_label_embeddings.save_label_result(
+            cur,
+            800,
+            label_result,
+            repair_cooldown_days=7,
+        )
+
+        self.assertTrue(saved)
+        self.assertEqual(status, "inserted_missing_label")
+        insert_params = cur.executed[-1][1]
+        self.assertEqual(
+            insert_params,
+            (
+                800,
+                "preference for workplace comedy",
+                "semantic_candidate",
+                True,
+                "preference for workplace comedy",
+                False,
+            ),
+        )
 
     def test_valid_review_replacement_updates_existing_usable_label_with_history(self):
         existing_row = (
@@ -1225,7 +1315,8 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertIn("Find the strongest reusable semantic separator", prompt_text)
         self.assertIn("plot hints reveal a stronger common concept", prompt_text)
         self.assertIn("Prefer concrete story/entity labels", prompt_text)
-        self.assertIn("Good labels are compact evidence-derived noun phrases", prompt_text)
+        self.assertIn("MEDIA/title dimension", prompt_text)
+        self.assertIn("Good MEDIA labels are compact evidence-derived noun phrases", prompt_text)
         self.assertIn("Never copy wording from these instructions", prompt_text)
         self.assertIn("choose the narrower nuance", prompt_text)
         self.assertIn("If fewer than 80% of HIGH examples clearly support", prompt_text)
@@ -1241,6 +1332,34 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertNotIn("cyborg / modified-human identity", prompt_text)
         self.assertEqual(prompt_bundle["minimum_label_coverage_percent"], 80)
         self.assertEqual(prompt_bundle["maximum_low_overlap_percent"], 35)
+
+    def test_user_prompt_requires_preference_framed_labels(self):
+        positive_df = pd.DataFrame(
+            [
+                {"username": "alice", "title": "Office One", "year": 2001, "media_type": "show", "genre_tags": "Comedy"},
+                {"username": "bob", "title": "Office Two", "year": 2002, "media_type": "show", "genre_tags": "Comedy"},
+            ]
+        )
+        negative_df = pd.DataFrame(
+            [
+                {"username": "cara", "title": "Hospital Drama", "year": 2003, "media_type": "show", "genre_tags": "Drama"},
+            ]
+        )
+
+        prompt_bundle = gpt_utils.build_dimension_prompt(
+            768,
+            positive_df,
+            negative_df,
+            min_valid_items=1,
+        )
+        prompt_text = prompt_bundle["prompt_text"]
+
+        self.assertIn("USER preference dimension", prompt_text)
+        self.assertIn("user embedding values", prompt_text)
+        self.assertIn("Do not label this as a direct title trait", prompt_text)
+        self.assertIn("Good USER labels are compact evidence-derived preference phrases", prompt_text)
+        self.assertIn('"preference for workplace comedy"', prompt_text)
+        self.assertIn('Do not return plain title traits like "workplace comedy"', prompt_text)
 
     def test_review_prompt_includes_existing_governance_without_forcing_replacement(self):
         positive_df = pd.DataFrame(
@@ -1308,6 +1427,92 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(result["coverage_low_total"], 8)
         self.assertEqual(result["coverage_low_overlap_percent"], 25)
         self.assertEqual(result["validation_status"], "valid")
+
+    def test_media_dimension_allows_plain_title_trait_label(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "workplace comedy",
+              "label_confidence": "high",
+              "proposed_label_type": "semantic",
+              "coverage_high_count": 6,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 0,
+              "coverage_low_total": 4,
+              "explanation": "High examples are workplace comedies while low examples are not.",
+              "evidence": ["Workplaces repeat", "Comedy repeats", "LOW examples differ"]
+            }
+            """,
+            dimension_mode="media",
+        )
+
+        self.assertEqual(result["label"], "workplace comedy")
+        self.assertEqual(result["validation_status"], "valid")
+
+    def test_user_dimension_rejects_plain_title_trait_label(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "workplace comedy",
+              "label_confidence": "high",
+              "proposed_label_type": "semantic",
+              "coverage_high_count": 6,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 0,
+              "coverage_low_total": 4,
+              "explanation": "High users watched workplace comedies while low users did not.",
+              "evidence": ["Workplaces repeat", "Comedy repeats", "LOW examples differ"]
+            }
+            """,
+            dimension_mode="user",
+        )
+
+        self.assertEqual(result["label"], "workplace comedy")
+        self.assertEqual(result["validation_status"], "invalid")
+        self.assertIn("lacks preference/taste/affinity framing", " ".join(result["validation_notes"]))
+
+    def test_user_dimension_accepts_preference_framed_label(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "preference for workplace comedy",
+              "label_confidence": "high",
+              "proposed_label_type": "semantic",
+              "coverage_high_count": 6,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 0,
+              "coverage_low_total": 4,
+              "explanation": "High users watched workplace comedies while low users did not.",
+              "evidence": ["Workplaces repeat", "Comedy repeats", "LOW examples differ"]
+            }
+            """,
+            dimension_mode="user",
+        )
+
+        self.assertEqual(result["label"], "preference for workplace comedy")
+        self.assertEqual(result["validation_status"], "valid")
+
+    def test_unclear_user_label_is_not_rewritten_or_perspective_invalidated(self):
+        result = gpt_utils._extract_label_result_from_response(
+            """
+            {
+              "label": "UNCLEAR / MIXED SIGNAL",
+              "label_confidence": "unclear",
+              "label_type": "unclear",
+              "coverage_high_count": 1,
+              "coverage_high_total": 6,
+              "coverage_low_overlap_count": 0,
+              "coverage_low_total": 4,
+              "explanation": "The pattern is unclear.",
+              "evidence": ["Mixed high examples", "No stable cluster", "Review needed"]
+            }
+            """,
+            dimension_mode="user",
+        )
+
+        self.assertEqual(result["label"], gpt_utils.UNCLEAR_LABEL)
+        self.assertNotIn("preference for", result["label"].lower())
+        self.assertNotIn("lacks preference/taste/affinity framing", " ".join(result["validation_notes"]))
 
     def test_low_overlap_above_fifty_invalidates_broad_label(self):
         result = gpt_utils._extract_label_result_from_response(
@@ -1592,6 +1797,7 @@ class ReviewCsvExportTests(unittest.TestCase):
         row = rows[0]
         for column in (
             "existing_label",
+            "dim_type",
             "existing_display_label",
             "existing_label_type",
             "existing_explainable",
@@ -1606,6 +1812,7 @@ class ReviewCsvExportTests(unittest.TestCase):
             self.assertIn(column, row)
 
         self.assertEqual(row["existing_label"], "prestige tv drama episodes")
+        self.assertEqual(row["dim_type"], "media")
         self.assertEqual(row["existing_display_label"], "prestige TV drama")
         self.assertEqual(row["existing_label_type"], "soft_structural")
         self.assertEqual(row["existing_explainable"], "True")
@@ -1722,6 +1929,7 @@ class ReviewCsvExportTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["proposed_label"], "non-comedy mysteries")
+        self.assertEqual(row["dim_type"], "media")
         self.assertEqual(row["proposed_label_type"], "semantic")
         self.assertEqual(row["proposed_label_confidence"], "medium")
         self.assertEqual(row["final_label_type"], "semantic_candidate")

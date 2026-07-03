@@ -108,6 +108,7 @@ def label_single_dimension(
             prompt_bundle["prompt_text"],
             provider=provider_name,
             model=model_name,
+            dimension_mode=mode,
         )
         print(f"🧠 Suggested label for dim {dimension} via {provider_name}:{model_name}: {result['label']}")
         result_metadata = _format_result_metadata(result)
@@ -121,7 +122,11 @@ def label_single_dimension(
         for evidence in result.get("evidence", []):
             if evidence:
                 print(f"   - {evidence}")
-        if save_label and _should_persist_label(result["label"]):
+        if (
+            save_label
+            and result.get("validation_status") != "invalid"
+            and _should_persist_label(result["label"])
+        ):
             insert_label(dimension, result["label"])
 
 

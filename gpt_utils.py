@@ -40,14 +40,17 @@ when they reveal an obvious cluster.
 Genres are often broad and noisy. Plot hints may contain the clearest signal for story/entity
 dimensions, so a repeated plot concept can be the primary basis for the label.
 
-For media dimensions, identify a concrete item-side separator.
-For user dimensions, infer a viewing-preference or taste separator from the representative watches
-associated with HIGH versus LOW users.
+For media dimensions, identify a concrete item-side separator and label the title/content trait.
+For user dimensions, infer a viewer preference, taste, affinity, or tendency from the representative
+watches associated with HIGH versus LOW users. User-dimension labels must be preference-framed;
+do not label them as direct title/content traits.
 
 Prefer concrete story/entity separators over broad genre labels.
 Bad labels are broad genre summaries, such as "sci-fi action", "speculative themes", or
 "complex narratives".
-Good labels are short, concrete, evidence-derived noun phrases.
+Good media labels are short, concrete, evidence-derived noun phrases.
+Good user labels are short, concrete, preference-framed phrases such as "preference for workplace comedy"
+or "viewer affinity for relationship-driven stories".
 Do not copy example wording from these instructions into the label. The label must come only
 from the HIGH/LOW evidence for the current dimension.
 If related dimensions share a broad theme, label each dimension by its distinguishing nuance
@@ -86,7 +89,7 @@ Rules:
 - Genres are often broad and noisy; do not over-weight genre if plot hints reveal a stronger common concept.
 - Prefer concrete story/entity labels over broad genre labels.
 - Bad label style: "sci-fi action", "speculative themes", or "complex narratives".
-- Good labels are compact evidence-derived noun phrases, no more than 8 words.
+{label_style_guidance}
 - Derive the label only from the listed HIGH/LOW items for this dimension.
 - Never copy wording from these instructions or reuse a prior label unless the current dimension independently supports the exact words.
 - When a dimension resembles a broader theme seen elsewhere, choose the narrower nuance that best separates this HIGH set from this LOW set.
@@ -141,6 +144,30 @@ HIGH ITEMS:
 LOW ITEMS:
 {top_negative_block}
 """.strip()
+
+USER_PREFERENCE_FRAMING_RE = re.compile(
+    r"\b("
+    r"preference|preferences|affinity|affinities|taste|tastes|tendency|tendencies|"
+    r"interest|interests|interested\s+in|gravitates?\s+toward|gravitates?\s+towards|"
+    r"drawn\s+to|leans?\s+toward|leans?\s+towards|viewer\s+affinity|viewer\s+taste|"
+    r"viewer\s+preference"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+NON_SEMANTIC_LABEL_FRAGMENT_RE = re.compile(
+    r"\b("
+    r"unclear|mixed signal|non[-\s]+explainable|not explainable|structural|mechanical|"
+    r"runtime|release year|released in|metadata|malformed|truncated"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+STRUCTURAL_LABEL_RE = re.compile(
+    r"(^|[^a-z0-9])("
+    r"episode|episodes|season|seasons|tv|television|movie|movies|film|films|"
+    r"title|titles|runtime|runtimes"
+    r")([^a-z0-9]|$)",
+    flags=re.IGNORECASE,
+)
 
 
 def connect_db():
@@ -319,6 +346,24 @@ def _is_unclear_label(label: str) -> bool:
     return _clean_whitespace(label).lower() == UNCLEAR_LABEL.lower()
 
 
+def is_user_preference_framed_label(label: str) -> bool:
+    return bool(USER_PREFERENCE_FRAMING_RE.search(_clean_whitespace(label)))
+
+
+def _is_nonsemantic_or_structural_label(label: str, label_type: str | None = None) -> bool:
+    cleaned_label = _clean_whitespace(label)
+    cleaned_type = _clean_whitespace(label_type).lower()
+    if not cleaned_label:
+        return True
+    if _is_unclear_label(cleaned_label):
+        return True
+    if cleaned_type in {"unclear", "mechanical"}:
+        return True
+    if NON_SEMANTIC_LABEL_FRAGMENT_RE.search(cleaned_label):
+        return True
+    return bool(STRUCTURAL_LABEL_RE.search(cleaned_label))
+
+
 def _set_validation_status(result: dict, status: str) -> None:
     status_order = {
         "valid": 0,
@@ -338,10 +383,38 @@ def _add_validation_note(result: dict, status: str, note: str) -> None:
         notes.append(note)
 
 
+def validate_label_perspective(result: dict, dimension_mode: str = "media") -> dict:
+    validated = dict(result)
+    validated["validation_notes"] = list(result.get("validation_notes") or [])
+
+    if dimension_mode != "user":
+        return validated
+
+    label = validated.get("label", "")
+    label_type = validated.get("label_type") or validated.get("proposed_label_type")
+    if _is_nonsemantic_or_structural_label(label, label_type):
+        return validated
+    if is_user_preference_framed_label(label):
+        return validated
+
+    if validated.get("label_confidence") == "high":
+        validated["label_confidence"] = "medium"
+    _add_validation_note(
+        validated,
+        "invalid",
+        (
+            "USER dimension label lacks preference/taste/affinity framing; "
+            "plain title-trait labels are not saved for user preference dimensions."
+        ),
+    )
+    return validated
+
+
 def validate_label_result(
     result: dict,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
+    dimension_mode: str = "media",
 ) -> dict:
     validated = dict(result)
     validated["validation_status"] = "valid"
@@ -449,7 +522,7 @@ def validate_label_result(
             ),
         )
 
-    return validated
+    return validate_label_perspective(validated, dimension_mode=dimension_mode)
 
 
 def _normalize_label_result(
@@ -466,6 +539,7 @@ def _normalize_label_result(
     label_type=None,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
+    dimension_mode: str = "media",
 ) -> dict:
     normalized_high_count = _coerce_optional_int(coverage_high_count)
     normalized_high_total = _coerce_optional_int(coverage_high_total)
@@ -498,6 +572,7 @@ def _normalize_label_result(
         normalized,
         minimum_label_coverage_percent=minimum_label_coverage_percent,
         maximum_low_overlap_percent=maximum_low_overlap_percent,
+        dimension_mode=dimension_mode,
     )
 
 
@@ -728,22 +803,52 @@ def _get_dimension_scope_text(dimension_mode: str) -> str:
     if dimension_mode == "user":
         return (
             "USER preference dimension. HIGH and LOW items are representative watches from users whose "
-            "embedding values are highest or lowest on this dimension."
+            "user embedding values are highest or lowest on this dimension. Label the inferred viewer taste, "
+            "preference, affinity, or tendency represented by the HIGH examples compared with the LOW examples. "
+            "Do not label this as a direct title trait."
         )
-    return "MEDIA semantic dimension. HIGH and LOW items are media titles with the highest or lowest values on this dimension."
+    return (
+        "MEDIA/title dimension. HIGH and LOW items are representative titles whose media embedding values are "
+        "highest or lowest on this dimension. Label the content/title trait represented by the HIGH examples "
+        "compared with the LOW examples."
+    )
 
 
 def _get_dimension_guidance_text(dimension_mode: str) -> str:
     if dimension_mode == "user":
         return (
             "Infer a taste or preference axis. Favor labels that describe what kinds of titles these users "
-            "gravitate toward, such as genre/tone/era/franchise or creator-driven preferences. Do not label "
-            "this as a single plot synopsis unless the same item-side pattern clearly repeats across users."
+            "gravitate toward, such as genre/tone/era/franchise or creator-driven preferences. The label must "
+            "make the viewer-preference perspective explicit, for example preference for, affinity for, taste "
+            "for, tendency toward, interest in, or viewer affinity for. Do not label this as a single plot "
+            "synopsis unless the same item-side pattern clearly repeats across users."
         )
     return (
         "Infer an item-side semantic separator. Favor labels that distinguish the high-value titles from the "
         "low-value titles based on concrete shared characteristics."
     )
+
+
+def _get_label_style_guidance_text(dimension_mode: str) -> str:
+    if dimension_mode == "user":
+        return (
+            '- Good USER labels are compact evidence-derived preference phrases, no more than 8 words, such as '
+            '"preference for workplace comedy", "affinity for legal dramas", "taste for music performance '
+            'stories", or "viewer affinity for relationship-driven stories".\n'
+            "- Do not return plain title traits like \"workplace comedy\", \"medical drama\", or "
+            '"action spectacle" for USER dimensions.'
+        )
+    return (
+        '- Good MEDIA labels are compact evidence-derived noun phrases, no more than 8 words, such as '
+        '"workplace comedy", "legal drama", "music performance stories", or "action spectacle".'
+    )
+
+
+def _resolve_dimension_mode(dimension: int, dimension_mode: str | None = None) -> str:
+    cleaned_mode = _clean_whitespace(dimension_mode).lower()
+    if cleaned_mode in {"media", "user"}:
+        return cleaned_mode
+    return get_dimension_mode(dimension)
 
 
 def _format_review_context(
@@ -776,7 +881,7 @@ def build_dimension_prompt(
     dimension: int,
     positive_df: pd.DataFrame,
     negative_df: pd.DataFrame | None = None,
-    dimension_mode: str = "media",
+    dimension_mode: str | None = None,
     min_valid_items: int = MIN_VALID_ITEMS,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
@@ -784,6 +889,7 @@ def build_dimension_prompt(
     existing_display_label: str | None = None,
     existing_label_type: str | None = None,
 ) -> dict:
+    dimension_mode = _resolve_dimension_mode(dimension, dimension_mode)
     positive_bundle = prepare_dimension_items(
         positive_df,
         min_valid_items=min_valid_items,
@@ -823,6 +929,7 @@ def build_dimension_prompt(
         dimension=dimension,
         dimension_scope=_get_dimension_scope_text(dimension_mode),
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
+        label_style_guidance=_get_label_style_guidance_text(dimension_mode),
         review_context=_format_review_context(
             existing_label=existing_label,
             existing_display_label=existing_display_label,
@@ -852,6 +959,7 @@ def build_dimension_prompt(
 
 
 def generate_summary_text(df: pd.DataFrame, dimension: int, dimension_mode: str = "media") -> str:
+    dimension_mode = _resolve_dimension_mode(dimension, dimension_mode)
     bundle = prepare_dimension_items(df, min_valid_items=0, dimension_mode=dimension_mode)
     valid_items = _select_prompt_rows(bundle["valid_items"], DEFAULT_TOP_POSITIVE_ITEMS, dimension_mode)
     summary_target = "watched items" if dimension_mode == "user" else "items"
@@ -867,7 +975,7 @@ def _build_user_prompt(
     dimension: int,
     top_positive_block: str,
     top_negative_block: str,
-    dimension_mode: str = "media",
+    dimension_mode: str | None = None,
     min_valid_items: int = MIN_VALID_ITEMS,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
@@ -877,10 +985,12 @@ def _build_user_prompt(
     existing_display_label: str | None = None,
     existing_label_type: str | None = None,
 ) -> str:
+    dimension_mode = _resolve_dimension_mode(dimension, dimension_mode)
     return USER_PROMPT_TEMPLATE.format(
         dimension=dimension,
         dimension_scope=_get_dimension_scope_text(dimension_mode),
         dimension_specific_guidance=_get_dimension_guidance_text(dimension_mode),
+        label_style_guidance=_get_label_style_guidance_text(dimension_mode),
         review_context=_format_review_context(
             existing_label=existing_label,
             existing_display_label=existing_display_label,
@@ -900,6 +1010,7 @@ def _extract_label_result_from_response(
     response_text: str,
     minimum_label_coverage_percent: int = MINIMUM_LABEL_COVERAGE_PERCENT,
     maximum_low_overlap_percent: int = MAXIMUM_LOW_OVERLAP_PERCENT,
+    dimension_mode: str = "media",
 ) -> dict:
     raw = (response_text or "").strip()
     if not raw:
@@ -931,6 +1042,7 @@ def _extract_label_result_from_response(
                 label_type=data.get("proposed_label_type", data.get("label_type")),
                 minimum_label_coverage_percent=minimum_label_coverage_percent,
                 maximum_low_overlap_percent=maximum_low_overlap_percent,
+                dimension_mode=dimension_mode,
             )
 
     first_line = raw.splitlines()[0]
@@ -940,6 +1052,7 @@ def _extract_label_result_from_response(
         [],
         minimum_label_coverage_percent=minimum_label_coverage_percent,
         maximum_low_overlap_percent=maximum_low_overlap_percent,
+        dimension_mode=dimension_mode,
     )
 
 
@@ -947,7 +1060,7 @@ def _extract_label_from_response(response_text: str) -> str:
     return _extract_label_result_from_response(response_text)["label"]
 
 
-def _call_openai_for_label_result(prompt_text: str, model: str) -> dict:
+def _call_openai_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media") -> dict:
     client = openai.OpenAI(api_key=get_setting_value("openai.api_key"))
     response = client.chat.completions.create(
         model=model,
@@ -959,7 +1072,7 @@ def _call_openai_for_label_result(prompt_text: str, model: str) -> dict:
         temperature=0.1,
     )
     content = response.choices[0].message.content or ""
-    return _extract_label_result_from_response(content)
+    return _extract_label_result_from_response(content, dimension_mode=dimension_mode)
 
 
 def _list_ollama_models() -> list[str]:
@@ -1000,7 +1113,7 @@ def _resolve_ollama_model_name(model: str) -> str:
     )
 
 
-def _call_ollama_for_label_result(prompt_text: str, model: str) -> dict:
+def _call_ollama_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media") -> dict:
     resolved_model = _resolve_ollama_model_name(model)
     payload = {
         "model": resolved_model,
@@ -1027,13 +1140,14 @@ def _call_ollama_for_label_result(prompt_text: str, model: str) -> dict:
             f"{response.status_code} {error_message}"
         )
     data = response.json()
-    return _extract_label_result_from_response(data.get("response", ""))
+    return _extract_label_result_from_response(data.get("response", ""), dimension_mode=dimension_mode)
 
 
 def call_llm_for_label_result(
     prompt_text: str,
     provider: str | None = None,
     model: str | None = None,
+    dimension_mode: str = "media",
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
 ) -> dict:
@@ -1043,8 +1157,8 @@ def call_llm_for_label_result(
     for attempt in range(1, max_retries + 1):
         try:
             if resolved_provider == "openai":
-                return _call_openai_for_label_result(prompt_text, resolved_model)
-            return _call_ollama_for_label_result(prompt_text, resolved_model)
+                return _call_openai_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
+            return _call_ollama_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
         except Exception as exc:
             last_error = exc
             if attempt == max_retries:
@@ -1061,6 +1175,7 @@ def call_llm_for_label(
     prompt_text: str,
     provider: str | None = None,
     model: str | None = None,
+    dimension_mode: str = "media",
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
 ) -> str:
@@ -1068,13 +1183,24 @@ def call_llm_for_label(
         prompt_text,
         provider=provider,
         model=model,
+        dimension_mode=dimension_mode,
         max_retries=max_retries,
         retry_delay_s=retry_delay_s,
     )["label"]
 
 
-def call_gpt_for_label(prompt_text, provider: str | None = None, model: str | None = None):
-    return call_llm_for_label(prompt_text, provider=provider, model=model)
+def call_gpt_for_label(
+    prompt_text,
+    provider: str | None = None,
+    model: str | None = None,
+    dimension_mode: str = "media",
+):
+    return call_llm_for_label(
+        prompt_text,
+        provider=provider,
+        model=model,
+        dimension_mode=dimension_mode,
+    )
 
 
 def insert_label(dimension, label):

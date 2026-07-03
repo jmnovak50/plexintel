@@ -26,11 +26,14 @@ from gpt_utils import (
     get_top_media_for_dimension,
     get_top_users_for_dimension,
     get_user_watch_history,
+    is_user_preference_framed_label,
     resolve_label_backend,
+    validate_label_perspective,
 )
 
 CSV_FIELDNAMES = [
     "dimension",
+    "dim_type",
     "selection_mode",
     "label_repair_status",
     "selection_reason",
@@ -114,8 +117,18 @@ HARD_STRUCTURAL_LABELS = {
     "feature length movies",
     "feature films",
     "feature film preference",
+    "film preference",
+    "film preferences",
     "feature-film movies",
     "standalone feature films",
+    "movie preference",
+    "movie preferences",
+    "title preference",
+    "title preferences",
+    "tv preference",
+    "tv preferences",
+    "television preference",
+    "television preferences",
     "single tv episode",
     "single television episode",
     "single-episode installments",
@@ -150,6 +163,15 @@ YEAR_RANGE_RE = re.compile(
     r"(?<!\d)(?:18|19|20)\d{2}s?\s*(?:-|–|—|to|through|thru)\s*(?:18|19|20)\d{2}s?(?!\d)"
 )
 NEGATIVE_SEMANTIC_RE = re.compile(r"(^|[^a-z0-9])non[-\s]+[a-z0-9]+")
+NON_EXPLAINABLE_LABEL_FRAGMENTS = (
+    "non-explainable",
+    "non explainable",
+    "not explainable",
+    "nonsemantic",
+    "non-semantic",
+    "structural signal",
+    "mechanical signal",
+)
 
 
 def connect_db():
@@ -178,11 +200,14 @@ def _contains_any(value: str, fragments: tuple[str, ...]) -> bool:
     return any(fragment in value for fragment in fragments)
 
 
-def _format_governed_display_label(label: str) -> str | None:
+def _format_governed_display_label(label: str, dim_type: str = "media") -> str | None:
     label_lc = label.lower()
     raw_display_label = label
+    preserve_user_preference_phrase = dim_type == "user" and is_user_preference_framed_label(label)
 
-    if label_lc == "comedy-focused titles":
+    if preserve_user_preference_phrase:
+        raw_display_label = label
+    elif label_lc == "comedy-focused titles":
         raw_display_label = "comedy-focused stories"
     elif label_lc == "high-octane action-thriller titles":
         raw_display_label = "high-octane action thrillers"
@@ -220,7 +245,7 @@ def _format_governed_display_label(label: str) -> str | None:
     return display_label or None
 
 
-def classify_label_governance(label: str) -> dict:
+def classify_label_governance(label: str, dim_type: str = "media") -> dict:
     raw_label = _clean_label_text(label)
     label_lc = raw_label.lower()
     if not raw_label:
@@ -256,6 +281,13 @@ def classify_label_governance(label: str) -> dict:
             "display_label": None,
             "needs_review": False,
         }
+    if _contains_any(label_lc, NON_EXPLAINABLE_LABEL_FRAGMENTS):
+        return {
+            "label_type": "hard_structural",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": False,
+        }
     if _contains_any(label_lc, PROPER_NOUN_LABEL_FRAGMENTS):
         return {
             "label_type": "proper_noun",
@@ -263,19 +295,26 @@ def classify_label_governance(label: str) -> dict:
             "display_label": None,
             "needs_review": False,
         }
+    is_soft_structural = bool(SOFT_STRUCTURAL_RE.search(label_lc))
+    if dim_type == "user" and not is_soft_structural and not is_user_preference_framed_label(raw_label):
+        return {
+            "label_type": "perspective_mismatch",
+            "explainable": False,
+            "display_label": None,
+            "needs_review": True,
+        }
     if NEGATIVE_SEMANTIC_RE.search(label_lc):
         return {
             "label_type": "semantic_candidate",
             "explainable": True,
-            "display_label": _format_governed_display_label(raw_label),
+            "display_label": _format_governed_display_label(raw_label, dim_type=dim_type),
             "needs_review": True,
         }
 
-    is_soft_structural = bool(SOFT_STRUCTURAL_RE.search(label_lc))
     return {
         "label_type": "soft_structural" if is_soft_structural else "semantic_candidate",
         "explainable": True,
-        "display_label": _format_governed_display_label(raw_label),
+        "display_label": _format_governed_display_label(raw_label, dim_type=dim_type),
         "needs_review": is_soft_structural,
     }
 
@@ -1647,10 +1686,11 @@ def _blank_governance() -> dict:
     }
 
 
-def _csv_governance_for_label(label_result: dict) -> dict:
+def _csv_governance_for_label(label_result: dict, dim_type: str = "media") -> dict:
+    label_result = validate_label_perspective(label_result, dimension_mode=dim_type)
     if not _valid_generated_label(label_result):
         return _blank_governance()
-    return classify_label_governance(label_result.get("label", ""))
+    return classify_label_governance(label_result.get("label", ""), dim_type=dim_type)
 
 
 def _existing_label_row_to_dict(row) -> dict | None:
@@ -1742,7 +1782,10 @@ def save_label_result(
     selection_reason: str = "",
     repair_cooldown_days: int = DEFAULT_REPAIR_COOLDOWN_DAYS,
     review_mode: bool = False,
+    dim_type: str | None = None,
 ) -> tuple[bool, str]:
+    dim_type = dim_type or get_dimension_mode(dimension)
+    label_result = validate_label_perspective(label_result, dimension_mode=dim_type)
     existing_row = get_existing_label_row(cur, dimension)
     existing_status, existing_reason = _label_repair_status(existing_row)
     effective_status = label_repair_status or existing_status
@@ -1755,7 +1798,7 @@ def save_label_result(
         return False, "invalid_label_not_saved"
 
     generated_label = label_result["label"]
-    governance = classify_label_governance(generated_label)
+    governance = classify_label_governance(generated_label, dim_type=dim_type)
     if not existing_row:
         cur.execute(
             """
@@ -2087,6 +2130,7 @@ def main():
                     prompt_bundle["prompt_text"],
                     provider=provider_name,
                     model=model_name,
+                    dimension_mode=mode,
                 )
                 print(
                     f"🧠 {mode.title()} dim {dimension} labeled via "
@@ -2101,9 +2145,10 @@ def main():
                 label_result = _default_label_result(skipped_reason)
                 print(f"⚠️ Skipping dim {dimension} due to LLM error: {exc}", flush=True)
 
+        label_result = validate_label_perspective(label_result, dimension_mode=mode)
         generated_label = label_result["label"]
         evidence = label_result.get("evidence", ["", "", ""])
-        final_governance = _csv_governance_for_label(label_result)
+        final_governance = _csv_governance_for_label(label_result, dim_type=mode)
         final_saved_label = ""
         save_status = ""
         review_cooldown_until = ""
@@ -2117,6 +2162,7 @@ def main():
                 selection_reason=dim_stats.get("selection_reason", ""),
                 repair_cooldown_days=args.repair_cooldown_days,
                 review_mode=dim_stats.get("selection_mode") == "review",
+                dim_type=mode,
             )
             if saved:
                 final_saved_label = generated_label
@@ -2150,6 +2196,7 @@ def main():
             csv_rows.append(
                 {
                     "dimension": dimension,
+                    "dim_type": mode,
                     "selection_mode": dim_stats.get("selection_mode", args.selection_mode),
                     "label_repair_status": dim_stats.get("label_repair_status", ""),
                     "selection_reason": dim_stats.get("selection_reason", ""),
