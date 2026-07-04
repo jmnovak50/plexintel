@@ -18,7 +18,7 @@ from gpt_utils import (
     get_media_metadata,
     get_top_media_for_dimension,
     get_top_users_for_dimension,
-    get_user_watch_history,
+    get_user_positive_training_examples,
     insert_label,
     resolve_label_backend,
 )
@@ -76,7 +76,11 @@ def _fetch_dimension_samples(dimension: int, top_n: int):
 
     positive_ids = get_top_users_for_dimension(dimension, top_n=top_n)
     negative_ids = get_bottom_users_for_dimension(dimension, top_n=top_n)
-    return "user", get_user_watch_history(positive_ids), get_user_watch_history(negative_ids)
+    return (
+        "user",
+        get_user_positive_training_examples(positive_ids),
+        get_user_positive_training_examples(negative_ids),
+    )
 
 
 def label_single_dimension(

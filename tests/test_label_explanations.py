@@ -126,12 +126,130 @@ class DimensionRoutingTests(unittest.TestCase):
 
         with patch.object(label_embeddings, "get_top_users_for_dimension", return_value=["u1"]) as top_users:
             with patch.object(label_embeddings, "get_bottom_users_for_dimension", return_value=["u2"]) as bottom_users:
-                with patch.object(label_embeddings, "get_user_watch_history", side_effect=["high-user", "low-user"]):
+                with patch.object(
+                    label_embeddings,
+                    "get_user_positive_training_examples",
+                    side_effect=["high-user", "low-user"],
+                ) as training_examples:
                     mode, positive, negative = label_embeddings._fetch_dimension_samples(768, top_n=4)
 
         self.assertEqual((mode, positive, negative), ("user", "high-user", "low-user"))
         top_users.assert_called_once_with(768, top_n=4)
         bottom_users.assert_called_once_with(768, top_n=4)
+        self.assertEqual(
+            [call.args[0] for call in training_examples.call_args_list],
+            [["u1"], ["u2"]],
+        )
+
+    def test_user_dimension_prompt_excludes_non_training_watch_history_noise(self):
+        training_columns = [
+            "username",
+            "watched_at",
+            "rating_key",
+            "title",
+            "year",
+            "media_type",
+            "show_title",
+            "rating",
+            "summary",
+            "duration",
+            "genre_tags",
+            "actor_tags",
+            "director_tags",
+            "played_duration",
+            "training_media_duration",
+            "engagement_ratio",
+            "training_label",
+            "played_minutes",
+            "media_minutes",
+        ]
+        watch_history_columns = [
+            "username",
+            "watched_at",
+            "rating_key",
+            "title",
+            "year",
+            "media_type",
+            "show_title",
+            "rating",
+            "summary",
+            "duration",
+            "genre_tags",
+            "actor_tags",
+            "director_tags",
+        ]
+
+        class FakeCursor:
+            def __init__(self):
+                self.description = []
+                self.rows = []
+                self.executed_sql = []
+
+            def execute(self, sql, params=None):
+                self.executed_sql.append(sql)
+                normalized_sql = " ".join(sql.lower().split())
+                if "from training_data td" in normalized_sql:
+                    self.description = [(column,) for column in training_columns]
+                    self.rows = []
+                    return
+                if "from watch_history" in normalized_sql:
+                    self.description = [(column,) for column in watch_history_columns]
+                    self.rows = [
+                        (
+                            "joshcohen827",
+                            datetime(2026, 6, 30),
+                            13929,
+                            "Whiplash",
+                            2014,
+                            "movie",
+                            "",
+                            "R",
+                            "A young drummer enters a punishing music program.",
+                            6405509,
+                            "Drama, Music",
+                            "Miles Teller",
+                            "Damien Chazelle",
+                        )
+                    ]
+                    return
+                raise AssertionError(f"Unexpected SQL: {sql}")
+
+            def fetchall(self):
+                return self.rows
+
+            def close(self):
+                pass
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def close(self):
+                pass
+
+        fake_conn = FakeConnection()
+        with patch.object(gpt_utils, "connect_db", return_value=fake_conn):
+            with patch.object(label_embeddings, "get_top_users_for_dimension", return_value=["joshcohen827"]):
+                with patch.object(label_embeddings, "get_bottom_users_for_dimension", return_value=[]):
+                    mode, positive_df, negative_df = label_embeddings._fetch_dimension_samples(1385, top_n=1)
+
+        prompt_bundle = gpt_utils.build_dimension_prompt(
+            1385,
+            positive_df,
+            negative_df,
+            dimension_mode=mode,
+            min_valid_items=1,
+        )
+        executed_sql = "\n".join(fake_conn.cursor_obj.executed_sql)
+
+        self.assertEqual(mode, "user")
+        self.assertIn("FROM training_data td", executed_sql)
+        self.assertNotIn("FROM watch_history", executed_sql)
+        self.assertNotIn("Whiplash", prompt_bundle["prompt_text"])
+        self.assertNotIn("13929", prompt_bundle["prompt_text"])
 
     def test_batch_dimension_ranges_match_combined_embedding_layout(self):
         self.assertEqual(batch_label_embeddings._get_dimension_range("media"), (0, 768))
@@ -1336,13 +1454,43 @@ class LabelCoveragePromptTests(unittest.TestCase):
     def test_user_prompt_requires_preference_framed_labels(self):
         positive_df = pd.DataFrame(
             [
-                {"username": "alice", "title": "Office One", "year": 2001, "media_type": "show", "genre_tags": "Comedy"},
-                {"username": "bob", "title": "Office Two", "year": 2002, "media_type": "show", "genre_tags": "Comedy"},
+                {
+                    "username": "alice",
+                    "title": "Office One",
+                    "year": 2001,
+                    "media_type": "show",
+                    "genre_tags": "Comedy",
+                    "played_minutes": 52,
+                    "media_minutes": 100,
+                    "engagement_ratio": 0.52,
+                    "training_label": 1,
+                },
+                {
+                    "username": "bob",
+                    "title": "Office Two",
+                    "year": 2002,
+                    "media_type": "show",
+                    "genre_tags": "Comedy",
+                    "played_minutes": 48,
+                    "media_minutes": 80,
+                    "engagement_ratio": 0.60,
+                    "training_label": 1,
+                },
             ]
         )
         negative_df = pd.DataFrame(
             [
-                {"username": "cara", "title": "Hospital Drama", "year": 2003, "media_type": "show", "genre_tags": "Drama"},
+                {
+                    "username": "cara",
+                    "title": "Hospital Drama",
+                    "year": 2003,
+                    "media_type": "show",
+                    "genre_tags": "Drama",
+                    "played_minutes": 45,
+                    "media_minutes": 75,
+                    "engagement_ratio": 0.60,
+                    "training_label": 1,
+                },
             ]
         )
 
@@ -1360,6 +1508,12 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertIn("Good USER labels are compact evidence-derived preference phrases", prompt_text)
         self.assertIn('"preference for workplace comedy"', prompt_text)
         self.assertIn('Do not return plain title traits like "workplace comedy"', prompt_text)
+        self.assertIn("training_data rows with label=1 and engagement_ratio >= 0.50", prompt_text)
+        self.assertIn("LOW examples are still positive engaged watches from low-dimension users", prompt_text)
+        self.assertIn("played_minutes=52.00", prompt_text)
+        self.assertIn("media_minutes=100.00", prompt_text)
+        self.assertIn("engagement_ratio=0.5200", prompt_text)
+        self.assertIn("training_label=1", prompt_text)
 
     def test_review_prompt_includes_existing_governance_without_forcing_replacement(self):
         positive_df = pd.DataFrame(

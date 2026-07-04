@@ -278,6 +278,16 @@ def _format_runtime(value) -> str:
     return f"{rounded_minutes}m"
 
 
+def _format_decimal(value, decimal_places: int) -> str:
+    raw_value = _clean_whitespace(value)
+    if not raw_value:
+        return ""
+    try:
+        return f"{float(raw_value):.{decimal_places}f}"
+    except ValueError:
+        return raw_value
+
+
 def _coerce_label(label: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(label or "")).strip().strip("\"'")
     cleaned = cleaned.rstrip(".")
@@ -649,10 +659,25 @@ def format_prompt_item(row) -> str:
     if username:
         metadata_line = f"  User: {username} | Dir: {directors} | Cast: {actors}"
 
+    engagement_parts = []
+    played_minutes = _format_decimal(row.get("played_minutes", ""), 2)
+    media_minutes = _format_decimal(row.get("media_minutes", ""), 2)
+    engagement_ratio = _format_decimal(row.get("engagement_ratio", ""), 4)
+    training_label = _clean_whitespace(row.get("training_label", ""))
+    if played_minutes:
+        engagement_parts.append(f"played_minutes={played_minutes}")
+    if media_minutes:
+        engagement_parts.append(f"media_minutes={media_minutes}")
+    if engagement_ratio:
+        engagement_parts.append(f"engagement_ratio={engagement_ratio}")
+    if training_label:
+        engagement_parts.append(f"training_label={training_label}")
+    engagement_line = f"\n  Engagement: {' | '.join(engagement_parts)}" if engagement_parts else ""
+
     return (
         f"- {display_title} ({year_value}) | {media_type} | {genres}\n"
         f"{metadata_line}\n"
-        f"  Runtime: {runtime} | Rating: {rating}\n"
+        f"  Runtime: {runtime} | Rating: {rating}{engagement_line}\n"
         f"  Plot hint: {plot_hint}"
     )
 
@@ -672,6 +697,10 @@ def _ensure_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
         "actor_tags",
         "director_tags",
         "watched_at",
+        "played_minutes",
+        "media_minutes",
+        "engagement_ratio",
+        "training_label",
     ]
     for col in expected_cols:
         if col not in df.columns:
@@ -805,7 +834,8 @@ def _get_dimension_scope_text(dimension_mode: str) -> str:
             "USER preference dimension. HIGH and LOW items are representative watches from users whose "
             "user embedding values are highest or lowest on this dimension. Label the inferred viewer taste, "
             "preference, affinity, or tendency represented by the HIGH examples compared with the LOW examples. "
-            "Do not label this as a direct title trait."
+            "The listed watches are positive engaged training examples only; LOW means low dimension value, "
+            "not low engagement. Do not label this as a direct title trait."
         )
     return (
         "MEDIA/title dimension. HIGH and LOW items are representative titles whose media embedding values are "
@@ -821,7 +851,9 @@ def _get_dimension_guidance_text(dimension_mode: str) -> str:
             "gravitate toward, such as genre/tone/era/franchise or creator-driven preferences. The label must "
             "make the viewer-preference perspective explicit, for example preference for, affinity for, taste "
             "for, tendency toward, interest in, or viewer affinity for. Do not label this as a single plot "
-            "synopsis unless the same item-side pattern clearly repeats across users."
+            "synopsis unless the same item-side pattern clearly repeats across users. User evidence is restricted "
+            "to training_data rows with label=1 and engagement_ratio >= 0.50. LOW examples are still positive "
+            "engaged watches from low-dimension users, not examples of low engagement."
         )
     return (
         "Infer an item-side semantic separator. Favor labels that distinguish the high-value titles from the "
@@ -1385,7 +1417,7 @@ def get_media_metadata(rating_keys):
     return _order_dataframe(df, "rating_key", rating_keys)
 
 
-def get_user_watch_history(usernames):
+def get_user_positive_training_examples(usernames, min_engagement_ratio: float = 0.50):
     usernames = list(usernames or [])
     if not usernames:
         return _ensure_metadata_columns(pd.DataFrame())
@@ -1395,8 +1427,8 @@ def get_user_watch_history(usernames):
     cur.execute(
         """
         SELECT
-            w.username,
-            w.watched_at,
+            td.username,
+            NULL::timestamp AS watched_at,
             m.rating_key,
             m.title,
             m.year,
@@ -1407,9 +1439,21 @@ def get_user_watch_history(usernames):
             m.duration,
             COALESCE(g.genre_tags, '') AS genre_tags,
             COALESCE(a.actor_tags, '') AS actor_tags,
-            COALESCE(d.director_tags, '') AS director_tags
-        FROM watch_history w
-        JOIN library m ON w.rating_key = m.rating_key
+            COALESCE(d.director_tags, '') AS director_tags,
+            td.played_duration,
+            td.media_duration AS training_media_duration,
+            td.engagement_ratio,
+            td.label AS training_label,
+            ROUND((td.played_duration::numeric / 60.0), 2) AS played_minutes,
+            ROUND(
+                COALESCE(
+                    NULLIF(m.duration, 0)::numeric / 60000.0,
+                    NULLIF(td.media_duration, 0)::numeric / 60.0
+                ),
+                2
+            ) AS media_minutes
+        FROM training_data td
+        JOIN library m ON td.rating_key = m.rating_key
         LEFT JOIN (
             SELECT mg.media_id, STRING_AGG(g.name, ', ') AS genre_tags
             FROM media_genres mg
@@ -1428,9 +1472,11 @@ def get_user_watch_history(usernames):
             JOIN directors d ON md.director_id = d.id
             GROUP BY md.media_id
         ) d ON d.media_id = m.rating_key
-        WHERE w.username = ANY(%s)
+        WHERE td.username = ANY(%s)
+          AND td.label = 1
+          AND td.engagement_ratio >= %s
         """,
-        (usernames,),
+        (usernames, min_engagement_ratio),
     )
     rows = cur.fetchall()
     colnames = [desc[0] for desc in cur.description]
@@ -1439,4 +1485,8 @@ def get_user_watch_history(usernames):
 
     df = pd.DataFrame(rows, columns=colnames)
     df = _ensure_metadata_columns(df)
-    return _order_dataframe(df, "username", usernames, secondary_desc_column="watched_at")
+    return _order_dataframe(df, "username", usernames, secondary_desc_column="engagement_ratio")
+
+
+def get_user_watch_history(usernames):
+    return get_user_positive_training_examples(usernames)
