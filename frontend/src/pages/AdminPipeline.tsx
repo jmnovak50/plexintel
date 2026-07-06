@@ -261,7 +261,7 @@ export default function AdminPipeline() {
                     <th className="px-4 py-3">Details</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-stone-100">
+                <tbody className="divide-y divide-slate-100">
                   {runs.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
@@ -318,22 +318,22 @@ export default function AdminPipeline() {
                           </td>
                         </tr>
                         {expandedRunId === run.run_id && (
-                          <tr className="bg-stone-50">
+                          <tr>
                             <td colSpan={7} className="px-4 py-4">
                               {run.cancel_requested_at && (
-                                <p className="mb-3 rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+                                <p className="recs-notice-orange mb-3">
                                   Cancel requested by {run.cancel_requested_by || "admin"} at{" "}
                                   {formatDate(run.cancel_requested_at)}.
                                 </p>
                               )}
                               {run.notes && (
-                                <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                                <p className="recs-notice-red mb-3">
                                   {run.notes}
                                 </p>
                               )}
-                              <div className="space-y-4">
+                              <div className="space-y-3">
                                 {(run.stages || []).map((st) => (
-                                  <div key={st.stage_id} className="rounded-md border border-stone-200 bg-white p-3">
+                                  <div key={st.stage_id} className="recs-surface-muted p-3">
                                     <div className="flex flex-wrap items-center gap-2 text-sm">
                                       <span className="font-mono font-medium text-slate-900">{st.stage_key}</span>
                                       <span
