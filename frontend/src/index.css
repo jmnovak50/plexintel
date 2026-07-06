@@ -180,6 +180,76 @@
     color: rgb(203 213 225);
   }
 
+  .recs-status-emerald {
+    @apply border-emerald-200 bg-emerald-50 text-emerald-700;
+  }
+
+  .recs-dark .recs-status-emerald {
+    border-color: rgb(4 120 87 / 0.45);
+    background-color: rgb(6 78 59 / 0.3);
+    color: rgb(110 231 183);
+  }
+
+  .recs-status-amber {
+    @apply border-amber-200 bg-amber-50 text-amber-700;
+  }
+
+  .recs-dark .recs-status-amber {
+    border-color: rgb(180 83 9 / 0.45);
+    background-color: rgb(120 53 15 / 0.3);
+    color: rgb(253 230 138);
+  }
+
+  .recs-status-amber-strong {
+    @apply border-amber-200 bg-amber-50 text-amber-900;
+  }
+
+  .recs-dark .recs-status-amber-strong {
+    border-color: rgb(180 83 9 / 0.45);
+    background-color: rgb(120 53 15 / 0.3);
+    color: rgb(253 230 138);
+  }
+
+  .recs-status-red {
+    @apply border-red-200 bg-red-50 text-red-700;
+  }
+
+  .recs-dark .recs-status-red {
+    border-color: rgb(185 28 28 / 0.45);
+    background-color: rgb(127 29 29 / 0.3);
+    color: rgb(254 202 202);
+  }
+
+  .recs-status-orange {
+    @apply border-orange-200 bg-orange-50 text-orange-800;
+  }
+
+  .recs-dark .recs-status-orange {
+    border-color: rgb(194 65 12 / 0.45);
+    background-color: rgb(124 45 18 / 0.28);
+    color: rgb(254 215 170);
+  }
+
+  .recs-status-slate {
+    @apply border-slate-200 bg-slate-50 text-slate-700;
+  }
+
+  .recs-dark .recs-status-slate {
+    border-color: rgb(71 85 105);
+    background-color: rgb(51 65 85);
+    color: rgb(226 232 240);
+  }
+
+  .recs-status-slate-muted {
+    @apply border-slate-300 bg-slate-100 text-slate-700;
+  }
+
+  .recs-dark .recs-status-slate-muted {
+    border-color: rgb(71 85 105);
+    background-color: rgb(51 65 85);
+    color: rgb(226 232 240);
+  }
+
   .recs-btn-amber {
     @apply inline-flex items-center rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60;
   }

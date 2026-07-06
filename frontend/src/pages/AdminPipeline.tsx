@@ -60,17 +60,17 @@ function durationMs(started: string | null, completed: string | null) {
 function statusChip(status: string) {
   switch (status) {
     case "success":
-      return "bg-emerald-50 text-emerald-800 border-emerald-200";
+      return "recs-status-emerald";
     case "failed":
-      return "bg-red-50 text-red-800 border-red-200";
+      return "recs-status-red";
     case "cancelled":
-      return "bg-slate-100 text-slate-700 border-slate-300";
+      return "recs-status-slate-muted";
     case "cancel_requested":
-      return "bg-orange-50 text-orange-800 border-orange-200";
+      return "recs-status-orange";
     case "started":
-      return "bg-amber-50 text-amber-900 border-amber-200";
+      return "recs-status-amber-strong";
     default:
-      return "bg-slate-50 text-slate-700 border-slate-200";
+      return "recs-status-slate";
   }
 }
 
