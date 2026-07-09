@@ -32,6 +32,7 @@ class RecommendationExplanationThemeSqlTests(unittest.TestCase):
                 self.assertIn("GROUP BY el.display_label", sql)
                 self.assertIn("si.shap_value > 0", sql)
                 self.assertIn("el.explainable IS TRUE", sql)
+                self.assertIn("COALESCE(el.needs_review, false) IS NOT TRUE", sql)
                 self.assertIn("LIMIT 3", sql)
 
     def test_show_rollups_return_empty_theme_arrays(self):

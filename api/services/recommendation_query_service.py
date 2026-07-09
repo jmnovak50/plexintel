@@ -63,6 +63,7 @@ def _positive_label_array_sql(
                       AND si.user_id = {username_column}
                       AND si.shap_value > 0
                       AND el.explainable IS TRUE
+                      AND COALESCE(el.needs_review, false) IS NOT TRUE
                       AND el.display_label IS NOT NULL
                       AND BTRIM(el.display_label) <> ''
                       AND {dimension_predicate}

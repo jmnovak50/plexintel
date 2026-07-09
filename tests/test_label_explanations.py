@@ -346,6 +346,20 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertTrue(batch_label_embeddings.is_saved_label_usable_for_explanation(saved_label))
         self.assertEqual(batch_label_embeddings._label_repair_status(saved_label), ("usable_label", "usable_label"))
 
+    def test_needs_review_label_does_not_cover_the_card(self):
+        saved_label = {
+            "label_type": "soft_structural",
+            "explainable": True,
+            "display_label": "preference for broad title cluster",
+            "needs_review": True,
+        }
+
+        self.assertFalse(batch_label_embeddings.is_saved_label_usable_for_explanation(saved_label))
+        self.assertEqual(
+            batch_label_embeddings._label_repair_status(saved_label),
+            ("unusable_label", "needs_review"),
+        )
+
     def test_cooldown_prevents_daily_repeat_attempts(self):
         now = datetime(2026, 6, 6, tzinfo=timezone.utc)
         saved_label = {
@@ -487,6 +501,7 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertIn("LEFT JOIN shap_dimension_stats_current s", sql)
         self.assertIn("si.shap_value > 0", sql)
         self.assertIn("candidate_label.dimension IS NULL", sql)
+        self.assertIn("candidate_label.needs_review IS TRUE", sql)
         self.assertIn("candidate_label.label_type = 'weak'", sql)
         self.assertIn("candidate_label.explainable IS NOT TRUE", sql)
         self.assertIn("candidate_label.display_label IS NULL", sql)
@@ -495,6 +510,7 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertIn("NOT EXISTS", sql)
         self.assertIn("JOIN embedding_labels el_existing", sql)
         self.assertIn("el_existing.explainable IS TRUE", sql)
+        self.assertIn("COALESCE(el_existing.needs_review, false) IS NOT TRUE", sql)
         self.assertIn("el_existing.display_label IS NOT NULL", sql)
         self.assertIn("BTRIM(el_existing.display_label) <> ''", sql)
         self.assertNotIn("el_existing.label IS NOT NULL", sql)
@@ -1363,6 +1379,7 @@ class PositiveLabelSelectionTests(unittest.TestCase):
 
         self.assertIn("si.shap_value > (0)::double precision", sql)
         self.assertIn("el.explainable IS TRUE", sql)
+        self.assertIn("COALESCE(el.needs_review, false) IS NOT TRUE", sql)
         self.assertIn("el.display_label IS NOT NULL", sql)
         self.assertIn("BTRIM(el.display_label) <> ''::text", sql)
         self.assertIn("GROUP BY el.display_label", sql)
@@ -1398,6 +1415,7 @@ class PositiveLabelSelectionTests(unittest.TestCase):
         self.assertIn("ELSE 'user'::text", sql)
         self.assertIn("GROUP BY label_type, side, explainable, needs_review", sql)
         self.assertIn("el.explainable IS TRUE", sql)
+        self.assertIn("COALESCE(el.needs_review, false) IS NOT TRUE", sql)
         self.assertIn("el.display_label IS NOT NULL", sql)
         self.assertIn("BTRIM(el.display_label) <> ''::text", sql)
 

@@ -99,6 +99,7 @@ CSV_FIELDNAMES = [
 DEFAULT_REPAIR_COOLDOWN_DAYS = 7
 USABLE_LABEL_SQL_TEMPLATE = """
 {alias}.explainable IS TRUE
+AND COALESCE({alias}.needs_review, false) IS NOT TRUE
 AND {alias}.display_label IS NOT NULL
 AND BTRIM({alias}.display_label) <> ''
 """
@@ -329,10 +330,17 @@ def is_saved_label_usable_for_explanation(label_row) -> bool:
     if isinstance(label_row, dict):
         explainable = label_row.get("explainable")
         display_label = label_row.get("display_label")
+        needs_review = label_row.get("needs_review")
     else:
         explainable = getattr(label_row, "explainable", None)
         display_label = getattr(label_row, "display_label", None)
-    return explainable is True and display_label is not None and str(display_label).strip() != ""
+        needs_review = getattr(label_row, "needs_review", None)
+    return (
+        explainable is True
+        and needs_review is not True
+        and display_label is not None
+        and str(display_label).strip() != ""
+    )
 
 
 def _label_repair_status(label_row) -> tuple[str, str]:
@@ -345,11 +353,15 @@ def _label_repair_status(label_row) -> tuple[str, str]:
         label_type = label_row.get("label_type")
         explainable = label_row.get("explainable")
         display_label = label_row.get("display_label")
+        needs_review = label_row.get("needs_review")
     else:
         label_type = getattr(label_row, "label_type", None)
         explainable = getattr(label_row, "explainable", None)
         display_label = getattr(label_row, "display_label", None)
+        needs_review = getattr(label_row, "needs_review", None)
 
+    if needs_review is True:
+        return "unusable_label", "needs_review"
     if label_type == "weak":
         return "unusable_label", "weak_label"
     if explainable is not True:
@@ -543,6 +555,7 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
             END AS label_repair_status,
             CASE
                 WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                WHEN candidate_label.needs_review IS TRUE THEN 'needs_review'
                 WHEN candidate_label.label_type = 'weak' THEN 'weak_label'
                 WHEN candidate_label.explainable IS NOT TRUE THEN 'not_explainable'
                 WHEN candidate_label.display_label IS NULL THEN 'missing_display_label'
@@ -560,6 +573,7 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
         WHERE si.shap_value > 0
           AND (
               candidate_label.dimension IS NULL
+              OR candidate_label.needs_review IS TRUE
               OR candidate_label.label_type = 'weak'
               OR candidate_label.explainable IS NOT TRUE
               OR candidate_label.display_label IS NULL
@@ -615,6 +629,7 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
             END AS label_repair_status,
             CASE
                 WHEN candidate_label.dimension IS NULL THEN 'missing_label'
+                WHEN candidate_label.needs_review IS TRUE THEN 'needs_review'
                 WHEN candidate_label.label_type = 'weak' THEN 'weak_label'
                 WHEN candidate_label.explainable IS NOT TRUE THEN 'not_explainable'
                 WHEN candidate_label.display_label IS NULL THEN 'missing_display_label'
@@ -630,6 +645,7 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
         WHERE si.shap_value > 0
           AND (
               candidate_label.dimension IS NULL
+              OR candidate_label.needs_review IS TRUE
               OR candidate_label.label_type = 'weak'
               OR candidate_label.explainable IS NOT TRUE
               OR candidate_label.display_label IS NULL
@@ -697,6 +713,7 @@ def get_coverage_selection_diagnostics(cur, dim_type="all") -> dict:
               AND si.dimension < %s
               AND (
                   candidate_label.dimension IS NULL
+                  OR candidate_label.needs_review IS TRUE
                   OR candidate_label.label_type = 'weak'
                   OR candidate_label.explainable IS NOT TRUE
                   OR candidate_label.display_label IS NULL
