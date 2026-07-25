@@ -51,6 +51,16 @@ class AgentRecommendationsResponse(BaseModel):
     items: List[AgentRecommendation]
 
 
+class AgentRecommendationScore(BaseModel):
+    user: str
+    rating_key: int
+    title: str
+    media_type: str
+    score: float
+    scored_at: Optional[datetime] = None
+    model_name: Optional[str] = None
+
+
 class LibraryItem(BaseModel):
     rating_key: int
     title: str
@@ -220,6 +230,50 @@ def get_agent_recommendations(
     ]
 
     return AgentRecommendationsResponse(user=user, count=len(items), items=items)
+
+
+def get_agent_recommendation_score(
+    *,
+    user: str,
+    rating_key: int,
+) -> AgentRecommendationScore:
+    sql = """
+        SELECT
+            r.username,
+            r.rating_key,
+            l.title,
+            l.media_type,
+            r.predicted_probability,
+            r.scored_at,
+            r.model_name
+        FROM public.recommendations r
+        JOIN public.library l ON l.rating_key = r.rating_key
+        WHERE r.username = %s
+          AND r.rating_key = %s
+        ORDER BY r.scored_at DESC NULLS LAST, r.id DESC
+        LIMIT 1
+    """
+
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (user, rating_key))
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No recommendation score found for user '{user}' and rating_key {rating_key}",
+        )
+
+    return AgentRecommendationScore(
+        user=row["username"],
+        rating_key=row["rating_key"],
+        title=row["title"],
+        media_type=row["media_type"],
+        score=float(row["predicted_probability"]),
+        scored_at=row.get("scored_at"),
+        model_name=row.get("model_name"),
+    )
 
 
 def search_agent_library(

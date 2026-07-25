@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from api.services.agent_tool_service import (
+    AgentRecommendationScore,
     AgentRecommendationsResponse,
     AgentUsersResponse,
     LibraryItem,
@@ -23,6 +24,7 @@ from api.services.agent_tool_service import (
     RecentLibraryAdditionsResponse,
     WatchHistoryResponse,
     get_agent_library_item,
+    get_agent_recommendation_score,
     get_agent_recommendations,
     get_recent_library_additions,
     get_agent_watch_history,
@@ -387,6 +389,22 @@ def _build_mcp_server() -> FastMCP:
             min_score=min_score,
             max_score=max_score,
         )
+
+    @mcp.tool(
+        name="get_recommendation_score",
+        description=(
+            "Fetch the raw PlexIntel recommendation score for one user and one exact "
+            "library rating_key. Use this to enrich arbitrary library results, including "
+            "recent additions, with a user-specific score. This lookup is not filtered by "
+            "the recommendation display threshold or feedback visibility rules."
+        ),
+        structured_output=True,
+    )
+    def mcp_get_recommendation_score(
+        user: str,
+        rating_key: int,
+    ) -> AgentRecommendationScore:
+        return get_agent_recommendation_score(user=user, rating_key=rating_key)
 
     @mcp.tool(
         name="search_library",

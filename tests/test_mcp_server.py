@@ -15,6 +15,7 @@ from PIL import Image
 from api.services import mcp_server
 from api.services.agent_tool_service import (
     AgentRecommendation,
+    AgentRecommendationScore,
     AgentRecommendationsResponse,
     AgentUser,
     AgentUsersResponse,
@@ -85,6 +86,10 @@ class MCPServerTests(unittest.TestCase):
                             "get_recommendations",
                             {"user": "jmnovak", "view": "shows", "media_type": "episode", "limit": 5},
                         )
+                        score_result = await session.call_tool(
+                            "get_recommendation_score",
+                            {"user": "jmnovak", "rating_key": 37641},
+                        )
                         search_result = await session.call_tool("search_library", {"q": "blade"})
                         item_result = await session.call_tool("get_library_item", {"rating_key": 42})
                         poster_result = await session.call_tool("get_poster_image", {"rating_key": 42})
@@ -119,6 +124,7 @@ class MCPServerTests(unittest.TestCase):
             "tools": tools_result,
             "users": users_result,
             "recommendations": recommendations_result,
+            "score": score_result,
             "search": search_result,
             "item": item_result,
             "poster": poster_result,
@@ -143,6 +149,13 @@ class MCPServerTests(unittest.TestCase):
                     score=0.93,
                 )
             ],
+        )
+        score_payload = AgentRecommendationScore(
+            user="jmnovak",
+            rating_key=37641,
+            title="Disclosure Day",
+            media_type="movie",
+            score=0.8734,
         )
         search_payload = LibrarySearchResponse(
             query="blade",
@@ -216,34 +229,39 @@ class MCPServerTests(unittest.TestCase):
                     "get_agent_recommendations",
                     return_value=recommendations_payload,
                 ) as mock_recommendations:
-                    with patch.object(mcp_server, "search_agent_library", return_value=search_payload):
-                        with patch.object(mcp_server, "get_agent_library_item", return_value=item_payload):
-                            with patch.object(
-                                mcp_server,
-                                "get_recent_library_additions",
-                                return_value=recent_payload,
-                            ):
+                    with patch.object(
+                        mcp_server,
+                        "get_agent_recommendation_score",
+                        return_value=score_payload,
+                    ) as mock_score:
+                        with patch.object(mcp_server, "search_agent_library", return_value=search_payload):
+                            with patch.object(mcp_server, "get_agent_library_item", return_value=item_payload):
                                 with patch.object(
                                     mcp_server,
-                                    "get_agent_watch_history",
-                                    return_value=history_payload,
+                                    "get_recent_library_additions",
+                                    return_value=recent_payload,
                                 ):
                                     with patch.object(
                                         mcp_server,
-                                        "build_public_poster_url",
-                                        side_effect=lambda rating_key, width=None, thumb=False: (
-                                            f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
-                                        ),
+                                        "get_agent_watch_history",
+                                        return_value=history_payload,
                                     ):
                                         with patch.object(
                                             mcp_server,
-                                            "fetch_poster_image_for_rating_key",
-                                            return_value={
-                                                "content": _png_bytes(),
-                                                "content_type": "image/png",
-                                            },
+                                            "build_public_poster_url",
+                                            side_effect=lambda rating_key, width=None, thumb=False: (
+                                                f"https://plexintel.example.com/api/posters/{rating_key}?w={width}"
+                                            ),
                                         ):
-                                            results = anyio.run(self._exercise_mcp_protocol)
+                                            with patch.object(
+                                                mcp_server,
+                                                "fetch_poster_image_for_rating_key",
+                                                return_value={
+                                                    "content": _png_bytes(),
+                                                    "content_type": "image/png",
+                                                },
+                                            ):
+                                                results = anyio.run(self._exercise_mcp_protocol)
 
         self.assertTrue(results["initialize"].serverInfo.name)
         tool_names = {tool.name for tool in results["tools"].tools}
@@ -252,6 +270,7 @@ class MCPServerTests(unittest.TestCase):
             {
                 "list_users",
                 "get_recommendations",
+                "get_recommendation_score",
                 "search_library",
                 "get_library_item",
                 "get_poster_image",
@@ -270,6 +289,9 @@ class MCPServerTests(unittest.TestCase):
             min_score=None,
             max_score=None,
         )
+        self.assertEqual(results["score"].structuredContent["rating_key"], 37641)
+        self.assertEqual(results["score"].structuredContent["score"], 0.8734)
+        mock_score.assert_called_once_with(user="jmnovak", rating_key=37641)
         self.assertEqual(results["search"].structuredContent["items"][0]["rating_key"], 42)
         self.assertEqual(results["item"].structuredContent["summary"], "Replicants.")
         self.assertIsNone(results["poster"].structuredContent)

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from api.db.connection import connect_db
 from api.services.agent_tool_service import (
+    AgentRecommendationScore,
     AgentRecommendationsResponse,
     AgentUsersResponse,
     LibraryItem,
@@ -12,6 +13,7 @@ from api.services.agent_tool_service import (
     RecentLibraryAdditionsResponse,
     WatchHistoryResponse,
     get_agent_library_item,
+    get_agent_recommendation_score,
     get_agent_recommendations,
     get_recent_library_additions,
     get_agent_watch_history,
@@ -96,6 +98,18 @@ def agent_get_recommendations(
         min_score=min_score,
         max_score=max_score,
     )
+
+
+@router.get(
+    "/recommendations/{rating_key}/score",
+    response_model=AgentRecommendationScore,
+    summary="Fetch one user's raw recommendation score for a library item.",
+)
+def agent_get_recommendation_score(
+    rating_key: int,
+    user: str = Query(..., description="Username, e.g. jmnovak"),
+):
+    return get_agent_recommendation_score(user=user, rating_key=rating_key)
 
 
 @router.get("/search", response_model=LibrarySearchResponse)

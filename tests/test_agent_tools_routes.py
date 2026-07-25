@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 
 from api.routes import agent_tools
 from api.services.agent_tool_service import (
+    AgentRecommendationScore,
     AgentRecommendation,
     AgentRecommendationsResponse,
     AgentUser,
@@ -58,6 +59,30 @@ class AgentToolsRouteTests(unittest.TestCase):
             min_score=None,
             max_score=None,
         )
+
+    def test_recommendation_score_route_uses_user_and_rating_key(self):
+        payload = AgentRecommendationScore(
+            user="jmnovak",
+            rating_key=37641,
+            title="Disclosure Day",
+            media_type="movie",
+            score=0.8734,
+        )
+
+        with patch.object(
+            agent_tools,
+            "get_agent_recommendation_score",
+            return_value=payload,
+        ) as mock_get:
+            response = agent_tools.agent_get_recommendation_score(
+                rating_key=37641,
+                user="jmnovak",
+            )
+
+        data = jsonable_encoder(response)
+        self.assertEqual(data["rating_key"], 37641)
+        self.assertEqual(data["score"], 0.8734)
+        mock_get.assert_called_once_with(user="jmnovak", rating_key=37641)
 
     def test_search_and_item_routes_preserve_payload_shapes(self):
         search_payload = LibrarySearchResponse(

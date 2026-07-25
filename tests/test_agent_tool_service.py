@@ -90,6 +90,54 @@ class AgentToolServiceTests(unittest.TestCase):
         self.assertIn("recs.predicted_probability <=", executed_sql)
         self.assertEqual(executed_params, ["jmnovak", "jmnovak", 0.0, 0.5, 0.99, 25])
 
+    def test_get_agent_recommendation_score_returns_exact_raw_score(self):
+        scored_at = datetime(2026, 7, 25, 8, 0, 0)
+        conn = FakeConnection(
+            fetch_rows=[
+                {
+                    "username": "jmnovak",
+                    "rating_key": 37641,
+                    "title": "Disclosure Day",
+                    "media_type": "movie",
+                    "predicted_probability": 0.8734,
+                    "scored_at": scored_at,
+                    "model_name": "xgb_model",
+                }
+            ]
+        )
+
+        with patch.object(agent_tool_service, "connect_db", return_value=conn):
+            response = agent_tool_service.get_agent_recommendation_score(
+                user="jmnovak",
+                rating_key=37641,
+            )
+
+        self.assertEqual(response.user, "jmnovak")
+        self.assertEqual(response.rating_key, 37641)
+        self.assertEqual(response.title, "Disclosure Day")
+        self.assertEqual(response.score, 0.8734)
+        self.assertEqual(response.scored_at, scored_at)
+        executed_sql, executed_params = conn.cursor_obj.executed[0]
+        self.assertIn("FROM public.recommendations r", executed_sql)
+        self.assertIn("r.username = %s", executed_sql)
+        self.assertIn("r.rating_key = %s", executed_sql)
+        self.assertNotIn("predicted_probability >=", executed_sql)
+        self.assertEqual(executed_params, ("jmnovak", 37641))
+
+    def test_get_agent_recommendation_score_raises_404_when_missing(self):
+        conn = FakeConnection(fetch_rows=[])
+
+        with patch.object(agent_tool_service, "connect_db", return_value=conn):
+            with self.assertRaises(HTTPException) as raised:
+                agent_tool_service.get_agent_recommendation_score(
+                    user="jmnovak",
+                    rating_key=37641,
+                )
+
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertIn("jmnovak", raised.exception.detail)
+        self.assertIn("37641", raised.exception.detail)
+
     def test_get_agent_recommendations_supports_show_view_rollups(self):
         scored_at = datetime(2026, 3, 1, 12, 0, 0)
         conn = FakeConnection(
