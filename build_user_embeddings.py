@@ -53,7 +53,12 @@ def build_user_embeddings(watch_history, conn):
             embedding = row[0]
             if username not in user_vectors:
                 user_vectors[username] = []
-            user_vectors[username].append(np.array(embedding))
+            # Recent pgvector versions return a pgvector.Vector here.  Convert
+            # it to its numeric payload before handing it to NumPy; otherwise
+            # np.array(Vector(...)) becomes a 0-D object array.
+            if isinstance(embedding, Vector):
+                embedding = embedding.to_numpy()
+            user_vectors[username].append(np.asarray(embedding, dtype=np.float64))
 
     with conn.cursor() as cur:
         cur.execute("DELETE FROM user_embeddings")

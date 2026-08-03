@@ -301,6 +301,26 @@ class UserEmbeddingRebuildTests(unittest.TestCase):
         )
         self.assertLess(delete_index, insert_index)
 
+    def test_rebuild_averages_pgvector_values_as_numeric_arrays(self):
+        conn = FakeUserEmbeddingConnection(
+            media_embeddings={
+                101: build_user_embeddings.Vector([1.0, 0.0]),
+                102: build_user_embeddings.Vector([0.0, 1.0]),
+            }
+        )
+        watch_history = [
+            {"username": "active", "rating_key": 101},
+            {"username": "active", "rating_key": 102},
+        ]
+
+        build_user_embeddings.build_user_embeddings(watch_history, conn)
+
+        stored_embedding = conn.inserted_user_embeddings[0][1]
+        np.testing.assert_allclose(
+            stored_embedding.to_numpy(),
+            np.array([0.5, 0.5], dtype=np.float32),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

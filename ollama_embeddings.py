@@ -241,7 +241,10 @@ def build_user_embeddings(user_rows, conn):
     users = {}
     for row in user_rows:
         u = row["username"]
-        v = np.array(row["embedding"], dtype=float)
+        embedding = row["embedding"]
+        if isinstance(embedding, Vector):
+            embedding = embedding.to_numpy()
+        v = np.asarray(embedding, dtype=float)
         users.setdefault(u, []).append(v)
 
     with conn.cursor() as cur:
