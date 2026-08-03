@@ -66,9 +66,11 @@ def connect():
 
 
 def parse_embedding(x):
+    if isinstance(x, Vector):
+        x = x.to_numpy()
     if isinstance(x, str):
-        return np.array(ast.literal_eval(x), dtype=np.float32)
-    return np.array(x, dtype=np.float32)
+        x = ast.literal_eval(x)
+    return np.asarray(x, dtype=np.float32)
 
 def cosine_similarity(a, b):
     if a is None or b is None:
