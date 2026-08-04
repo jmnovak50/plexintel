@@ -392,9 +392,11 @@ def _upsert_shap_dimension_stats_current(cur, user_dim_agg):
         )
 
 def parse_vector(x):
+    if hasattr(x, "to_numpy"):
+        x = x.to_numpy()
     if isinstance(x, str):
-        return np.array(ast.literal_eval(x), dtype=np.float32)
-    return np.array(x, dtype=np.float32)
+        x = ast.literal_eval(x)
+    return np.asarray(x, dtype=np.float32)
 
 def normalize_tag_list(value):
     if isinstance(value, (list, tuple, set)):
@@ -535,11 +537,6 @@ def get_unwatched_media(username):
 def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
     feature_names_template = [str(name) for name in feature_names_template]
 
-    def safe_embedding_parse(x):
-        if isinstance(x, str):
-            return np.array(ast.literal_eval(x), dtype=np.float32)
-        return np.array(x, dtype=np.float32)
-
     def get_decade_flags(year):
         if year is None or pd.isna(year):
             return {}
@@ -554,8 +551,8 @@ def preprocess_for_scoring(df, feature_names_template, user_watch_vec=None):
     df['directors'] = df['director_tags'].apply(normalize_tag_list)
 
     # Parse embeddings before combination
-    df['media_embedding'] = df['embedding'].apply(safe_embedding_parse)
-    df['user_embedding'] = df['user_embedding'].apply(safe_embedding_parse)
+    df['media_embedding'] = df['embedding'].apply(parse_vector)
+    df['user_embedding'] = df['user_embedding'].apply(parse_vector)
 
     # Watch-embedding similarity (media_emb vs user watch-profile)
     media_embs = np.stack(df['media_embedding'])

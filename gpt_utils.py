@@ -1294,7 +1294,12 @@ def _get_ranked_embedding_ids(
     if df.empty:
         return []
 
-    df["dimension_value"] = df["embedding"].apply(lambda value: float(value[embedding_index]))
+    def dimension_value(value):
+        if hasattr(value, "to_numpy"):
+            value = value.to_numpy()
+        return float(value[embedding_index])
+
+    df["dimension_value"] = df["embedding"].apply(dimension_value)
     ranked = df.nsmallest(top_n, "dimension_value") if ascending else df.nlargest(top_n, "dimension_value")
     return ranked[id_column].tolist()
 

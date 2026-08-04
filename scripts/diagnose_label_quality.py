@@ -313,9 +313,11 @@ def print_table(rows: list[dict[str, Any]], columns: list[str]) -> None:
 
 
 def parse_embedding(value: Any) -> np.ndarray:
+    if hasattr(value, "to_numpy"):
+        value = value.to_numpy()
     if isinstance(value, str):
-        return np.array(ast.literal_eval(value), dtype=float)
-    return np.array(list(value), dtype=float)
+        value = ast.literal_eval(value)
+    return np.asarray(value, dtype=float)
 
 
 def dimension_mode(dimension: int) -> str:

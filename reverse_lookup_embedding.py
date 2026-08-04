@@ -49,6 +49,8 @@ def get_labels_for_dimensions(dimensions):
 
 
 def show_top_dimensions(embedding, top_n=10):
+    if hasattr(embedding, "to_numpy"):
+        embedding = embedding.to_numpy()
     base_dim_offset = 768  # adjust for media embedding position in model input
     df = pd.DataFrame({
         "dimension": [base_dim_offset + i for i in range(len(embedding))],

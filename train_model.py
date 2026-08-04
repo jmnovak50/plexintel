@@ -59,6 +59,14 @@ def normalize_tag_list(value):
     return [tag.strip() for tag in str(value).split(",") if tag.strip()]
 
 
+def parse_embedding(value):
+    if hasattr(value, "to_numpy"):
+        value = value.to_numpy()
+    if isinstance(value, str):
+        value = ast.literal_eval(value)
+    return np.asarray(value, dtype=np.float32)
+
+
 def load_actor_distinct_title_stats():
     """
     Count actor coverage and concentration by distinct show/movie keys.
@@ -276,12 +284,7 @@ def preprocess(
             "training_data is missing required columns: " + ", ".join(missing_columns)
         )
 
-    def safe_embedding_parse(x):
-        if isinstance(x, str):
-            return np.array(ast.literal_eval(x), dtype=np.float32)
-        return np.array(x, dtype=np.float32)
-
-    df['embedding'] = df['embedding'].apply(safe_embedding_parse)
+    df['embedding'] = df['embedding'].apply(parse_embedding)
     df = df[df['embedding'].apply(lambda value: value.size > 0)].copy()
     if df.empty:
         raise RuntimeError("training_data rows were found, but every embedding was empty.")
