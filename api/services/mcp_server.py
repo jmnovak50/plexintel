@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -32,6 +33,12 @@ from api.services.agent_tool_service import (
     search_agent_library,
 )
 from api.services.app_settings import get_setting_value
+from api.services.mcp_auth import (
+    MCPAuthContext,
+    authenticate_bearer_token,
+    get_mcp_oauth_settings,
+    resolve_context_from_email,
+)
 from api.services.poster_service import build_public_poster_url, fetch_poster_image_for_rating_key
 from api.services.poster_markup_service import (
     build_poster_gallery_payload,
@@ -40,6 +47,8 @@ from api.services.poster_markup_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+mcp_auth_context: ContextVar[MCPAuthContext | None] = ContextVar("mcp_auth_context", default=None)
 
 
 POSTER_RESPONSE_INSTRUCTIONS = (
@@ -50,12 +59,27 @@ POSTER_RESPONSE_INSTRUCTIONS = (
     "expand the tool result. Never use the local MCP URL as an image src."
 )
 
+USER_IDENTITY_INSTRUCTIONS = (
+    "User-specific tools (get_recommendations, get_recommendation_score, get_watch_history) "
+    "automatically scope to the authenticated user. Do not pass a user argument for "
+    '"my recommendations", "what should I watch", or similar first-person requests.'
+)
+
+
+class MCPUserAccessError(ValueError):
+    pass
+
 
 @dataclass(frozen=True)
 class MCPRuntimeSettings:
     enabled: bool
+    auth_mode: str
     api_key: str | None
     allowed_origins: tuple[str, ...]
+    oauth_issuer_url: str | None
+    oauth_audience: str | None
+    oauth_email_claim: str
+    trusted_user_email_header: str | None
 
 
 def _split_allowed_origins(value: Optional[str]) -> tuple[str, ...]:
@@ -70,10 +94,88 @@ def _split_allowed_origins(value: Optional[str]) -> tuple[str, ...]:
 
 
 def get_mcp_runtime_settings() -> MCPRuntimeSettings:
+    oauth_settings = get_mcp_oauth_settings()
     return MCPRuntimeSettings(
         enabled=bool(get_setting_value("mcp.enabled", default=False)),
+        auth_mode=str(get_setting_value("mcp.auth_mode", default="static") or "static"),
         api_key=get_setting_value("mcp.api_key"),
         allowed_origins=_split_allowed_origins(get_setting_value("mcp.allowed_origins")),
+        oauth_issuer_url=oauth_settings.issuer_url,
+        oauth_audience=oauth_settings.audience,
+        oauth_email_claim=oauth_settings.email_claim,
+        trusted_user_email_header=_normalize_optional_header(
+            get_setting_value("mcp.trusted_user_email_header", default="X-OpenWebUI-User-Email")
+        ),
+    )
+
+
+def _normalize_optional_header(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _looks_like_jwt(token: str) -> bool:
+    parts = token.split(".")
+    return len(parts) == 3 and all(part.strip() for part in parts)
+
+
+def _extract_trusted_user_email(headers: Headers, configured_header: str | None) -> str | None:
+    candidate_names = []
+    if configured_header:
+        candidate_names.append(configured_header.lower())
+    candidate_names.extend(
+        name
+        for name in (
+            "x-openwebui-user-email",
+            "x-plexintel-user-email",
+        )
+        if name not in candidate_names
+    )
+    for name in candidate_names:
+        value = headers.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def get_current_mcp_auth_context() -> MCPAuthContext | None:
+    return mcp_auth_context.get()
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    prefix = "Bearer "
+    if not authorization.startswith(prefix):
+        return None
+    token = authorization[len(prefix) :].strip()
+    return token or None
+
+
+def _resolve_mcp_user(requested_user: str | None) -> str:
+    ctx = get_current_mcp_auth_context()
+    normalized_request = (requested_user or "").strip() or None
+
+    if ctx and ctx.plex_username:
+        if normalized_request is None:
+            return ctx.plex_username
+        if ctx.is_admin or normalized_request == ctx.plex_username:
+            return normalized_request
+        raise MCPUserAccessError(f"Not authorized to query user '{normalized_request}'")
+
+    if ctx and ctx.auth_method == "jwt" and ctx.email:
+        raise MCPUserAccessError(
+            f"No Plex user found for {ctx.email} — ensure plex_email is synced"
+        )
+
+    if normalized_request:
+        return normalized_request
+    raise MCPUserAccessError(
+        "No authenticated Plex user is mapped for this MCP request. "
+        "Configure Open WebUI MCP with Bearer auth plus a custom header "
+        '{"X-OpenWebUI-User-Email": "{{USER_EMAIL}}"}, or provide a valid Authentik JWT.'
     )
 
 
@@ -243,6 +345,14 @@ def _extract_caller(scope: Scope, headers: Headers) -> str:
     return "unknown"
 
 
+def _format_auth_caller(context: MCPAuthContext | None, fallback: str) -> str:
+    if context and context.email:
+        return context.email
+    if context and context.plex_username:
+        return context.plex_username
+    return fallback
+
+
 class MCPAccessControlApp:
     def __init__(self, runtime: "MCPServerRuntime"):
         self.runtime = runtime
@@ -263,9 +373,10 @@ class MCPAccessControlApp:
         rpc_method = scope.get("method", "UNKNOWN")
 
         settings = get_mcp_runtime_settings()
-        response = self._validate_request(headers=headers, settings=settings)
-        if response is not None:
-            status_code = response.status_code
+        auth_result = self._authenticate_request(headers=headers, settings=settings)
+        auth_result = self._enrich_auth_context(headers=headers, settings=settings, auth_result=auth_result)
+        if auth_result.response is not None:
+            status_code = auth_result.response.status_code
             logger.info(
                 "MCP request blocked method=%s caller=%s status=%s duration_ms=%.2f",
                 rpc_method,
@@ -273,9 +384,10 @@ class MCPAccessControlApp:
                 status_code,
                 (time.perf_counter() - start) * 1000,
             )
-            await response(scope, receive, send)
+            await auth_result.response(scope, receive, send)
             return
 
+        auth_token = mcp_auth_context.set(auth_result.context)
         downstream_receive = receive
         if scope.get("method") == "POST":
             request = Request(scope, receive)
@@ -292,32 +404,117 @@ class MCPAccessControlApp:
         try:
             await self.runtime.get_asgi_app()(scope, downstream_receive, send_wrapper)
         finally:
+            mcp_auth_context.reset(auth_token)
             logger.info(
                 "MCP request method=%s caller=%s status=%s duration_ms=%.2f",
                 rpc_method,
-                caller,
+                _format_auth_caller(auth_result.context, caller),
                 status_code,
                 (time.perf_counter() - start) * 1000,
             )
 
-    @staticmethod
-    def _validate_request(headers: Headers, settings: MCPRuntimeSettings):
+    @dataclass(frozen=True)
+    class _AuthResult:
+        response: JSONResponse | None
+        context: MCPAuthContext | None
+
+    def _authenticate_request(self, headers: Headers, settings: MCPRuntimeSettings) -> _AuthResult:
         if not settings.enabled:
-            return JSONResponse({"detail": "MCP server is disabled"}, status_code=404)
-
-        if not settings.api_key:
-            return JSONResponse({"detail": "MCP server is not configured"}, status_code=503)
-
-        authorization = headers.get("authorization")
-        expected = f"Bearer {settings.api_key}"
-        if authorization != expected:
-            return JSONResponse({"detail": "Invalid or missing MCP bearer token"}, status_code=403)
+            return self._AuthResult(
+                response=JSONResponse({"detail": "MCP server is disabled"}, status_code=404),
+                context=None,
+            )
 
         origin = headers.get("origin")
         if origin and origin not in settings.allowed_origins:
-            return JSONResponse({"detail": "Origin is not allowed for MCP access"}, status_code=403)
+            return self._AuthResult(
+                response=JSONResponse({"detail": "Origin is not allowed for MCP access"}, status_code=403),
+                context=None,
+            )
 
-        return None
+        authorization = headers.get("authorization")
+        bearer_token = _extract_bearer_token(authorization)
+        auth_mode = settings.auth_mode
+
+        if auth_mode == "jwt":
+            return self._authenticate_jwt(bearer_token, settings)
+        if auth_mode == "static":
+            return self._authenticate_static(bearer_token, settings)
+        if auth_mode == "jwt_or_static":
+            jwt_result = self._authenticate_jwt(bearer_token, settings, invalid_status=403)
+            if jwt_result.response is None:
+                return jwt_result
+            if bearer_token and _looks_like_jwt(bearer_token):
+                return jwt_result
+            return self._authenticate_static(bearer_token, settings)
+
+        return self._AuthResult(
+            response=JSONResponse({"detail": "Unsupported MCP auth mode"}, status_code=503),
+            context=None,
+        )
+
+    def _authenticate_jwt(
+        self,
+        bearer_token: str | None,
+        settings: MCPRuntimeSettings,
+        *,
+        invalid_status: int = 401,
+    ) -> _AuthResult:
+        if not settings.oauth_issuer_url:
+            return self._AuthResult(
+                response=JSONResponse({"detail": "MCP OAuth issuer is not configured"}, status_code=503),
+                context=None,
+            )
+        if not bearer_token:
+            return self._AuthResult(
+                response=JSONResponse({"detail": "Missing MCP bearer token"}, status_code=invalid_status),
+                context=None,
+            )
+
+        oauth_settings = get_mcp_oauth_settings()
+        context = authenticate_bearer_token(bearer_token, oauth_settings)
+        if context is None:
+            return self._AuthResult(
+                response=JSONResponse({"detail": "Invalid or expired MCP bearer token"}, status_code=invalid_status),
+                context=None,
+            )
+        return self._AuthResult(response=None, context=context)
+
+    def _authenticate_static(self, bearer_token: str | None, settings: MCPRuntimeSettings) -> _AuthResult:
+        if not settings.api_key:
+            return self._AuthResult(
+                response=JSONResponse({"detail": "MCP server is not configured"}, status_code=503),
+                context=None,
+            )
+        expected = f"Bearer {settings.api_key}"
+        authorization = f"Bearer {bearer_token}" if bearer_token else None
+        if authorization != expected:
+            return self._AuthResult(
+                response=JSONResponse({"detail": "Invalid or missing MCP bearer token"}, status_code=403),
+                context=None,
+            )
+        return self._AuthResult(
+            response=None,
+            context=MCPAuthContext(auth_method="static"),
+        )
+
+    def _enrich_auth_context(
+        self,
+        headers: Headers,
+        settings: MCPRuntimeSettings,
+        auth_result: _AuthResult,
+    ) -> _AuthResult:
+        if auth_result.response is not None or auth_result.context is None:
+            return auth_result
+        if auth_result.context.plex_username:
+            return auth_result
+
+        email = _extract_trusted_user_email(headers, settings.trusted_user_email_header)
+        if not email:
+            return auth_result
+
+        enriched = resolve_context_from_email(email, auth_result.context.auth_method)
+        return self._AuthResult(response=None, context=enriched)
 
     @staticmethod
     async def _handle_lifespan(receive: Receive, send: Send) -> None:
@@ -333,11 +530,8 @@ class MCPAccessControlApp:
 def _build_mcp_server() -> FastMCP:
     server_name = get_setting_value("mcp.server_name", default="PlexIntel")
     instructions = get_setting_value("mcp.instructions")
-    instructions = (
-        f"{instructions}\n\n{POSTER_RESPONSE_INSTRUCTIONS}"
-        if instructions
-        else POSTER_RESPONSE_INSTRUCTIONS
-    )
+    instruction_parts = [part for part in (instructions, USER_IDENTITY_INSTRUCTIONS, POSTER_RESPONSE_INSTRUCTIONS) if part]
+    instructions = "\n\n".join(instruction_parts)
 
     mcp = FastMCP(
         server_name,
@@ -363,26 +557,27 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_recommendations",
         description=(
-            "Fetch PlexIntel recommendations for a user. Use view='shows' for clean "
+            "Fetch PlexIntel recommendations for the authenticated user. Use view='shows' for clean "
             "TV show-level recommendations, view='seasons' for season rollups, "
             "view='movies' for movies, or view='episodes' for individual episodes. "
             "The media_type argument remains supported for backward compatibility "
             "(movie, episode, show, and series map to the matching view). Results "
             "include rating_key values; call get_poster_image with a rating_key "
-            "when the user asks to see a poster."
+            "when the user asks to see a poster. Omit user to scope to the authenticated user."
         ),
         structured_output=True,
     )
     def mcp_get_recommendations(
-        user: str,
+        user: Optional[str] = None,
         view: Optional[str] = None,
         media_type: Optional[str] = None,
         limit: int = 100,
         min_score: Optional[float] = None,
         max_score: Optional[float] = None,
     ) -> AgentRecommendationsResponse:
+        resolved_user = _resolve_mcp_user(user)
         return get_agent_recommendations(
-            user=user,
+            user=resolved_user,
             view=view,
             media_type=media_type,
             limit=limit,
@@ -396,15 +591,18 @@ def _build_mcp_server() -> FastMCP:
             "Fetch the raw PlexIntel recommendation score for one user and one exact "
             "library rating_key. Use this to enrich arbitrary library results, including "
             "recent additions, with a user-specific score. This lookup is not filtered by "
-            "the recommendation display threshold or feedback visibility rules."
+            "the recommendation display threshold or feedback visibility rules. "
+            "Omit user to scope to the authenticated user."
         ),
         structured_output=True,
     )
     def mcp_get_recommendation_score(
-        user: str,
+        user: Optional[str] = None,
+        *,
         rating_key: int,
     ) -> AgentRecommendationScore:
-        return get_agent_recommendation_score(user=user, rating_key=rating_key)
+        resolved_user = _resolve_mcp_user(user)
+        return get_agent_recommendation_score(user=resolved_user, rating_key=rating_key)
 
     @mcp.tool(
         name="search_library",
@@ -486,7 +684,10 @@ def _build_mcp_server() -> FastMCP:
 
     @mcp.tool(
         name="get_watch_history",
-        description="Return enriched Plex watch history records.",
+        description=(
+            "Return enriched Plex watch history records for the authenticated user. "
+            "Omit user to scope to the authenticated user."
+        ),
         structured_output=True,
     )
     def mcp_get_watch_history(
@@ -494,7 +695,8 @@ def _build_mcp_server() -> FastMCP:
         limit: int = 200,
         engaged_only: bool = False,
     ) -> WatchHistoryResponse:
-        return get_agent_watch_history(user=user, limit=limit, engaged_only=engaged_only)
+        resolved_user = _resolve_mcp_user(user)
+        return get_agent_watch_history(user=resolved_user, limit=limit, engaged_only=engaged_only)
 
     return mcp
 

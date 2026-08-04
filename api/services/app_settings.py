@@ -240,13 +240,70 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         description="Server name reported during MCP initialize.",
     ),
     _setting(
+        "mcp.auth_mode",
+        "mcp",
+        "MCP Auth Mode",
+        "string",
+        default="static",
+        env_aliases=("MCP_AUTH_MODE",),
+        choices=("jwt", "static", "jwt_or_static"),
+        description=(
+            "Authentication mode for /mcp. Use jwt for Authentik/OIDC tokens forwarded by Open WebUI "
+            "(system_oauth), static for a shared MCP_API_KEY, or jwt_or_static during migration."
+        ),
+    ),
+    _setting(
         "mcp.api_key",
         "mcp",
         "MCP API Key",
         "string",
         env_aliases=("MCP_API_KEY",),
         secret=True,
-        description="Bearer token required for all /mcp requests.",
+        description="Shared bearer token for static or jwt_or_static MCP auth modes.",
+    ),
+    _setting(
+        "mcp.oauth.issuer_url",
+        "mcp",
+        "MCP OAuth Issuer URL",
+        "string",
+        env_aliases=("MCP_OAUTH_ISSUER_URL",),
+        description=(
+            "Authentik/OIDC issuer URL used to validate JWTs in jwt or jwt_or_static mode, "
+            "for example https://authentik.example/application/o/openwebui/."
+        ),
+    ),
+    _setting(
+        "mcp.oauth.audience",
+        "mcp",
+        "MCP OAuth Audience",
+        "string",
+        env_aliases=("MCP_OAUTH_AUDIENCE",),
+        description=(
+            "Optional audience claim to validate on incoming JWTs. With Open WebUI system_oauth this "
+            "is typically the Open WebUI Authentik client ID."
+        ),
+    ),
+    _setting(
+        "mcp.oauth.email_claim",
+        "mcp",
+        "MCP OAuth Email Claim",
+        "string",
+        default="email",
+        env_aliases=("MCP_OAUTH_EMAIL_CLAIM",),
+        description="JWT claim used to resolve the authenticated user's email address.",
+    ),
+    _setting(
+        "mcp.trusted_user_email_header",
+        "mcp",
+        "Trusted User Email Header",
+        "string",
+        default="X-OpenWebUI-User-Email",
+        env_aliases=("MCP_TRUSTED_USER_EMAIL_HEADER",),
+        description=(
+            "HTTP header carrying the authenticated user's email when Open WebUI MCP uses Bearer auth "
+            "with a template such as {\"X-OpenWebUI-User-Email\": \"{{USER_EMAIL}}\"}. Only honored after "
+            "successful static or jwt_or_static service authentication."
+        ),
     ),
     _setting(
         "mcp.allowed_origins",

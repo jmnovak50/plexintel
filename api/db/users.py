@@ -45,3 +45,34 @@ def get_or_create_user(username: str, email: str = None, token: str = None, frie
     cursor.close()
     conn.close()
     return user_id, True
+
+
+def get_user_by_email(email: str) -> dict | None:
+    normalized = (email or "").strip()
+    if not normalized:
+        return None
+
+    conn = connect_db(cursor_factory=RealDictCursor)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute(
+            """
+            SELECT user_id, username, plex_email, friendly_name, COALESCE(is_admin, FALSE) AS is_admin
+            FROM users
+            WHERE LOWER(BTRIM(plex_email)) = LOWER(BTRIM(%s))
+            LIMIT 1
+            """,
+            (normalized,),
+        )
+        return cursor.fetchone()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def resolve_plex_username(email: str) -> str | None:
+    user = get_user_by_email(email)
+    if not user:
+        return None
+    username = user.get("username")
+    return str(username).strip() if username else None

@@ -11,8 +11,10 @@ from fastapi import FastAPI
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from PIL import Image
+from starlette.datastructures import Headers
 
 from api.services import mcp_server
+from api.services.mcp_auth import MCPAuthContext
 from api.services.agent_tool_service import (
     AgentRecommendation,
     AgentRecommendationScore,
@@ -59,11 +61,16 @@ class MCPServerTests(unittest.TestCase):
         ) as client:
             return await client.request(method, path, **kwargs)
 
-    def _enabled_settings(self, *, origins=()):
+    def _enabled_settings(self, *, origins=(), auth_mode="static"):
         return mcp_server.MCPRuntimeSettings(
             enabled=True,
+            auth_mode=auth_mode,
             api_key="test-mcp-token",
             allowed_origins=tuple(origins),
+            oauth_issuer_url="https://authentik.example/application/o/openwebui",
+            oauth_audience=None,
+            oauth_email_claim="email",
+            trusted_user_email_header="X-OpenWebUI-User-Email",
         )
 
     async def _exercise_mcp_protocol(self):
@@ -417,8 +424,13 @@ class MCPServerTests(unittest.TestCase):
             "get_mcp_runtime_settings",
             return_value=mcp_server.MCPRuntimeSettings(
                 enabled=False,
+                auth_mode="static",
                 api_key="test-mcp-token",
                 allowed_origins=(),
+                oauth_issuer_url=None,
+                oauth_audience=None,
+                oauth_email_claim="email",
+                trusted_user_email_header="X-OpenWebUI-User-Email",
             ),
         ):
             response = anyio.run(lambda: self._request("POST", "/mcp/", json=INITIALIZE_PAYLOAD))
@@ -463,6 +475,148 @@ class MCPServerTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_resolve_mcp_user_auto_scopes_jwt_identity(self):
+        token = mcp_server.mcp_auth_context.set(
+            MCPAuthContext(
+                auth_method="jwt",
+                email="jason@sheffieldave.com",
+                plex_username="jmnovak",
+                user_id=7,
+                is_admin=False,
+            )
+        )
+        try:
+            resolved = mcp_server._resolve_mcp_user(None)
+        finally:
+            mcp_server.mcp_auth_context.reset(token)
+
+        self.assertEqual(resolved, "jmnovak")
+
+    def test_resolve_mcp_user_auto_scopes_trusted_header_identity(self):
+        token = mcp_server.mcp_auth_context.set(
+            MCPAuthContext(
+                auth_method="static",
+                email="jason@sheffieldave.com",
+                plex_username="jmnovak",
+            )
+        )
+        try:
+            resolved = mcp_server._resolve_mcp_user(None)
+        finally:
+            mcp_server.mcp_auth_context.reset(token)
+
+        self.assertEqual(resolved, "jmnovak")
+
+    def test_resolve_mcp_user_blocks_impersonation_for_non_admin(self):
+        token = mcp_server.mcp_auth_context.set(
+            MCPAuthContext(
+                auth_method="jwt",
+                email="jason@sheffieldave.com",
+                plex_username="jmnovak",
+                is_admin=False,
+            )
+        )
+        try:
+            with self.assertRaises(mcp_server.MCPUserAccessError):
+                mcp_server._resolve_mcp_user("otheruser")
+        finally:
+            mcp_server.mcp_auth_context.reset(token)
+
+    def test_resolve_mcp_user_allows_admin_impersonation(self):
+        token = mcp_server.mcp_auth_context.set(
+            MCPAuthContext(
+                auth_method="jwt",
+                email="admin@example.com",
+                plex_username="admin",
+                is_admin=True,
+            )
+        )
+        try:
+            resolved = mcp_server._resolve_mcp_user("otheruser")
+        finally:
+            mcp_server.mcp_auth_context.reset(token)
+
+        self.assertEqual(resolved, "otheruser")
+
+    def test_resolve_mcp_user_requires_explicit_user_in_static_mode(self):
+        token = mcp_server.mcp_auth_context.set(MCPAuthContext(auth_method="static"))
+        try:
+            with self.assertRaises(mcp_server.MCPUserAccessError):
+                mcp_server._resolve_mcp_user(None)
+        finally:
+            mcp_server.mcp_auth_context.reset(token)
+
+    def test_mcp_jwt_mode_rejects_missing_token(self):
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="jwt"),
+        ):
+            response = anyio.run(lambda: self._request("POST", "/mcp/", json=INITIALIZE_PAYLOAD))
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_mcp_jwt_mode_accepts_valid_token(self):
+        jwt_context = MCPAuthContext(
+            auth_method="jwt",
+            email="jason@sheffieldave.com",
+            plex_username="jmnovak",
+        )
+        app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)
+        settings = self._enabled_settings(auth_mode="jwt")
+        headers = Headers({"authorization": "Bearer valid-jwt"})
+
+        with patch.object(mcp_server, "authenticate_bearer_token", return_value=jwt_context):
+            result = app._authenticate_request(headers=headers, settings=settings)
+
+        self.assertIsNone(result.response)
+        self.assertEqual(result.context, jwt_context)
+
+    def test_mcp_jwt_or_static_falls_back_to_static_key(self):
+        app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)
+        settings = self._enabled_settings(auth_mode="jwt_or_static")
+        headers = Headers({"authorization": "Bearer test-mcp-token"})
+
+        with patch.object(mcp_server, "authenticate_bearer_token", return_value=None):
+            result = app._authenticate_request(headers=headers, settings=settings)
+
+        self.assertIsNone(result.response)
+        self.assertEqual(result.context.auth_method, "static")
+
+    def test_mcp_jwt_or_static_does_not_fall_back_for_jwt_shaped_token(self):
+        app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)
+        settings = self._enabled_settings(auth_mode="jwt_or_static")
+        headers = Headers({"authorization": "Bearer header.payload.signature"})
+
+        with patch.object(mcp_server, "authenticate_bearer_token", return_value=None):
+            result = app._authenticate_request(headers=headers, settings=settings)
+
+        self.assertIsNotNone(result.response)
+        self.assertEqual(result.response.status_code, 403)
+
+    def test_enrich_auth_context_maps_trusted_email_header(self):
+        app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)
+        settings = self._enabled_settings()
+        headers = Headers({"x-openwebui-user-email": "jason@sheffieldave.com"})
+        initial = app._AuthResult(
+            response=None,
+            context=MCPAuthContext(auth_method="static"),
+        )
+
+        with patch.object(
+            mcp_server,
+            "resolve_context_from_email",
+            return_value=MCPAuthContext(
+                auth_method="static",
+                email="jason@sheffieldave.com",
+                plex_username="jmnovak",
+            ),
+        ) as mock_resolve:
+            result = app._enrich_auth_context(headers=headers, settings=settings, auth_result=initial)
+
+        mock_resolve.assert_called_once_with("jason@sheffieldave.com", "static")
+        self.assertEqual(result.context.plex_username, "jmnovak")
 
 
 if __name__ == "__main__":
