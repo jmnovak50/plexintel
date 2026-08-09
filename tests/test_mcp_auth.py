@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import time
 import unittest
+from io import BytesIO
 from unittest.mock import patch
 
 import jwt
@@ -32,7 +34,13 @@ class MCPAuthTests(unittest.TestCase):
     def setUp(self):
         mcp_auth.reset_jwks_cache()
 
-    def _encode_token(self, claims: dict, *, expired: bool = False) -> str:
+    def _encode_token(
+        self,
+        claims: dict,
+        *,
+        expired: bool = False,
+        include_audience: bool = True,
+    ) -> str:
         now = int(time.time())
         payload = {
             "iss": self.issuer,
@@ -43,7 +51,19 @@ class MCPAuthTests(unittest.TestCase):
             "scope": "openid email plexintel.read",
             **claims,
         }
-        return jwt.encode(payload, self.private_key, algorithm="RS256")
+        if not include_audience:
+            payload.pop("aud", None)
+        return jwt.encode(
+            payload,
+            self.private_key,
+            algorithm="RS256",
+            headers={"kid": "plexintel-test-key"},
+        )
+
+    def _validate(self, token: str):
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            return mcp_auth.validate_bearer_token(token, self.oauth_settings)
 
     def test_extract_email_from_claims_prefers_configured_claim(self):
         claims = {"email": "jason@sheffieldave.com", "preferred_username": "other@example.com"}
@@ -78,6 +98,101 @@ class MCPAuthTests(unittest.TestCase):
         self.assertEqual(context.email, "jason@sheffieldave.com")
         self.assertEqual(context.plex_username, "jmnovak")
         self.assertEqual(context.user_id, 7)
+
+    def test_validate_bearer_token_accepts_exact_expected_claims_and_scope(self):
+        token = self._encode_token({"email": "mapped@example.com"})
+        fake_user = {
+            "user_id": 7,
+            "username": "mapped-user",
+            "is_admin": False,
+        }
+
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            with patch.object(mcp_auth, "get_user_by_email", return_value=fake_user):
+                result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.VALID)
+        self.assertEqual(result.context.plex_username, "mapped-user")
+
+    def test_validate_bearer_token_rejects_missing_audience(self):
+        token = self._encode_token(
+            {"email": "user@example.com"},
+            include_audience=False,
+        )
+
+        with self.assertLogs(mcp_auth.logger, level="INFO") as captured:
+            result = self._validate(token)
+
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.INVALID)
+        diagnostics = "\n".join(captured.output)
+        self.assertIn("stage=signature_and_registered_claims", diagnostics)
+        self.assertIn("exception_class=MissingRequiredClaimError", diagnostics)
+        self.assertIn("aud=None", diagnostics)
+        self.assertNotIn(token, diagnostics)
+
+    def test_validate_bearer_token_rejects_incorrect_audience(self):
+        token = self._encode_token(
+            {"aud": "https://unrelated.example/resource", "email": "user@example.com"}
+        )
+
+        result = self._validate(token)
+
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.WRONG_AUDIENCE)
+
+    def test_validate_bearer_token_rejects_missing_required_scope(self):
+        token = self._encode_token({"scope": "openid email", "email": "user@example.com"})
+
+        result = self._validate(token)
+
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.INSUFFICIENT_SCOPE)
+
+    def test_validate_bearer_token_rejects_expired_token(self):
+        token = self._encode_token({"email": "user@example.com"}, expired=True)
+
+        result = self._validate(token)
+
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.EXPIRED)
+
+    def test_validation_failure_diagnostics_are_specific_and_do_not_leak_token_or_identity(self):
+        other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = int(time.time())
+        token = jwt.encode(
+            {
+                "iss": self.issuer,
+                "sub": "sensitive-subject",
+                "email": "private-person@example.com",
+                "aud": "https://plexintel.kabolly.com/mcp",
+                "exp": now + 3600,
+                "nbf": now - 60,
+                "scope": "openid email plexintel.read",
+                "scp": ["plexintel.read"],
+            },
+            other_key,
+            algorithm="RS256",
+            headers={"kid": "authentik-signing-key"},
+        )
+
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            with self.assertLogs(mcp_auth.logger, level="INFO") as captured:
+                result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+
+        diagnostics = "\n".join(captured.output)
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.INVALID)
+        self.assertIn("stage=signature_and_registered_claims", diagnostics)
+        self.assertIn("exception_class=InvalidSignatureError", diagnostics)
+        self.assertIn("alg=RS256", diagnostics)
+        self.assertIn("kid=authentik-signing-key", diagnostics)
+        self.assertIn(f"iss={self.issuer}", diagnostics)
+        self.assertIn("aud=https://plexintel.kabolly.com/mcp", diagnostics)
+        self.assertIn("scope=openid email plexintel.read", diagnostics)
+        self.assertIn("required_scopes=('plexintel.read',)", diagnostics)
+        self.assertIn("'email': True", diagnostics)
+        self.assertNotIn(token, diagnostics)
+        self.assertNotIn(token.rsplit(".", 1)[1], diagnostics)
+        self.assertNotIn("private-person@example.com", diagnostics)
+        self.assertNotIn("sensitive-subject", diagnostics)
 
     def test_authenticate_bearer_token_returns_email_only_when_user_not_mapped(self):
         token = self._encode_token({"email": "unknown@example.com"})
@@ -228,6 +343,43 @@ class MCPAuthTests(unittest.TestCase):
             "https://auth.kabolly.com/application/o/plexintel-chatgpt/.well-known/openid-configuration"
         )
         self.assertEqual(jwks_uri, "https://auth.kabolly.com/application/o/plexintel-chatgpt/jwks/")
+
+    def test_jwks_request_headers_and_timeout_continue_through_full_validation(self):
+        token = self._encode_token({"email": "mapped@example.com"})
+        public_jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(self.public_key))
+        public_jwk["kid"] = "plexintel-test-key"
+        jwks_response = {"keys": [public_jwk]}
+        captured_request = {}
+
+        def urlopen(request, *, timeout, context):
+            captured_request["request"] = request
+            captured_request["timeout"] = timeout
+            captured_request["context"] = context
+            return BytesIO(json.dumps(jwks_response).encode("utf-8"))
+
+        fake_user = {
+            "user_id": 7,
+            "username": "mapped-user",
+            "is_admin": False,
+        }
+        with patch.object(
+            mcp_auth,
+            "_fetch_jwks_uri",
+            return_value="https://auth.kabolly.com/application/o/plexintel-chatgpt/jwks/",
+        ):
+            with patch("jwt.jwks_client.urllib.request.urlopen", side_effect=urlopen) as fetch:
+                with patch.object(mcp_auth, "get_user_by_email", return_value=fake_user):
+                    result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+
+        request = captured_request["request"]
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.VALID)
+        self.assertEqual(result.context.plex_username, "mapped-user")
+        self.assertEqual(request.full_url, "https://auth.kabolly.com/application/o/plexintel-chatgpt/jwks/")
+        self.assertEqual(request.get_header("User-agent"), "PlexIntel/1.0")
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(captured_request["timeout"], 10)
+        self.assertIsNone(captured_request["context"])
+        fetch.assert_called_once()
 
 
 if __name__ == "__main__":

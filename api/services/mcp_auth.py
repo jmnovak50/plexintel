@@ -18,7 +18,16 @@ from api.services.app_settings import get_setting_value
 logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+JWT_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\."
+    r"[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+)
 JWKS_CACHE_TTL_SECONDS = 3600
+JWKS_REQUEST_TIMEOUT_SECONDS = 10
+JWKS_REQUEST_HEADERS = {
+    "User-Agent": "PlexIntel/1.0",
+    "Accept": "application/json",
+}
 
 _jwks_clients: dict[str, tuple[PyJWKClient, float]] = {}
 
@@ -97,11 +106,28 @@ def validate_bearer_token(token: str, oauth_settings: MCPOAuthSettings | None = 
     assert claims is not None
 
     if not set(settings.required_scopes).issubset(_extract_scopes(claims)):
+        _log_jwt_validation_failure(
+            normalized,
+            settings,
+            expected_audience,
+            stage="scope",
+            exception_class="MissingRequiredScope",
+            exception_message="Access token does not contain every required scope",
+            claims=claims,
+        )
         return MCPTokenValidation(MCPTokenStatus.INSUFFICIENT_SCOPE)
 
     email = extract_email_from_claims(claims, settings.email_claim)
     if not email:
-        logger.info("MCP JWT authenticated but no email claim was found")
+        _log_jwt_validation_failure(
+            normalized,
+            settings,
+            expected_audience,
+            stage="identity_claim",
+            exception_class="MissingIdentityClaim",
+            exception_message="Access token does not contain a usable identity claim",
+            claims=claims,
+        )
         return MCPTokenValidation(MCPTokenStatus.UNMAPPED_EMAIL, MCPAuthContext(auth_method="jwt", email=None))
 
     user = get_user_by_email(email)
@@ -142,34 +168,143 @@ def _decode_jwt(token: str, settings: MCPOAuthSettings) -> dict[str, Any] | None
 
 
 def _decode_jwt_result(token: str, settings: MCPOAuthSettings, expected_audience: str) -> MCPTokenValidation:
+    stage = "jwks_signing_key"
     try:
         signing_key = _get_signing_key(token, settings.issuer_url)
+        stage = "signature_and_registered_claims"
         decode_kwargs: dict[str, Any] = {
             "algorithms": ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"],
             "options": {"verify_aud": True, "verify_iss": False},
             "audience": expected_audience,
         }
         claims = jwt.decode(token, signing_key.key, **decode_kwargs)
+        stage = "issuer"
         token_issuer = claims.get("iss")
         if not _issuer_matches(token_issuer, settings.issuer_url):
-            logger.info("MCP JWT issuer mismatch")
+            _log_jwt_validation_failure(
+                token,
+                settings,
+                expected_audience,
+                stage=stage,
+                exception_class="InvalidIssuerError",
+                exception_message="Token issuer does not exactly match configured issuer",
+                claims=claims,
+            )
             return MCPTokenValidation(MCPTokenStatus.WRONG_ISSUER)
         return MCPTokenValidation(MCPTokenStatus.VALID, claims=claims)
-    except jwt.ExpiredSignatureError:
-        logger.info("MCP JWT validation failed: expired token")
+    except jwt.ExpiredSignatureError as exc:
+        _log_jwt_validation_failure(token, settings, expected_audience, stage=stage, exception=exc)
         return MCPTokenValidation(MCPTokenStatus.EXPIRED)
-    except jwt.ImmatureSignatureError:
-        logger.info("MCP JWT validation failed: token not yet valid")
+    except jwt.ImmatureSignatureError as exc:
+        _log_jwt_validation_failure(token, settings, expected_audience, stage=stage, exception=exc)
         return MCPTokenValidation(MCPTokenStatus.NOT_YET_VALID)
-    except jwt.InvalidAudienceError:
-        logger.info("MCP JWT validation failed: audience mismatch")
+    except jwt.InvalidAudienceError as exc:
+        _log_jwt_validation_failure(token, settings, expected_audience, stage=stage, exception=exc)
         return MCPTokenValidation(MCPTokenStatus.WRONG_AUDIENCE)
-    except jwt.PyJWTError:
-        logger.info("MCP JWT validation failed")
+    except jwt.PyJWTError as exc:
+        _log_jwt_validation_failure(token, settings, expected_audience, stage=stage, exception=exc)
         return MCPTokenValidation(MCPTokenStatus.INVALID)
-    except (httpx.HTTPError, ValueError):
-        logger.warning("MCP JWT validation could not load issuer keys")
+    except (httpx.HTTPError, ValueError) as exc:
+        _log_jwt_validation_failure(
+            token,
+            settings,
+            expected_audience,
+            stage=stage,
+            exception=exc,
+            level=logging.WARNING,
+        )
         return MCPTokenValidation(MCPTokenStatus.CONFIGURATION_ERROR)
+
+
+def _log_jwt_validation_failure(
+    token: str,
+    settings: MCPOAuthSettings,
+    expected_audience: str,
+    *,
+    stage: str,
+    exception: Exception | None = None,
+    exception_class: str | None = None,
+    exception_message: str | None = None,
+    claims: dict[str, Any] | None = None,
+    level: int = logging.INFO,
+) -> None:
+    header: dict[str, Any] = {}
+    unverified_claims = claims or {}
+    try:
+        header = jwt.get_unverified_header(token)
+    except (jwt.PyJWTError, TypeError, ValueError):
+        pass
+    if claims is None:
+        try:
+            decoded = jwt.decode(
+                token,
+                options={
+                    "verify_signature": False,
+                    "verify_exp": False,
+                    "verify_nbf": False,
+                    "verify_aud": False,
+                    "verify_iss": False,
+                },
+            )
+            if isinstance(decoded, dict):
+                unverified_claims = decoded
+        except (jwt.PyJWTError, TypeError, ValueError):
+            pass
+
+    error_class = exception_class or (type(exception).__name__ if exception else "ValidationError")
+    error_message = exception_message if exception_message is not None else str(exception or "JWT validation failed")
+    identity_presence = {
+        "configured": settings.email_claim in unverified_claims,
+        "email": "email" in unverified_claims,
+        "preferred_username": "preferred_username" in unverified_claims,
+        "sub": "sub" in unverified_claims,
+    }
+
+    def safe(value: Any) -> Any:
+        return _safe_diagnostic_value(value, token)
+
+    logger.log(
+        level,
+        "MCP JWT validation failed stage=%s exception_class=%s exception_message=%s "
+        "alg=%s kid=%s iss=%s aud=%s exp=%s nbf=%s scope=%s scp=%s "
+        "expected_issuer=%s expected_audience=%s required_scopes=%s identity_claims_present=%s",
+        safe(stage),
+        safe(error_class),
+        _sanitize_exception_message(error_message, token),
+        safe(header.get("alg")),
+        safe(header.get("kid")),
+        safe(unverified_claims.get("iss")),
+        safe(unverified_claims.get("aud")),
+        safe(unverified_claims.get("exp")),
+        safe(unverified_claims.get("nbf")),
+        safe(unverified_claims.get("scope")),
+        safe(unverified_claims.get("scp")),
+        safe(settings.issuer_url),
+        safe(expected_audience),
+        safe(settings.required_scopes),
+        identity_presence,
+    )
+
+
+def _sanitize_exception_message(message: str, token: str) -> str:
+    sanitized = str(message or "JWT validation failed")
+    if token:
+        sanitized = sanitized.replace(token, "<redacted-token>")
+    sanitized = JWT_VALUE_PATTERN.sub("<redacted-token>", sanitized)
+    sanitized = re.sub(r"[\x00-\x1f\x7f]", " ", sanitized)
+    return sanitized[:500]
+
+
+def _safe_diagnostic_value(value: Any, token: str) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        sanitized = value.replace(token, "<redacted-token>") if token else value
+        sanitized = JWT_VALUE_PATTERN.sub("<redacted-token>", sanitized)
+        return re.sub(r"[\x00-\x1f\x7f]", " ", sanitized)[:500]
+    if isinstance(value, (list, tuple)):
+        return tuple(_safe_diagnostic_value(item, token) for item in value[:20])
+    return f"<{type(value).__name__}>"
 
 
 def _issuer_matches(token_issuer: Any, configured_issuer: str | None) -> bool:
@@ -207,7 +342,12 @@ def _get_jwks_client(issuer_url: str) -> PyJWKClient:
         return cached[0]
 
     jwks_uri = _fetch_jwks_uri(issuer_url)
-    client = PyJWKClient(jwks_uri, cache_keys=True)
+    client = PyJWKClient(
+        jwks_uri,
+        cache_keys=True,
+        headers=JWKS_REQUEST_HEADERS,
+        timeout=JWKS_REQUEST_TIMEOUT_SECONDS,
+    )
     _jwks_clients[issuer_url] = (client, now)
     return client
 
