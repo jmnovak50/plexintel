@@ -45,10 +45,14 @@ The last two items must be verified against the Authentik version in production.
 
 1. In ChatGPT on the web, enable Developer mode under **Settings → Security and login**.
 2. Open app/plugin management, create a developer-mode app, and enter `https://plexintel.kabolly.com/mcp/` as the remote MCP URL.
-3. Select OAuth and the client-identification method configured in Authentik.
+3. Select **Mixed Authentication** and the client-identification method configured in Authentik.
 4. Copy ChatGPT's displayed callback URL into Authentik's redirect-URI allowlist.
-5. Connect, complete Authentik login/consent, then refresh the app's tools.
+5. Invoke a protected tool, complete Authentik login/consent when prompted, then refresh the app's tools.
 6. Confirm all nine tools appear as read-only and request `plexintel.read`.
+
+PlexIntel intentionally permits unauthenticated MCP `initialize`, the required initialized notification, and `tools/list`. These responses contain only server capabilities, instructions, and tool names, descriptions, schemas, annotations, and OAuth metadata—never PlexIntel user or library data. Every listed data tool advertises OAuth with `plexintel.read`, and authentication is enforced before its handler can access PlexIntel services or the database.
+
+ChatGPT may therefore finish initial plugin creation without opening Authentik. OAuth linking can begin when ChatGPT first invokes a protected tool and receives its tool-level `mcp/www_authenticate` challenge. Keep ChatGPT's callback registered in Authentik using **Strict** redirect-URI matching.
 
 ## Verify discovery and challenges
 
@@ -60,10 +64,12 @@ curl -i -X POST https://plexintel.kabolly.com/mcp/ \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
-The metadata responses must be JSON, never SPA HTML. The unauthenticated MCP request should be `401` with a header resembling:
+The metadata responses must be JSON, never SPA HTML. Use a stateful MCP client for the discovery sequence so it sends `initialize`, `notifications/initialized`, and `tools/list` according to the negotiated protocol. Those discovery operations must succeed without authentication.
+
+An unauthenticated `tools/call` must return an MCP tool error whose `_meta["mcp/www_authenticate"]` contains a challenge resembling:
 
 ```text
-WWW-Authenticate: Bearer resource_metadata="https://plexintel.kabolly.com/.well-known/oauth-protected-resource", scope="plexintel.read", error="invalid_token", error_description="Authentication required"
+Bearer resource_metadata="https://plexintel.kabolly.com/.well-known/oauth-protected-resource", scope="plexintel.read", error="insufficient_scope", error_description="Sign in to PlexIntel to continue"
 ```
 
 With a short-lived test access token (do not save or paste it into documentation):

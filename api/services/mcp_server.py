@@ -89,6 +89,12 @@ class MCPRuntimeSettings:
     trusted_user_email_header: str | None
 
 
+mcp_runtime_settings_context: ContextVar[MCPRuntimeSettings | None] = ContextVar(
+    "mcp_runtime_settings_context",
+    default=None,
+)
+
+
 def _split_allowed_origins(value: Optional[str]) -> tuple[str, ...]:
     if not value:
         return ()
@@ -151,6 +157,39 @@ def _extract_trusted_user_email(headers: Headers, configured_header: str | None)
 
 def get_current_mcp_auth_context() -> MCPAuthContext | None:
     return mcp_auth_context.get()
+
+
+def _mcp_auth_required_result() -> CallToolResult:
+    runtime_settings = mcp_runtime_settings_context.get()
+    oauth_settings = (
+        MCPOAuthSettings(
+            issuer_url=runtime_settings.oauth_issuer_url,
+            audience=runtime_settings.oauth_audience,
+            email_claim=runtime_settings.oauth_email_claim,
+            resource_url=runtime_settings.oauth_resource_url,
+            required_scopes=runtime_settings.oauth_required_scopes,
+        )
+        if runtime_settings
+        else get_mcp_oauth_settings()
+    )
+    challenge = build_oauth_challenge(
+        oauth_settings,
+        error="insufficient_scope",
+        description="Sign in to PlexIntel to continue",
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text="Authentication required.")],
+        **{"_meta": {"mcp/www_authenticate": [challenge]}},
+        isError=True,
+    )
+
+
+class PlexIntelFastMCP(FastMCP):
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        context = get_current_mcp_auth_context()
+        if context is None or (context.auth_method == "jwt" and not context.plex_username):
+            return _mcp_auth_required_result()
+        return await super().call_tool(name, arguments)
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -399,13 +438,11 @@ class MCPAccessControlApp:
                 status_code,
                 (time.perf_counter() - start) * 1000,
             )
-            response = auth_result.response
-            if rpc_method and rpc_method.startswith("tools/call:") and auth_result.oauth_challenge:
-                response = self._tool_auth_error_response(body, auth_result.oauth_challenge)
-            await response(scope, _build_replay_receive(body) if body else receive, send)
+            await auth_result.response(scope, _build_replay_receive(body) if body else receive, send)
             return
 
         auth_token = mcp_auth_context.set(auth_result.context)
+        settings_token = mcp_runtime_settings_context.set(settings)
         downstream_receive = receive
         if body:
             downstream_receive = _build_replay_receive(body)
@@ -419,6 +456,7 @@ class MCPAccessControlApp:
         try:
             await self.runtime.get_asgi_app()(scope, downstream_receive, send_wrapper)
         finally:
+            mcp_runtime_settings_context.reset(settings_token)
             mcp_auth_context.reset(auth_token)
             logger.info(
                 "MCP request method=%s caller=%s status=%s duration_ms=%.2f",
@@ -432,30 +470,6 @@ class MCPAccessControlApp:
     class _AuthResult:
         response: JSONResponse | None
         context: MCPAuthContext | None
-        oauth_challenge: str | None = None
-
-    @staticmethod
-    def _tool_auth_error_response(body: bytes, challenge: str) -> JSONResponse:
-        request_id = None
-        try:
-            payload = json.loads(body.decode("utf-8"))
-            if isinstance(payload, dict):
-                request_id = payload.get("id")
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            pass
-        return JSONResponse(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "content": [
-                        {"type": "text", "text": "Authentication is required to use this PlexIntel tool."}
-                    ],
-                    "_meta": {"mcp/www_authenticate": [challenge]},
-                    "isError": True,
-                },
-            }
-        )
 
     def _authenticate_request(self, headers: Headers, settings: MCPRuntimeSettings) -> _AuthResult:
         if not settings.enabled:
@@ -511,62 +525,22 @@ class MCPAccessControlApp:
                 response=JSONResponse({"detail": "MCP OAuth resource server is not configured"}, status_code=503),
                 context=None,
             )
-        challenge = build_oauth_challenge(oauth_settings)
         if not bearer_token:
-            return self._AuthResult(
-                response=JSONResponse(
-                    {"detail": "Authentication required"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": challenge},
-                ),
-                context=None,
-                oauth_challenge=challenge,
-            )
+            return self._AuthResult(response=None, context=None)
 
         validation = validate_bearer_token(bearer_token, oauth_settings)
         if validation.status is MCPTokenStatus.CONFIGURATION_ERROR:
-            return self._AuthResult(
-                response=JSONResponse({"detail": "MCP OAuth validation is unavailable"}, status_code=503),
-                context=None,
-            )
-        if validation.status is MCPTokenStatus.INSUFFICIENT_SCOPE:
-            challenge = build_oauth_challenge(
-                oauth_settings,
-                error="insufficient_scope",
-                description="Required OAuth scope is missing",
-            )
-            return self._AuthResult(
-                response=JSONResponse(
-                    {"detail": "Insufficient OAuth scope"},
-                    status_code=403,
-                    headers={"WWW-Authenticate": challenge},
-                ),
-                context=None,
-                oauth_challenge=challenge,
-            )
-        if validation.status not in (MCPTokenStatus.VALID, MCPTokenStatus.UNMAPPED_EMAIL):
-            return self._AuthResult(
-                response=JSONResponse(
-                    {"detail": "Invalid or expired MCP bearer token"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": challenge},
-                ),
-                context=None,
-                oauth_challenge=challenge,
-            )
+            logger.warning("MCP OAuth token could not be validated because OAuth is unavailable")
+            return self._AuthResult(response=None, context=None)
+        if validation.status is not MCPTokenStatus.VALID:
+            return self._AuthResult(response=None, context=None)
         return self._AuthResult(response=None, context=validation.context)
 
     def _authenticate_static(self, bearer_token: str | None, settings: MCPRuntimeSettings) -> _AuthResult:
         if not settings.api_key:
-            return self._AuthResult(
-                response=JSONResponse({"detail": "MCP server is not configured"}, status_code=503),
-                context=None,
-            )
+            return self._AuthResult(response=None, context=None)
         if bearer_token is None or not hmac.compare_digest(bearer_token, settings.api_key):
-            return self._AuthResult(
-                response=JSONResponse({"detail": "Invalid or missing MCP bearer token"}, status_code=403),
-                context=None,
-            )
+            return self._AuthResult(response=None, context=None)
         return self._AuthResult(
             response=None,
             context=MCPAuthContext(auth_method="static"),
@@ -609,7 +583,7 @@ def _build_mcp_server() -> FastMCP:
     instruction_parts = [part for part in (instructions, USER_IDENTITY_INSTRUCTIONS, POSTER_RESPONSE_INSTRUCTIONS) if part]
     instructions = "\n\n".join(instruction_parts)
 
-    mcp = FastMCP(
+    mcp = PlexIntelFastMCP(
         server_name,
         instructions=instructions,
         stateless_http=True,

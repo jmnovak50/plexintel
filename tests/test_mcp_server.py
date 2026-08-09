@@ -67,10 +67,10 @@ class MCPServerTests(unittest.TestCase):
             auth_mode=auth_mode,
             api_key="test-mcp-token",
             allowed_origins=tuple(origins),
-            oauth_issuer_url="https://authentik.example/application/o/openwebui",
+            oauth_issuer_url="https://auth.kabolly.com/application/o/plexintel-chatgpt/",
             oauth_audience=None,
             oauth_email_claim="email",
-            oauth_resource_url="https://plexintel.example/mcp/",
+            oauth_resource_url="https://plexintel.kabolly.com/mcp",
             oauth_required_scopes=("plexintel.read",),
             trusted_user_email_header="X-OpenWebUI-User-Email",
         )
@@ -141,6 +141,55 @@ class MCPServerTests(unittest.TestCase):
             "recent": recent_result,
             "history": history_result,
         }
+
+    async def _exercise_unauthenticated_protocol(self, *, call_tools: bool = False, headers=None):
+        tool_arguments = {
+            "list_users": {},
+            "get_recommendations": {},
+            "get_recommendation_score": {"rating_key": 37641},
+            "search_library": {"q": "private-sentinel"},
+            "get_library_item": {"rating_key": 42},
+            "get_poster_image": {"rating_key": 42},
+            "get_poster_gallery": {"rating_keys": [42]},
+            "get_recent_library_additions": {},
+            "get_watch_history": {},
+        }
+        async with mcp_server.mcp_runtime.lifespan():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.http_app),
+                base_url="http://testserver",
+                headers=headers,
+                follow_redirects=True,
+            ) as client:
+                async with streamable_http_client(
+                    "http://testserver/mcp/",
+                    http_client=client,
+                ) as (read, write, _get_session_id):
+                    async with ClientSession(read, write) as session:
+                        initialize_result = await session.initialize()
+                        tools_result = await session.list_tools()
+                        call_results = {}
+                        if call_tools:
+                            for tool_name, arguments in tool_arguments.items():
+                                call_results[tool_name] = await session.call_tool(tool_name, arguments)
+
+        return initialize_result, tools_result, call_results
+
+    async def _exercise_single_tool_call(self, name: str, arguments: dict, *, headers=None):
+        async with mcp_server.mcp_runtime.lifespan():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.http_app),
+                base_url="http://testserver",
+                headers=headers,
+                follow_redirects=True,
+            ) as client:
+                async with streamable_http_client(
+                    "http://testserver/mcp/",
+                    http_client=client,
+                ) as (read, write, _get_session_id):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        return await session.call_tool(name, arguments)
 
     def test_mcp_protocol_lists_tools_and_calls_each_read_only_tool(self):
         users_payload = AgentUsersResponse(
@@ -450,24 +499,82 @@ class MCPServerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    def test_mcp_rejects_missing_or_invalid_bearer_token(self):
+    def test_unauthenticated_initialize_and_tools_list_are_data_free(self):
         with patch.object(
             mcp_server,
             "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(),
+            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
         ):
-            missing_response = anyio.run(lambda: self._request("POST", "/mcp/", json=INITIALIZE_PAYLOAD))
-            invalid_response = anyio.run(
-                lambda: self._request(
-                    "POST",
-                    "/mcp/",
-                    json=INITIALIZE_PAYLOAD,
-                    headers={"Authorization": "Bearer wrong-token"},
-                )
+            initialize_result, tools_result, _ = anyio.run(self._exercise_unauthenticated_protocol)
+
+        self.assertTrue(initialize_result.serverInfo.name)
+        serialized_discovery = f"{initialize_result.model_dump()} {tools_result.model_dump()}"
+        self.assertNotIn("private-sentinel", serialized_discovery)
+        self.assertNotIn("jason@sheffieldave.com", serialized_discovery)
+        self.assertNotIn("Blade Runner 2049", serialized_discovery)
+
+        expected_tools = {
+            "list_users",
+            "get_recommendations",
+            "get_recommendation_score",
+            "search_library",
+            "get_library_item",
+            "get_poster_image",
+            "get_poster_gallery",
+            "get_recent_library_additions",
+            "get_watch_history",
+        }
+        self.assertEqual({tool.name for tool in tools_result.tools}, expected_tools)
+        for tool in tools_result.tools:
+            self.assertEqual(
+                tool.meta["securitySchemes"],
+                [{"type": "oauth2", "scopes": ["plexintel.read"]}],
+                tool.name,
+            )
+            self.assertNotIn("noauth", str(tool.meta).lower(), tool.name)
+
+    def test_unauthenticated_calls_to_every_tool_return_native_oauth_error_without_data_access(self):
+        protected_functions = (
+            "list_agent_users",
+            "get_agent_recommendations",
+            "get_agent_recommendation_score",
+            "search_agent_library",
+            "get_agent_library_item",
+            "build_poster_image_result",
+            "build_poster_gallery_result",
+            "get_recent_library_additions",
+            "get_agent_watch_history",
+        )
+        mocks = []
+        patches = [patch.object(mcp_server, name) for name in protected_functions]
+        for active_patch in patches:
+            mocks.append(active_patch.start())
+        self.addCleanup(lambda: [active_patch.stop() for active_patch in reversed(patches)])
+
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
+        ):
+            _, _, call_results = anyio.run(
+                lambda: self._exercise_unauthenticated_protocol(call_tools=True)
             )
 
-        self.assertEqual(missing_response.status_code, 403)
-        self.assertEqual(invalid_response.status_code, 403)
+        self.assertEqual(len(call_results), 9)
+        for tool_name, result in call_results.items():
+            self.assertTrue(result.isError, tool_name)
+            self.assertEqual(result.content[0].text, "Authentication required.", tool_name)
+            challenge = result.meta["mcp/www_authenticate"][0]
+            self.assertIn(
+                'resource_metadata="https://plexintel.kabolly.com/.well-known/oauth-protected-resource"',
+                challenge,
+            )
+            self.assertIn('scope="plexintel.read"', challenge)
+            self.assertIn('error="insufficient_scope"', challenge)
+            self.assertIn('error_description="Sign in to PlexIntel to continue"', challenge)
+            self.assertNotIn("private-sentinel", str(result.model_dump()))
+        for data_access_mock in mocks:
+            data_access_mock.assert_not_called()
 
     def test_mcp_rejects_disallowed_origin(self):
         with patch.object(
@@ -560,123 +667,38 @@ class MCPServerTests(unittest.TestCase):
         finally:
             mcp_server.mcp_auth_context.reset(token)
 
-    def test_mcp_jwt_mode_rejects_missing_token(self):
-        with patch.object(
-            mcp_server,
-            "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(auth_mode="jwt"),
+    def test_invalid_or_insufficient_jwt_reaches_tool_layer_but_not_handler(self):
+        for status in (
+            mcp_server.MCPTokenStatus.INVALID,
+            mcp_server.MCPTokenStatus.INSUFFICIENT_SCOPE,
+            mcp_server.MCPTokenStatus.EXPIRED,
+            mcp_server.MCPTokenStatus.WRONG_AUDIENCE,
+            mcp_server.MCPTokenStatus.WRONG_ISSUER,
+            mcp_server.MCPTokenStatus.UNMAPPED_EMAIL,
         ):
-            response = anyio.run(lambda: self._request("POST", "/mcp/", json=INITIALIZE_PAYLOAD))
+            with self.subTest(status=status):
+                with patch.object(
+                    mcp_server,
+                    "get_mcp_runtime_settings",
+                    return_value=self._enabled_settings(auth_mode="jwt_or_static"),
+                ):
+                    with patch.object(
+                        mcp_server,
+                        "validate_bearer_token",
+                        return_value=mcp_server.MCPTokenValidation(status),
+                    ):
+                        with patch.object(mcp_server, "list_agent_users") as data_access:
+                            result = anyio.run(
+                                lambda: self._exercise_single_tool_call(
+                                    "list_users",
+                                    {},
+                                    headers={"Authorization": "Bearer header.payload.signature"},
+                                )
+                            )
 
-        self.assertEqual(response.status_code, 401)
-        challenge = response.headers["www-authenticate"]
-        self.assertIn('resource_metadata="https://plexintel.example/.well-known/oauth-protected-resource"', challenge)
-        self.assertIn('scope="plexintel.read"', challenge)
-        self.assertIn('error="invalid_token"', challenge)
-
-    def test_mcp_jwt_or_static_missing_token_uses_oauth_challenge(self):
-        with patch.object(
-            mcp_server,
-            "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
-        ):
-            response = anyio.run(lambda: self._request("POST", "/mcp/", json=INITIALIZE_PAYLOAD))
-        self.assertEqual(response.status_code, 401)
-        self.assertIn("WWW-Authenticate", response.headers)
-
-    def test_mcp_invalid_jwt_uses_oauth_challenge(self):
-        with patch.object(
-            mcp_server,
-            "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
-        ):
-            with patch.object(
-                mcp_server,
-                "validate_bearer_token",
-                return_value=mcp_server.MCPTokenValidation(mcp_server.MCPTokenStatus.INVALID),
-            ):
-                response = anyio.run(
-                    lambda: self._request(
-                        "POST",
-                        "/mcp/",
-                        json=INITIALIZE_PAYLOAD,
-                        headers={"Authorization": "Bearer header.payload.signature"},
-                    )
-                )
-        self.assertEqual(response.status_code, 401)
-        self.assertIn('error="invalid_token"', response.headers["www-authenticate"])
-
-    def test_mcp_insufficient_scope_returns_403_challenge(self):
-        with patch.object(
-            mcp_server,
-            "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(auth_mode="jwt"),
-        ):
-            with patch.object(
-                mcp_server,
-                "validate_bearer_token",
-                return_value=mcp_server.MCPTokenValidation(mcp_server.MCPTokenStatus.INSUFFICIENT_SCOPE),
-            ):
-                response = anyio.run(
-                    lambda: self._request(
-                        "POST",
-                        "/mcp/",
-                        json=INITIALIZE_PAYLOAD,
-                        headers={"Authorization": "Bearer header.payload.signature"},
-                    )
-                )
-        self.assertEqual(response.status_code, 403)
-        self.assertIn('error="insufficient_scope"', response.headers["www-authenticate"])
-
-    def test_tool_auth_error_returns_mcp_www_authenticate_and_preserves_id(self):
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "tool-call-7",
-            "method": "tools/call",
-            "params": {"name": "list_users", "arguments": {}},
-        }
-        with patch.object(
-            mcp_server,
-            "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
-        ):
-            response = anyio.run(lambda: self._request("POST", "/mcp/", json=payload))
-        self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertEqual(result["id"], "tool-call-7")
-        self.assertTrue(result["result"]["isError"])
-        challenge = result["result"]["_meta"]["mcp/www_authenticate"][0]
-        self.assertIn('error="invalid_token"', challenge)
-
-    def test_tool_insufficient_scope_error_uses_insufficient_scope_challenge(self):
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "tools/call",
-            "params": {"name": "list_users", "arguments": {}},
-        }
-        with patch.object(
-            mcp_server,
-            "get_mcp_runtime_settings",
-            return_value=self._enabled_settings(auth_mode="jwt"),
-        ):
-            with patch.object(
-                mcp_server,
-                "validate_bearer_token",
-                return_value=mcp_server.MCPTokenValidation(mcp_server.MCPTokenStatus.INSUFFICIENT_SCOPE),
-            ):
-                response = anyio.run(
-                    lambda: self._request(
-                        "POST",
-                        "/mcp/",
-                        json=payload,
-                        headers={"Authorization": "Bearer header.payload.signature"},
-                    )
-                )
-        self.assertEqual(response.status_code, 200)
-        result = response.json()["result"]
-        self.assertTrue(result["isError"])
-        self.assertIn('error="insufficient_scope"', result["_meta"]["mcp/www_authenticate"][0])
+                self.assertTrue(result.isError)
+                self.assertIn('error="insufficient_scope"', result.meta["mcp/www_authenticate"][0])
+                data_access.assert_not_called()
 
     def test_mcp_jwt_mode_accepts_valid_token(self):
         jwt_context = MCPAuthContext(
@@ -694,6 +716,41 @@ class MCPServerTests(unittest.TestCase):
 
         self.assertIsNone(result.response)
         self.assertEqual(result.context, jwt_context)
+
+    def test_valid_mapped_jwt_reaches_protected_tool_handler(self):
+        jwt_context = MCPAuthContext(
+            auth_method="jwt",
+            email="jason@sheffieldave.com",
+            plex_username="jmnovak",
+            user_id=7,
+        )
+        users_payload = AgentUsersResponse(
+            count=1,
+            items=[AgentUser(username="jmnovak", friendly_name="Jason")],
+        )
+        validation = mcp_server.MCPTokenValidation(mcp_server.MCPTokenStatus.VALID, jwt_context)
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="jwt"),
+        ):
+            with patch.object(mcp_server, "validate_bearer_token", return_value=validation):
+                with patch.object(
+                    mcp_server,
+                    "list_agent_users",
+                    return_value=users_payload,
+                ) as data_access:
+                    result = anyio.run(
+                        lambda: self._exercise_single_tool_call(
+                            "list_users",
+                            {},
+                            headers={"Authorization": "Bearer valid.jwt.token"},
+                        )
+                    )
+
+        self.assertFalse(result.isError)
+        self.assertEqual(result.structuredContent["items"][0]["username"], "jmnovak")
+        data_access.assert_called_once_with(username=None, friendly_name=None, limit=200)
 
     def test_mcp_jwt_or_static_falls_back_to_static_key(self):
         app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)
@@ -717,8 +774,8 @@ class MCPServerTests(unittest.TestCase):
         ):
             result = app._authenticate_request(headers=headers, settings=settings)
 
-        self.assertIsNotNone(result.response)
-        self.assertEqual(result.response.status_code, 401)
+        self.assertIsNone(result.response)
+        self.assertIsNone(result.context)
 
     def test_enrich_auth_context_maps_trusted_email_header(self):
         app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)
