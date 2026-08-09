@@ -192,6 +192,41 @@ class MCPServerTests(unittest.TestCase):
                         await session.initialize()
                         return await session.call_tool(name, arguments)
 
+    async def _raw_unauthenticated_tools_list(self):
+        headers = {"Accept": "application/json, text/event-stream"}
+        initialized_payload = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }
+        list_payload = {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "tools/list",
+            "params": {},
+        }
+        async with mcp_server.mcp_runtime.lifespan():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.http_app),
+                base_url="http://testserver",
+                follow_redirects=False,
+            ) as client:
+                initialize_response = await client.post(
+                    "/mcp",
+                    json=INITIALIZE_PAYLOAD,
+                    headers=headers,
+                )
+                initialized_response = await client.post(
+                    "/mcp",
+                    json=initialized_payload,
+                    headers=headers,
+                )
+                tools_response = await client.post(
+                    "/mcp",
+                    json=list_payload,
+                    headers=headers,
+                )
+        return initialize_response, initialized_response, tools_response
+
     def test_mcp_protocol_lists_tools_and_calls_each_read_only_tool(self):
         users_payload = AgentUsersResponse(
             count=1,
@@ -343,10 +378,11 @@ class MCPServerTests(unittest.TestCase):
             self.assertFalse(tool.annotations.destructiveHint, tool.name)
             self.assertTrue(tool.annotations.idempotentHint, tool.name)
             self.assertEqual(
-                tool.meta["securitySchemes"],
+                tool.securitySchemes,
                 [{"type": "oauth2", "scopes": ["plexintel.read"]}],
                 tool.name,
             )
+            self.assertFalse(tool.meta and "securitySchemes" in tool.meta, tool.name)
         self.assertEqual(results["users"].structuredContent["items"][0]["username"], "jmnovak")
         self.assertEqual(results["recommendations"].structuredContent["items"][0]["title"], "Arrival")
         mock_recommendations.assert_called_once_with(
@@ -558,11 +594,48 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual({tool.name for tool in tools_result.tools}, expected_tools)
         for tool in tools_result.tools:
             self.assertEqual(
-                tool.meta["securitySchemes"],
+                tool.securitySchemes,
                 [{"type": "oauth2", "scopes": ["plexintel.read"]}],
                 tool.name,
             )
-            self.assertNotIn("noauth", str(tool.meta).lower(), tool.name)
+            self.assertNotIn("noauth", str(tool.securitySchemes).lower(), tool.name)
+
+    def test_raw_tools_list_serializes_oauth_security_schemes_at_top_level(self):
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
+        ):
+            initialize_response, initialized_response, tools_response = anyio.run(
+                self._raw_unauthenticated_tools_list
+            )
+
+        self.assertEqual(initialize_response.status_code, 200)
+        self.assertIn(initialized_response.status_code, (200, 202))
+        self.assertEqual(tools_response.status_code, 200)
+        tools = tools_response.json()["result"]["tools"]
+        self.assertEqual(
+            {tool["name"] for tool in tools},
+            {
+                "list_users",
+                "get_recommendations",
+                "get_recommendation_score",
+                "search_library",
+                "get_library_item",
+                "get_poster_image",
+                "get_poster_gallery",
+                "get_recent_library_additions",
+                "get_watch_history",
+            },
+        )
+        for tool in tools:
+            self.assertEqual(
+                tool["securitySchemes"],
+                [{"type": "oauth2", "scopes": ["plexintel.read"]}],
+                tool["name"],
+            )
+            self.assertNotIn("noauth", str(tool["securitySchemes"]).lower(), tool["name"])
+            self.assertNotIn("securitySchemes", tool.get("_meta") or {}, tool["name"])
 
     def test_unauthenticated_calls_to_every_tool_return_native_oauth_error_without_data_access(self):
         protected_functions = (

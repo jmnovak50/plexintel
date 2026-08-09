@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from mcp.types import CallToolResult, Icon, TextContent, Tool as MCPTool, ToolAnnotations
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -185,6 +186,61 @@ def _mcp_auth_required_result() -> CallToolResult:
 
 
 class PlexIntelFastMCP(FastMCP):
+    """FastMCP with support for ChatGPT's top-level tool security extension.
+
+    MCP SDK 1.27 does not expose ``securitySchemes`` through ``FastMCP.tool``,
+    but its protocol ``Tool`` model intentionally permits extension fields.
+    Keep registration and response serialization inside the SDK while promoting
+    the registered schemes onto that protocol model.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._tool_security_schemes: dict[str, list[dict[str, Any]]] = {}
+
+    def tool(
+        self,
+        name: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        annotations: ToolAnnotations | None = None,
+        icons: list[Icon] | None = None,
+        meta: dict[str, Any] | None = None,
+        structured_output: bool | None = None,
+        *,
+        security_schemes: list[dict[str, Any]] | None = None,
+    ) -> Callable[[Any], Any]:
+        register = super().tool(
+            name=name,
+            title=title,
+            description=description,
+            annotations=annotations,
+            icons=icons,
+            meta=meta,
+            structured_output=structured_output,
+        )
+
+        def decorator(fn: Any) -> Any:
+            registered = register(fn)
+            if security_schemes is not None:
+                tool_name = name or fn.__name__
+                self._tool_security_schemes[tool_name] = [dict(scheme) for scheme in security_schemes]
+            return registered
+
+        return decorator
+
+    async def list_tools(self) -> list[MCPTool]:
+        tools = await super().list_tools()
+        return [
+            tool.model_copy(
+                update={"securitySchemes": self._tool_security_schemes[tool.name]},
+                deep=True,
+            )
+            if tool.name in self._tool_security_schemes
+            else tool
+            for tool in tools
+        ]
+
     async def call_tool(self, name: str, arguments: dict[str, Any]):
         context = get_current_mcp_auth_context()
         if context is None or (context.auth_method == "jwt" and not context.plex_username):
@@ -617,19 +673,15 @@ def _build_mcp_server() -> FastMCP:
         openWorldHint=False,
     )
 
-    def oauth_tool_meta() -> dict[str, Any]:
-        return {
-            "securitySchemes": [
-                {"type": "oauth2", "scopes": list(oauth_settings.required_scopes)}
-            ]
-        }
+    def oauth_tool_security_schemes() -> list[dict[str, Any]]:
+        return [{"type": "oauth2", "scopes": list(oauth_settings.required_scopes)}]
 
     @mcp.tool(
         name="list_users",
         description="List PlexIntel users by username or friendly name.",
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_list_users(
         username: Optional[str] = None,
@@ -651,7 +703,7 @@ def _build_mcp_server() -> FastMCP:
         ),
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_recommendations(
         user: Optional[str] = None,
@@ -682,7 +734,7 @@ def _build_mcp_server() -> FastMCP:
         ),
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_recommendation_score(
         user: Optional[str] = None,
@@ -700,7 +752,7 @@ def _build_mcp_server() -> FastMCP:
         ),
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_search_library(
         q: str,
@@ -725,7 +777,7 @@ def _build_mcp_server() -> FastMCP:
         ),
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_library_item(rating_key: int) -> LibraryItem:
         return get_agent_library_item(rating_key=rating_key)
@@ -738,7 +790,7 @@ def _build_mcp_server() -> FastMCP:
             "The final assistant response must paste the returned tool text exactly."
         ),
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_poster_image(rating_key: int) -> CallToolResult:
         return build_poster_image_result(rating_key)
@@ -752,7 +804,7 @@ def _build_mcp_server() -> FastMCP:
             "response must paste the returned tool text exactly."
         ),
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_poster_gallery(
         rating_keys: Optional[list[int]] = None,
@@ -771,7 +823,7 @@ def _build_mcp_server() -> FastMCP:
         ),
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_recent_library_additions(
         media_type: Optional[str] = None,
@@ -788,7 +840,7 @@ def _build_mcp_server() -> FastMCP:
         ),
         structured_output=True,
         annotations=tool_annotations,
-        meta=oauth_tool_meta(),
+        security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_watch_history(
         user: Optional[str] = None,
