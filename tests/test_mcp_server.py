@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import anyio
+import base64
 import httpx
 import json
+import logging
 import time
 import unittest
 from io import BytesIO
@@ -57,6 +59,12 @@ RECENT_ADDITIONS_PAYLOAD = {
 def _png_bytes() -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (12, 18), color=(32, 64, 128)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _jpeg_bytes(*, size: tuple[int, int] = (12, 18)) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", size, color=(32, 64, 128)).save(buffer, format="JPEG")
     return buffer.getvalue()
 
 
@@ -132,6 +140,19 @@ class MCPServerTests(unittest.TestCase):
                                 ]
                             },
                         )
+                        native_poster_result = await session.call_tool(
+                            "get_poster_image_native",
+                            {"rating_key": 42},
+                        )
+                        native_gallery_result = await session.call_tool(
+                            "get_poster_gallery_native",
+                            {
+                                "items": [
+                                    {"rating_key": 42, "title": "Blade Runner 2049"},
+                                    {"rating_key": 88, "title": "Black Bag"},
+                                ]
+                            },
+                        )
                         recent_result = await session.call_tool(
                             "get_recent_library_additions",
                             {"media_type": "movie", "days": 7, "limit": 5},
@@ -151,6 +172,8 @@ class MCPServerTests(unittest.TestCase):
             "item": item_result,
             "poster": poster_result,
             "gallery": gallery_result,
+            "native_poster": native_poster_result,
+            "native_gallery": native_gallery_result,
             "recent": recent_result,
             "history": history_result,
         }
@@ -164,6 +187,8 @@ class MCPServerTests(unittest.TestCase):
             "get_library_item": {"rating_key": 42},
             "get_poster_image": {"rating_key": 42},
             "get_poster_gallery": {"rating_keys": [42]},
+            "get_poster_image_native": {"rating_key": 42},
+            "get_poster_gallery_native": {"rating_keys": [42]},
             "get_recent_library_additions": {},
             "get_watch_history": {},
         }
@@ -238,6 +263,29 @@ class MCPServerTests(unittest.TestCase):
                     headers=headers,
                 )
         return initialize_response, initialized_response, tools_response
+
+    async def _raw_authenticated_tool_call(self, name: str, arguments: dict):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "native-poster",
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+        async with mcp_server.mcp_runtime.lifespan():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.http_app),
+                base_url="http://testserver",
+                follow_redirects=False,
+            ) as client:
+                return await client.post(
+                    "/mcp",
+                    json=payload,
+                    headers={
+                        "Authorization": "Bearer test-mcp-token",
+                        "Accept": "application/json, text/event-stream",
+                        "MCP-Protocol-Version": "2025-11-25",
+                    },
+                )
 
     async def _post_mcp_payload_variants(self, payload):
         encoded = json.dumps(payload).encode("utf-8")
@@ -414,6 +462,8 @@ class MCPServerTests(unittest.TestCase):
                 "get_library_item",
                 "get_poster_image",
                 "get_poster_gallery",
+                "get_poster_image_native",
+                "get_poster_gallery_native",
                 "get_recent_library_additions",
                 "get_watch_history",
             },
@@ -457,6 +507,19 @@ class MCPServerTests(unittest.TestCase):
         )
         self.assertIn("### Black Bag", results["gallery"].content[0].text)
         self.assertIn("https://plexintel.example.com/api/posters/88?w=180", results["gallery"].content[0].text)
+        self.assertEqual(
+            [item.type for item in results["native_poster"].content],
+            ["text", "image"],
+        )
+        self.assertEqual(results["native_poster"].content[1].mimeType, "image/png")
+        self.assertEqual(
+            base64.b64decode(results["native_poster"].content[1].data, validate=True),
+            _png_bytes(),
+        )
+        self.assertEqual(
+            [item.type for item in results["native_gallery"].content],
+            ["text", "image", "text", "image"],
+        )
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["recent"].structuredContent["items"][0]["duration_formatted"], "00:00:00")
@@ -559,6 +622,182 @@ class MCPServerTests(unittest.TestCase):
         self.assertFalse(result.structuredContent["found"])
         self.assertEqual(result.structuredContent["error"], "Poster proxy is not configured.")
         self.assertIn("Unable to fetch poster", result.content[0].text)
+
+    def test_native_single_poster_serializes_real_image_content_through_transport(self):
+        poster_bytes = _jpeg_bytes()
+        library_item = LibraryItem(
+            rating_key=42,
+            title="Blade Runner 2049",
+            media_type="movie",
+            year=2017,
+        )
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(),
+        ):
+            with patch.object(mcp_server, "get_agent_library_item", return_value=library_item):
+                with patch.object(
+                    mcp_server,
+                    "fetch_poster_image_for_rating_key",
+                    return_value={"content": poster_bytes, "content_type": "image/jpeg"},
+                ):
+                    response = anyio.run(
+                        lambda: self._raw_authenticated_tool_call(
+                            "get_poster_image_native",
+                            {"rating_key": 42},
+                        )
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("location", response.headers)
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(len(result["content"]), 2)
+        self.assertEqual(
+            result["content"][0],
+            {"type": "text", "text": "Poster for Blade Runner 2049 (2017)."},
+        )
+        image = result["content"][1]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(image["mimeType"], "image/jpeg")
+        self.assertFalse(image["data"].startswith("data:"))
+        decoded = base64.b64decode(image["data"], validate=True)
+        self.assertEqual(decoded, poster_bytes)
+        self.assertTrue(decoded.startswith(b"\xff\xd8\xff"))
+        self.assertNotIn("data", result["structuredContent"])
+
+    def test_native_gallery_preserves_label_image_order_and_continues_after_missing(self):
+        first_bytes = _jpeg_bytes(size=(12, 18))
+        third_bytes = _png_bytes()
+        items_by_key = {
+            11: LibraryItem(
+                rating_key=11,
+                title="First",
+                media_type="movie",
+                year=2001,
+            ),
+            22: LibraryItem(
+                rating_key=22,
+                title="Missing",
+                media_type="movie",
+                year=2002,
+            ),
+            33: LibraryItem(
+                rating_key=33,
+                title="Third",
+                media_type="show",
+                year=2003,
+            ),
+        }
+        posters_by_key = {
+            11: {"content": first_bytes, "content_type": "image/jpeg"},
+            22: None,
+            33: {"content": third_bytes, "content_type": "image/png"},
+        }
+        with patch.object(
+            mcp_server,
+            "get_agent_library_item",
+            side_effect=lambda *, rating_key: items_by_key[rating_key],
+        ):
+            with patch.object(
+                mcp_server,
+                "fetch_poster_image_for_rating_key",
+                side_effect=lambda rating_key: posters_by_key[rating_key],
+            ):
+                result = mcp_server.build_poster_gallery_native_result(
+                    rating_keys=[11, 22, 33]
+                )
+
+        self.assertFalse(result.isError)
+        self.assertEqual(
+            [item.type for item in result.content],
+            ["text", "image", "text", "text", "image"],
+        )
+        self.assertEqual(result.content[0].text, "Poster for First (2001).")
+        self.assertEqual(base64.b64decode(result.content[1].data), first_bytes)
+        self.assertEqual(result.content[2].text, "Poster unavailable for Missing (2002).")
+        self.assertEqual(result.content[3].text, "Poster for Third (2003).")
+        self.assertEqual(base64.b64decode(result.content[4].data), third_bytes)
+        self.assertEqual(
+            [item["rating_key"] for item in result.structuredContent["items"]],
+            [11, 22, 33],
+        )
+        self.assertEqual(
+            [item["found"] for item in result.structuredContent["items"]],
+            [True, False, True],
+        )
+
+    def test_native_poster_rejects_invalid_identifiers_and_gallery_limit_before_fetch(self):
+        with patch.object(mcp_server, "fetch_poster_image_for_rating_key") as fetch_poster:
+            invalid_single = mcp_server.build_poster_image_native_result(-1)
+            invalid_gallery = mcp_server.build_poster_gallery_native_result(
+                items=[{"rating_key": "not-an-integer"}]
+            )
+            oversized_gallery = mcp_server.build_poster_gallery_native_result(
+                rating_keys=list(range(1, mcp_server.NATIVE_POSTER_GALLERY_MAX_ITEMS + 2))
+            )
+
+        self.assertTrue(invalid_single.isError)
+        self.assertIn("positive integer", invalid_single.content[0].text)
+        self.assertTrue(invalid_gallery.isError)
+        self.assertIn("positive integer", invalid_gallery.content[0].text)
+        self.assertTrue(oversized_gallery.isError)
+        self.assertIn("limited to 8", oversized_gallery.content[0].text)
+        fetch_poster.assert_not_called()
+
+    def test_native_single_poster_enforces_resized_image_limit(self):
+        library_item = LibraryItem(rating_key=42, title="From", media_type="movie")
+        with patch.object(mcp_server, "get_agent_library_item", return_value=library_item):
+            with patch.object(
+                mcp_server,
+                "fetch_poster_image_for_rating_key",
+                return_value={"content": _jpeg_bytes(), "content_type": "image/jpeg"},
+            ):
+                with patch.object(
+                    mcp_server,
+                    "resize_poster_image_to_width",
+                    return_value={
+                        "content": b"x" * (mcp_server.NATIVE_POSTER_MAX_BYTES + 1),
+                        "content_type": "image/jpeg",
+                    },
+                ):
+                    result = mcp_server.build_poster_image_native_result(42)
+
+        self.assertTrue(result.isError)
+        self.assertIn(str(mcp_server.NATIVE_POSTER_MAX_BYTES), result.content[0].text)
+        self.assertNotIn("x" * 100, str(result.model_dump()))
+
+    def test_native_poster_payload_is_not_logged(self):
+        poster_bytes = _jpeg_bytes()
+        encoded = base64.b64encode(poster_bytes).decode("ascii")
+        records: list[str] = []
+
+        class RecordingHandler(logging.Handler):
+            def emit(self, record):
+                records.append(self.format(record))
+
+        handler = RecordingHandler()
+        mcp_server.logger.addHandler(handler)
+        try:
+            with patch.object(
+                mcp_server,
+                "get_agent_library_item",
+                return_value=LibraryItem(rating_key=42, title="From", media_type="movie"),
+            ):
+                with patch.object(
+                    mcp_server,
+                    "fetch_poster_image_for_rating_key",
+                    return_value={"content": poster_bytes, "content_type": "image/jpeg"},
+                ):
+                    result = mcp_server.build_poster_image_native_result(42)
+        finally:
+            mcp_server.logger.removeHandler(handler)
+
+        self.assertFalse(result.isError)
+        logged = "\n".join(records)
+        self.assertNotIn(encoded, logged)
+        self.assertNotIn(repr(poster_bytes), logged)
 
     def test_mcp_returns_404_when_disabled(self):
         with patch.object(
@@ -790,6 +1029,8 @@ class MCPServerTests(unittest.TestCase):
             "get_library_item",
             "get_poster_image",
             "get_poster_gallery",
+            "get_poster_image_native",
+            "get_poster_gallery_native",
             "get_recent_library_additions",
             "get_watch_history",
         }
@@ -826,6 +1067,8 @@ class MCPServerTests(unittest.TestCase):
                 "get_library_item",
                 "get_poster_image",
                 "get_poster_gallery",
+                "get_poster_image_native",
+                "get_poster_gallery_native",
                 "get_recent_library_additions",
                 "get_watch_history",
             },
@@ -839,6 +1082,14 @@ class MCPServerTests(unittest.TestCase):
             self.assertNotIn("noauth", str(tool["securitySchemes"]).lower(), tool["name"])
             self.assertNotIn("securitySchemes", tool.get("_meta") or {}, tool["name"])
 
+        tools_by_name = {tool["name"]: tool for tool in tools}
+        single_schema = tools_by_name["get_poster_image_native"]["inputSchema"]
+        self.assertEqual(single_schema["required"], ["rating_key"])
+        self.assertEqual(single_schema["properties"]["rating_key"]["type"], "integer")
+        gallery_schema = tools_by_name["get_poster_gallery_native"]["inputSchema"]
+        self.assertEqual(set(gallery_schema["properties"]), {"rating_keys", "items"})
+        self.assertNotIn("required", gallery_schema)
+
     def test_unauthenticated_calls_to_every_tool_return_native_oauth_error_without_data_access(self):
         protected_functions = (
             "list_agent_users",
@@ -848,6 +1099,8 @@ class MCPServerTests(unittest.TestCase):
             "get_agent_library_item",
             "build_poster_image_result",
             "build_poster_gallery_result",
+            "build_poster_image_native_result",
+            "build_poster_gallery_native_result",
             "get_recent_library_additions",
             "get_agent_watch_history",
         )
@@ -866,7 +1119,7 @@ class MCPServerTests(unittest.TestCase):
                 lambda: self._exercise_unauthenticated_protocol(call_tools=True)
             )
 
-        self.assertEqual(len(call_results), 9)
+        self.assertEqual(len(call_results), 11)
         for tool_name, result in call_results.items():
             self.assertTrue(result.isError, tool_name)
             self.assertEqual(result.content[0].text, "Authentication required.", tool_name)

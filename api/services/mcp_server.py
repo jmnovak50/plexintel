@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hmac
 import logging
 import time
@@ -7,11 +8,13 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, Icon, TextContent, Tool as MCPTool, ToolAnnotations
+from mcp.types import CallToolResult, Icon, ImageContent, TextContent, Tool as MCPTool, ToolAnnotations
+from PIL import Image
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -43,7 +46,11 @@ from api.services.mcp_auth import (
     resolve_context_from_email,
     validate_bearer_token,
 )
-from api.services.poster_service import build_public_poster_url, fetch_poster_image_for_rating_key
+from api.services.poster_service import (
+    build_public_poster_url,
+    fetch_poster_image_for_rating_key,
+    resize_poster_image_to_width,
+)
 from api.services.poster_markup_service import (
     build_poster_gallery_payload,
     build_poster_markup_payload as _build_poster_markup_payload,
@@ -53,6 +60,13 @@ from api.services.poster_markup_service import (
 logger = logging.getLogger(__name__)
 
 mcp_auth_context: ContextVar[MCPAuthContext | None] = ContextVar("mcp_auth_context", default=None)
+
+NATIVE_POSTER_WIDTH = 180
+NATIVE_POSTER_MAX_BYTES = 512 * 1024
+NATIVE_POSTER_GALLERY_MAX_ITEMS = 8
+NATIVE_POSTER_MIME_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/gif", "image/webp"}
+)
 
 
 POSTER_RESPONSE_INSTRUCTIONS = (
@@ -396,6 +410,229 @@ def build_poster_gallery_result(
 
     return CallToolResult(
         content=[TextContent(type="text", text=gallery_payload["markdown"])],
+    )
+
+
+class NativePosterError(ValueError):
+    pass
+
+
+def _native_poster_error(message: str) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        isError=True,
+    )
+
+
+def _validate_native_rating_key(rating_key: Any) -> int:
+    if isinstance(rating_key, bool) or not isinstance(rating_key, int) or rating_key <= 0:
+        raise NativePosterError("rating_key must be a positive integer.")
+    return rating_key
+
+
+def _native_poster_label(
+    rating_key: int,
+    *,
+    title: str | None,
+    year: int | None,
+) -> str:
+    label = (title or "").strip() or f"rating_key {rating_key}"
+    if year is not None:
+        label = f"{label} ({year})"
+    return label
+
+
+def _detect_native_image_mime(content: bytes) -> str:
+    try:
+        with Image.open(BytesIO(content)) as image:
+            detected_mime = Image.MIME.get(image.format or "")
+            image.verify()
+    except Exception as exc:
+        raise NativePosterError("The poster response did not contain a valid image.") from exc
+
+    if detected_mime not in NATIVE_POSTER_MIME_TYPES:
+        raise NativePosterError(
+            f"The poster image type {detected_mime or 'unknown'} is not supported."
+        )
+    return detected_mime
+
+
+def _fetch_native_poster(rating_key: int) -> tuple[bytes, str] | None:
+    payload = fetch_poster_image_for_rating_key(rating_key)
+    if not payload:
+        return None
+
+    resized = resize_poster_image_to_width(
+        payload["content"],
+        payload.get("content_type"),
+        width=NATIVE_POSTER_WIDTH,
+    )
+    content = resized["content"]
+    if len(content) > NATIVE_POSTER_MAX_BYTES:
+        raise NativePosterError(
+            f"The resized poster exceeds the {NATIVE_POSTER_MAX_BYTES}-byte native image limit."
+        )
+    return content, _detect_native_image_mime(content)
+
+
+def _native_image_content(content: bytes, mime_type: str) -> ImageContent:
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(content).decode("ascii"),
+        mimeType=mime_type,
+    )
+
+
+def build_poster_image_native_result(rating_key: int) -> CallToolResult:
+    try:
+        rating_key = _validate_native_rating_key(rating_key)
+    except NativePosterError as exc:
+        return _native_poster_error(str(exc))
+
+    title = None
+    media_type = None
+    year = None
+    try:
+        item = get_agent_library_item(rating_key=rating_key)
+        title = item.title
+        media_type = item.media_type
+        year = item.year
+    except Exception:
+        logger.info(
+            "MCP native poster metadata lookup failed for rating_key=%s",
+            rating_key,
+            exc_info=True,
+        )
+
+    label = _native_poster_label(rating_key, title=title, year=year)
+    metadata = {
+        "rating_key": rating_key,
+        "title": title,
+        "year": year,
+        "media_type": media_type,
+        "found": False,
+    }
+    try:
+        poster = _fetch_native_poster(rating_key)
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, NativePosterError) else "Unable to fetch the poster."
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Poster unavailable for {label}: {message}")],
+            structuredContent={**metadata, "error": message},
+            isError=True,
+        )
+
+    if poster is None:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Poster unavailable for {label}.")],
+            structuredContent=metadata,
+        )
+
+    content, mime_type = poster
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=f"Poster for {label}."),
+            _native_image_content(content, mime_type),
+        ],
+        structuredContent={**metadata, "found": True},
+    )
+
+
+def build_poster_gallery_native_result(
+    rating_keys: Optional[list[int]] = None,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> CallToolResult:
+    requested_count = len(rating_keys or []) + len(items or [])
+    if requested_count > NATIVE_POSTER_GALLERY_MAX_ITEMS:
+        return _native_poster_error(
+            "Native poster galleries are limited to "
+            f"{NATIVE_POSTER_GALLERY_MAX_ITEMS} requested items."
+        )
+
+    try:
+        for rating_key in rating_keys or []:
+            _validate_native_rating_key(rating_key)
+        for item in items or []:
+            if not isinstance(item, dict):
+                raise NativePosterError("Each gallery item must be an object with a rating_key.")
+            rating_key = item.get("rating_key", item.get("ratingKey"))
+            _validate_native_rating_key(rating_key)
+    except NativePosterError as exc:
+        return _native_poster_error(str(exc))
+
+    entries = coerce_gallery_entries(
+        rating_keys=rating_keys,
+        items=items,
+        max_items=NATIVE_POSTER_GALLERY_MAX_ITEMS + 1,
+    )
+    if not entries:
+        return _native_poster_error("Provide at least one valid rating_key.")
+    if len(entries) > NATIVE_POSTER_GALLERY_MAX_ITEMS:
+        return _native_poster_error(
+            f"Native poster galleries are limited to {NATIVE_POSTER_GALLERY_MAX_ITEMS} items."
+        )
+    try:
+        for entry in entries:
+            entry["rating_key"] = _validate_native_rating_key(entry["rating_key"])
+    except NativePosterError as exc:
+        return _native_poster_error(str(exc))
+
+    result_content: list[TextContent | ImageContent] = []
+    result_items: list[dict[str, Any]] = []
+    for entry in entries:
+        rating_key = entry["rating_key"]
+        title = entry.get("title")
+        media_type = entry.get("media_type")
+        year = None
+        try:
+            item = get_agent_library_item(rating_key=rating_key)
+            title = title or item.title
+            media_type = media_type or item.media_type
+            year = item.year
+        except Exception:
+            logger.info(
+                "MCP native gallery metadata lookup failed for rating_key=%s",
+                rating_key,
+                exc_info=True,
+            )
+
+        label = _native_poster_label(rating_key, title=title, year=year)
+        item_metadata = {
+            "rating_key": rating_key,
+            "title": title,
+            "year": year,
+            "media_type": media_type,
+            "found": False,
+        }
+        try:
+            poster = _fetch_native_poster(rating_key)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, NativePosterError) else "Unable to fetch the poster."
+            result_content.append(
+                TextContent(type="text", text=f"Poster unavailable for {label}: {message}")
+            )
+            result_items.append({**item_metadata, "error": message})
+            continue
+
+        if poster is None:
+            result_content.append(
+                TextContent(type="text", text=f"Poster unavailable for {label}.")
+            )
+            result_items.append(item_metadata)
+            continue
+
+        content, mime_type = poster
+        result_content.extend(
+            [
+                TextContent(type="text", text=f"Poster for {label}."),
+                _native_image_content(content, mime_type),
+            ]
+        )
+        result_items.append({**item_metadata, "found": True})
+
+    return CallToolResult(
+        content=result_content,
+        structuredContent={"count": len(result_items), "items": result_items},
     )
 
 
@@ -778,6 +1015,34 @@ def _build_mcp_server() -> FastMCP:
         items: Optional[list[dict[str, Any]]] = None,
     ) -> CallToolResult:
         return build_poster_gallery_result(rating_keys=rating_keys, items=items)
+
+    @mcp.tool(
+        name="get_poster_image_native",
+        description=(
+            "Returns the selected poster as native MCP image content for direct display "
+            "alongside the library-item metadata."
+        ),
+        annotations=tool_annotations,
+        security_schemes=oauth_tool_security_schemes(),
+    )
+    def mcp_get_poster_image_native(rating_key: int) -> CallToolResult:
+        return build_poster_image_native_result(rating_key)
+
+    @mcp.tool(
+        name="get_poster_gallery_native",
+        description=(
+            "Returns native MCP poster images in library-item order, with a text label "
+            "immediately before each corresponding image. Pass either rating_keys or items "
+            "containing rating_key and optional title."
+        ),
+        annotations=tool_annotations,
+        security_schemes=oauth_tool_security_schemes(),
+    )
+    def mcp_get_poster_gallery_native(
+        rating_keys: Optional[list[int]] = None,
+        items: Optional[list[dict[str, Any]]] = None,
+    ) -> CallToolResult:
+        return build_poster_gallery_native_result(rating_keys=rating_keys, items=items)
 
     @mcp.tool(
         name="get_recent_library_additions",
