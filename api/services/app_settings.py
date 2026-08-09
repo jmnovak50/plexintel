@@ -1270,10 +1270,15 @@ def _strip_inline_annotation(value: str) -> str:
     return cleaned
 
 
-def _normalize_url(value: str) -> str:
+def _validate_url(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise SettingsValidationError("must be a valid http or https URL")
+    return value
+
+
+def _normalize_url(value: str) -> str:
+    _validate_url(value)
     return value.rstrip("/")
 
 
@@ -1328,7 +1333,9 @@ def parse_value(definition: SettingDefinition, value: Any) -> Any:
         parsed_value = _strip_inline_annotation(value)
         if not parsed_value:
             return None
-        if definition.key.endswith("_url") or definition.key in {
+        if definition.key == "mcp.oauth.issuer_url":
+            parsed_value = _validate_url(parsed_value)
+        elif definition.key.endswith("_url") or definition.key in {
             "tautulli.api_url",
             "tautulli.base_url",
             "ollama.host",

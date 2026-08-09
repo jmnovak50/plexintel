@@ -30,10 +30,10 @@ class MCPProtectedResourceMetadataTests(unittest.TestCase):
 
     def test_both_metadata_routes_return_exact_oauth_document_not_spa(self):
         settings = MCPOAuthSettings(
-            issuer_url="https://auth.example/application/o/chatgpt",
-            audience="https://plexintel.example/mcp/",
+            issuer_url="https://auth.kabolly.com/application/o/plexintel-chatgpt/",
+            audience="https://plexintel.kabolly.com/mcp",
             email_claim="email",
-            resource_url="https://plexintel.example/mcp/",
+            resource_url="https://plexintel.kabolly.com/mcp",
             required_scopes=("plexintel.read",),
         )
         with patch.object(mcp_oauth_metadata, "get_mcp_oauth_settings", return_value=settings):
@@ -47,8 +47,10 @@ class MCPProtectedResourceMetadataTests(unittest.TestCase):
             self.assertEqual(
                 response.json(),
                 {
-                    "resource": "https://plexintel.example/mcp/",
-                    "authorization_servers": ["https://auth.example/application/o/chatgpt"],
+                    "resource": "https://plexintel.kabolly.com/mcp",
+                    "authorization_servers": [
+                        "https://auth.kabolly.com/application/o/plexintel-chatgpt/"
+                    ],
                     "scopes_supported": ["plexintel.read"],
                 },
             )

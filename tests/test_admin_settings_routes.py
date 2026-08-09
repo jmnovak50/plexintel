@@ -90,6 +90,30 @@ class AdminSettingsRouteTests(unittest.TestCase):
             },
         )
 
+    def test_admin_settings_round_trips_issuer_trailing_slash(self):
+        issuer = "https://auth.kabolly.com/application/o/plexintel-chatgpt/"
+
+        def fake_save_settings(*, updates, clear_keys, updated_by):
+            self.assertEqual(updates["mcp.oauth.issuer_url"], issuer)
+
+        sections = [
+            {
+                "key": "mcp",
+                "label": "MCP",
+                "fields": [{"key": "mcp.oauth.issuer_url", "value": issuer}],
+            }
+        ]
+        with patch.object(admin_routes, "save_settings", side_effect=fake_save_settings):
+            with patch.object(admin_routes, "get_settings_payload", return_value=sections):
+                response = admin_routes.admin_save_settings(
+                    req=admin_routes.SettingsUpdateRequest(
+                        updates={"mcp.oauth.issuer_url": issuer}
+                    ),
+                    admin_user=_admin_user(),
+                )
+
+        self.assertEqual(response["sections"][0]["fields"][0]["value"], issuer)
+
     def test_admin_settings_put_rejects_validation_errors(self):
         with patch.object(admin_routes, "save_settings", side_effect=SettingsValidationError("bad value")):
             with self.assertRaises(HTTPException) as raised:

@@ -17,14 +17,14 @@ Enter these in the PlexIntel admin settings interface:
 ```text
 mcp.enabled = true
 mcp.auth_mode = jwt_or_static
-mcp.oauth.resource_url = https://plexintel.kabolly.com/mcp/
-mcp.oauth.audience = https://plexintel.kabolly.com/mcp/
+mcp.oauth.resource_url = https://plexintel.kabolly.com/mcp
+mcp.oauth.audience = https://plexintel.kabolly.com/mcp
 mcp.oauth.required_scopes = plexintel.read
-mcp.oauth.issuer_url = https://auth.kabolly.com/application/o/<dedicated-chatgpt-provider>/
+mcp.oauth.issuer_url = https://auth.kabolly.com/application/o/plexintel-chatgpt/
 mcp.oauth.email_claim = email
 ```
 
-Keep the existing `mcp.api_key` and `mcp.trusted_user_email_header = X-OpenWebUI-User-Email` for OpenWebUI. Replace `<dedicated-chatgpt-provider>` with the actual Authentik provider slug. The issuer must match the access token's normalized `iss`; the audience/resource must appear in `aud`; and `scope` (or `scp`) must contain `plexintel.read`.
+Keep the existing `mcp.api_key` and `mcp.trusted_user_email_header = X-OpenWebUI-User-Email` for OpenWebUI. The issuer must exactly match the access token's `iss`, including its trailing slash. The slashless audience/resource must appear in `aud`; and `scope` (or `scp`) must contain `plexintel.read`. The MCP HTTP endpoint remains `https://plexintel.kabolly.com/mcp/`; it is distinct from the canonical resource identifier.
 
 ## Authentik work outside this repository
 
@@ -35,7 +35,7 @@ Create a dedicated OAuth/OIDC provider and application for ChatGPT. It must:
 - allow the exact ChatGPT callback shown on the ChatGPT app-management page—copy it there rather than guessing it;
 - grant `plexintel.read` separately from identity scopes such as `openid`, `email`, and `profile`;
 - put the user's email in the configured email claim;
-- accept ChatGPT's `resource=https://plexintel.kabolly.com/mcp/` on authorization and token requests;
+- accept ChatGPT's `resource=https://plexintel.kabolly.com/mcp` on authorization and token requests;
 - copy that resource into the JWT access token's `aud` claim;
 - support a ChatGPT-compatible client registration/identification option (preconfigured client, CIMD, or DCR) and advertise compatible token endpoint authentication methods.
 
@@ -80,7 +80,7 @@ curl -i -X POST https://plexintel.kabolly.com/mcp/ \
 
 | Symptom | Check |
 |---|---|
-| Wrong issuer / `401` | JWT `iss` must match the dedicated provider issuer (a trailing-slash difference is normalized). |
+| Wrong issuer / `401` | JWT `iss` must exactly match the dedicated provider issuer, including the trailing slash. |
 | Wrong audience / `401` | JWT `aud` must contain exactly the configured audience/resource; Authentik must propagate ChatGPT's `resource`. |
 | Missing scope / `403` | Grant `plexintel.read`; identity scopes alone are insufficient. |
 | Valid token but user tools fail | JWT email is not mapped in `users.plex_email`; sync the Plex email. A trusted header cannot replace JWT identity. |

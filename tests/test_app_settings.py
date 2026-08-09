@@ -43,6 +43,49 @@ class FakeConnection:
 
 
 class AppSettingsTests(unittest.TestCase):
+    def test_mcp_oauth_issuer_preserves_trailing_slash_through_validation_and_serialization(self):
+        definition = app_settings.get_setting_definition("mcp.oauth.issuer_url")
+
+        parsed = app_settings.parse_value(
+            definition,
+            "  https://auth.kabolly.com/application/o/plexintel-chatgpt/  ",
+        )
+
+        self.assertEqual(parsed, "https://auth.kabolly.com/application/o/plexintel-chatgpt/")
+        self.assertEqual(app_settings.format_raw_value(definition, parsed), parsed)
+
+    def test_mcp_resource_normalization_and_audience_remain_slashless(self):
+        resource = app_settings.get_setting_definition("mcp.oauth.resource_url")
+        audience = app_settings.get_setting_definition("mcp.oauth.audience")
+
+        self.assertEqual(
+            app_settings.parse_value(resource, "https://plexintel.kabolly.com/mcp/"),
+            "https://plexintel.kabolly.com/mcp",
+        )
+        self.assertEqual(
+            app_settings.parse_value(audience, " https://plexintel.kabolly.com/mcp "),
+            "https://plexintel.kabolly.com/mcp",
+        )
+
+    def test_admin_save_persists_issuer_trailing_slash(self):
+        conn = FakeConnection()
+        issuer = "https://auth.kabolly.com/application/o/plexintel-chatgpt/"
+        with patch.object(app_settings, "connect_db", return_value=conn):
+            app_settings.save_settings(
+                updates={"mcp.oauth.issuer_url": issuer},
+                clear_keys=[],
+                updated_by="jason",
+            )
+
+        save_calls = [
+            call for call in conn.cursor_obj.executed
+            if "INSERT INTO public.app_settings" in call[0]
+            and call[1]
+            and call[1][0] == "mcp.oauth.issuer_url"
+        ]
+        self.assertEqual(save_calls[-1][1][1], issuer)
+        self.assertEqual(conn.commit_count, 1)
+
     def test_load_settings_env_targets_repo_dotenv(self):
         with patch.object(app_settings, "load_dotenv") as mock_load_dotenv:
             app_settings.load_settings_env()

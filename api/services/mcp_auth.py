@@ -175,7 +175,7 @@ def _decode_jwt_result(token: str, settings: MCPOAuthSettings, expected_audience
 def _issuer_matches(token_issuer: Any, configured_issuer: str | None) -> bool:
     if not configured_issuer or not isinstance(token_issuer, str):
         return False
-    return token_issuer.rstrip("/") == configured_issuer.rstrip("/")
+    return token_issuer == configured_issuer
 
 
 def resolve_context_from_email(email: str, auth_method: str) -> MCPAuthContext:
@@ -225,10 +225,7 @@ def _fetch_jwks_uri(issuer_url: str) -> str:
 
 
 def _normalize_issuer_url(value: str | None) -> str | None:
-    normalized = _normalize_optional(value)
-    if not normalized:
-        return None
-    return normalized.rstrip("/")
+    return _normalize_optional(value)
 
 
 def _normalize_optional(value: str | None) -> str | None:

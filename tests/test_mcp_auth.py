@@ -20,12 +20,12 @@ class MCPAuthTests(unittest.TestCase):
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        cls.issuer = "https://authentik.example/application/o/openwebui"
+        cls.issuer = "https://auth.kabolly.com/application/o/plexintel-chatgpt/"
         cls.oauth_settings = mcp_auth.MCPOAuthSettings(
             issuer_url=cls.issuer,
-            audience="https://plexintel.example/mcp/",
+            audience="https://plexintel.kabolly.com/mcp",
             email_claim="email",
-            resource_url="https://plexintel.example/mcp/",
+            resource_url="https://plexintel.kabolly.com/mcp",
             required_scopes=("plexintel.read",),
         )
 
@@ -39,7 +39,7 @@ class MCPAuthTests(unittest.TestCase):
             "sub": "user-1",
             "iat": now,
             "exp": now - 60 if expired else now + 3600,
-            "aud": "https://plexintel.example/mcp/",
+            "aud": "https://plexintel.kabolly.com/mcp",
             "scope": "openid email plexintel.read",
             **claims,
         }
@@ -123,7 +123,7 @@ class MCPAuthTests(unittest.TestCase):
             issuer_url=self.issuer,
             audience="openwebui-client-id",
             email_claim="email",
-            resource_url="https://plexintel.example/mcp/",
+            resource_url="https://plexintel.kabolly.com/mcp",
             required_scopes=("plexintel.read",),
         )
         token = self._encode_token({"email": "jason@sheffieldave.com", "aud": "wrong-audience"})
@@ -134,26 +134,35 @@ class MCPAuthTests(unittest.TestCase):
 
         self.assertIsNone(context)
 
-    def test_decode_jwt_accepts_issuer_with_or_without_trailing_slash(self):
+    def test_decode_jwt_accepts_exact_issuer_with_trailing_slash(self):
         settings = mcp_auth.MCPOAuthSettings(
-            issuer_url="https://authentik.example/application/o/openwebui",
-            audience="https://plexintel.example/mcp/",
+            issuer_url=self.issuer,
+            audience="https://plexintel.kabolly.com/mcp",
             email_claim="email",
-            resource_url="https://plexintel.example/mcp/",
+            resource_url="https://plexintel.kabolly.com/mcp",
             required_scopes=("plexintel.read",),
         )
-        token = self._encode_token(
-            {
-                "email": "jason@sheffieldave.com",
-                "iss": "https://authentik.example/application/o/openwebui/",
-            }
-        )
+        token = self._encode_token({"email": "jason@sheffieldave.com"})
 
         with patch.object(mcp_auth, "_get_signing_key") as mock_signing_key:
             mock_signing_key.return_value.key = self.public_pem
             claims = mcp_auth._decode_jwt(token, settings)
 
         self.assertEqual(claims["email"], "jason@sheffieldave.com")
+
+    def test_validate_bearer_token_rejects_issuer_missing_trailing_slash(self):
+        token = self._encode_token(
+            {
+                "iss": "https://auth.kabolly.com/application/o/plexintel-chatgpt",
+                "email": "jason@sheffieldave.com",
+            }
+        )
+
+        with patch.object(mcp_auth, "_get_signing_key") as mock_signing_key:
+            mock_signing_key.return_value.key = self.public_pem
+            result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.WRONG_ISSUER)
 
     def test_validate_bearer_token_reports_wrong_issuer(self):
         token = self._encode_token({"iss": "https://issuer.example/wrong", "email": "user@example.com"})
@@ -179,7 +188,7 @@ class MCPAuthTests(unittest.TestCase):
     def test_validate_bearer_token_accepts_audience_and_scp_arrays(self):
         token = self._encode_token(
             {
-                "aud": ["another-resource", "https://plexintel.example/mcp/"],
+                "aud": ["another-resource", "https://plexintel.kabolly.com/mcp"],
                 "scope": None,
                 "scp": ["openid", "plexintel.read"],
                 "email": "user@example.com",
@@ -190,6 +199,35 @@ class MCPAuthTests(unittest.TestCase):
             with patch.object(mcp_auth, "get_user_by_email", return_value=None):
                 result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
         self.assertEqual(result.status, mcp_auth.MCPTokenStatus.UNMAPPED_EMAIL)
+
+    def test_get_settings_preserves_issuer_slash_and_slashless_audience(self):
+        values = {
+            "mcp.oauth.issuer_url": "  https://auth.kabolly.com/application/o/plexintel-chatgpt/  ",
+            "mcp.oauth.audience": "https://plexintel.kabolly.com/mcp",
+            "mcp.oauth.email_claim": "email",
+            "mcp.oauth.resource_url": "https://plexintel.kabolly.com/mcp",
+            "mcp.oauth.required_scopes": "plexintel.read",
+        }
+        with patch.object(mcp_auth, "get_setting_value", side_effect=lambda key, default=None: values.get(key, default)):
+            settings = mcp_auth.get_mcp_oauth_settings()
+
+        self.assertEqual(settings.issuer_url, self.issuer)
+        self.assertEqual(settings.audience, "https://plexintel.kabolly.com/mcp")
+        self.assertEqual(settings.resource_url, "https://plexintel.kabolly.com/mcp")
+
+    def test_discovery_url_handles_trailing_issuer_slash(self):
+        with patch.object(mcp_auth.httpx, "Client") as client_class:
+            client = client_class.return_value.__enter__.return_value
+            client.get.return_value.json.return_value = {
+                "jwks_uri": "https://auth.kabolly.com/application/o/plexintel-chatgpt/jwks/"
+            }
+
+            jwks_uri = mcp_auth._fetch_jwks_uri(self.issuer)
+
+        client.get.assert_called_once_with(
+            "https://auth.kabolly.com/application/o/plexintel-chatgpt/.well-known/openid-configuration"
+        )
+        self.assertEqual(jwks_uri, "https://auth.kabolly.com/application/o/plexintel-chatgpt/jwks/")
 
 
 if __name__ == "__main__":
