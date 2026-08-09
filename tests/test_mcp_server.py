@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import anyio
 import httpx
+import json
+import time
 import unittest
 from io import BytesIO
 from datetime import datetime
@@ -38,6 +40,16 @@ INITIALIZE_PAYLOAD = {
         "protocolVersion": "2025-11-25",
         "capabilities": {},
         "clientInfo": {"name": "plexintel-tests", "version": "1.0.0"},
+    },
+}
+
+RECENT_ADDITIONS_PAYLOAD = {
+    "jsonrpc": "2.0",
+    "id": "2",
+    "method": "tools/call",
+    "params": {
+        "name": "get_recent_library_additions",
+        "arguments": {"media_type": "movie", "days": 7, "limit": 5},
     },
 }
 
@@ -226,6 +238,39 @@ class MCPServerTests(unittest.TestCase):
                     headers=headers,
                 )
         return initialize_response, initialized_response, tools_response
+
+    async def _post_mcp_payload_variants(self, payload):
+        encoded = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Authorization": "Bearer test-mcp-token",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2025-11-25",
+        }
+
+        async def streamed_body():
+            midpoint = len(encoded) // 2
+            yield encoded[:midpoint]
+            await anyio.sleep(0)
+            yield encoded[midpoint:]
+
+        results = []
+        async with mcp_server.mcp_runtime.lifespan():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.http_app),
+                base_url="http://testserver",
+                follow_redirects=False,
+            ) as client:
+                for path in ("/mcp", "/mcp/"):
+                    for streamed in (False, True):
+                        start = time.perf_counter()
+                        response = await client.post(
+                            path,
+                            content=streamed_body() if streamed else encoded,
+                            headers=headers,
+                        )
+                        results.append((path, streamed, response, time.perf_counter() - start))
+        return results
 
     def test_mcp_protocol_lists_tools_and_calls_each_read_only_tool(self):
         users_payload = AgentUsersResponse(
@@ -565,6 +610,163 @@ class MCPServerTests(unittest.TestCase):
             self.assertTrue(response.json()["result"]["serverInfo"]["name"])
             self.assertNotIn("location", response.headers)
             self.assertEqual(response.history, [])
+
+    def test_identical_buffered_and_streamed_requests_reach_mcp_on_both_paths(self):
+        recent_payload = RecentLibraryAdditionsResponse(
+            media_type="movie",
+            days=7,
+            count=1,
+            items=[
+                RecentLibraryItem(
+                    rating_key=88,
+                    title="Black Bag",
+                    media_type="movie",
+                    year=2025,
+                    duration_formatted="00:00:00",
+                )
+            ],
+        )
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
+        ):
+            initialize_results = anyio.run(
+                lambda: self._post_mcp_payload_variants(INITIALIZE_PAYLOAD)
+            )
+            with patch.object(
+                mcp_server,
+                "get_recent_library_additions",
+                return_value=recent_payload,
+            ) as data_access:
+                call_results = anyio.run(
+                    lambda: self._post_mcp_payload_variants(RECENT_ADDITIONS_PAYLOAD)
+                )
+
+        for path, streamed, response, duration in initialize_results:
+            with self.subTest(path=path, streamed=streamed, method="initialize"):
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json()["result"]["serverInfo"]["name"])
+                self.assertNotIn("location", response.headers)
+                self.assertEqual(response.history, [])
+                self.assertLess(duration, 2.0)
+
+        for path, streamed, response, duration in call_results:
+            with self.subTest(path=path, streamed=streamed, method="tools/call"):
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.json()["result"]["isError"])
+                self.assertEqual(
+                    response.json()["result"]["structuredContent"]["items"][0]["title"],
+                    "Black Bag",
+                )
+                self.assertNotIn("location", response.headers)
+                self.assertEqual(response.history, [])
+                self.assertLess(duration, 2.0)
+        self.assertEqual(data_access.call_count, 4)
+
+    def test_no_slash_alias_preserves_scope_headers_raw_path_and_receive(self):
+        captured = {}
+        receive_messages = [
+            {"type": "http.request", "body": b'{"jsonrpc":', "more_body": True},
+            {"type": "http.request", "body": b'"2.0"}', "more_body": False},
+        ]
+
+        async def downstream(scope, receive, _send):
+            captured["scope"] = scope
+            captured["receive"] = receive
+            captured["messages"] = [await receive(), await receive()]
+
+        async def exercise_alias():
+            async def receive():
+                return receive_messages.pop(0)
+
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "raw_path": b"/mcp",
+                "root_path": "",
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"accept", b"application/json, text/event-stream"),
+                    (b"authorization", b"Bearer test-secret"),
+                    (b"mcp-protocol-version", b"2025-11-25"),
+                    (b"transfer-encoding", b"chunked"),
+                ],
+            }
+            original_headers = list(scope["headers"])
+            middleware = mcp_server.MCPPathCompatibilityMiddleware(downstream)
+            with self.assertLogs(mcp_server.logger, level="INFO") as logs:
+                await middleware(scope, receive, lambda _message: None)
+            return receive, original_headers, logs.output
+
+        original_receive, original_headers, logs = anyio.run(exercise_alias)
+
+        self.assertEqual(captured["scope"]["path"], "/mcp/")
+        self.assertEqual(captured["scope"]["raw_path"], b"/mcp")
+        self.assertEqual(captured["scope"]["headers"], original_headers)
+        self.assertIs(captured["receive"], original_receive)
+        self.assertEqual(
+            captured["messages"],
+            [
+                {"type": "http.request", "body": b'{"jsonrpc":', "more_body": True},
+                {"type": "http.request", "body": b'"2.0"}', "more_body": False},
+            ],
+        )
+        self.assertIn("content_type=application/json", logs[0])
+        self.assertIn("transfer_encoding=chunked", logs[0])
+        self.assertIn("authorization_present=True", logs[0])
+        self.assertIn("no_slash_alias=True", logs[0])
+        self.assertNotIn("test-secret", logs[0])
+
+    def test_access_control_passes_original_receive_to_fastmcp_without_preconsuming_body(self):
+        captured = {"receive_calls": 0}
+
+        async def downstream(_scope, receive, send):
+            captured["receive"] = receive
+            captured["message"] = await receive()
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        class RuntimeStub:
+            @staticmethod
+            def get_asgi_app():
+                return downstream
+
+        async def exercise_access_control():
+            async def receive():
+                captured["receive_calls"] += 1
+                return {
+                    "type": "http.request",
+                    "body": b'{"jsonrpc":"2.0"}',
+                    "more_body": False,
+                }
+
+            async def send(_message):
+                return None
+
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": "/",
+                "root_path": "/mcp",
+                "headers": [(b"authorization", b"Bearer test-mcp-token")],
+                "client": ("127.0.0.1", 1234),
+            }
+            app = mcp_server.MCPAccessControlApp(RuntimeStub())
+            with patch.object(
+                mcp_server,
+                "get_mcp_runtime_settings",
+                return_value=self._enabled_settings(auth_mode="static"),
+            ):
+                await app(scope, receive, send)
+            return receive
+
+        original_receive = anyio.run(exercise_access_control)
+
+        self.assertIs(captured["receive"], original_receive)
+        self.assertEqual(captured["receive_calls"], 1)
+        self.assertEqual(captured["message"]["body"], b'{"jsonrpc":"2.0"}')
 
     def test_unauthenticated_initialize_and_tools_list_are_data_free(self):
         with patch.object(

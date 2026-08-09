@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import logging
 import time
 from collections.abc import Callable
@@ -14,7 +13,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, Icon, TextContent, Tool as MCPTool, ToolAnnotations
 from starlette.datastructures import Headers
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -401,41 +399,6 @@ def build_poster_gallery_result(
     )
 
 
-def _extract_rpc_method(body: bytes) -> str | None:
-    if not body:
-        return None
-
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-
-    if isinstance(payload, list):
-        return "batch"
-    if not isinstance(payload, dict):
-        return None
-
-    method = payload.get("method")
-    if method == "tools/call":
-        tool_name = payload.get("params", {}).get("name")
-        if tool_name:
-            return f"tools/call:{tool_name}"
-    return method
-
-
-def _build_replay_receive(body: bytes) -> Receive:
-    sent = False
-
-    async def replay_receive() -> Message:
-        nonlocal sent
-        if sent:
-            return {"type": "http.disconnect"}
-        sent = True
-        return {"type": "http.request", "body": body, "more_body": False}
-
-    return replay_receive
-
-
 def _extract_caller(scope: Scope, headers: Headers) -> str:
     forwarded_for = headers.get("x-forwarded-for")
     if forwarded_for:
@@ -476,12 +439,6 @@ class MCPAccessControlApp:
         caller = _extract_caller(scope, headers)
         rpc_method = scope.get("method", "UNKNOWN")
 
-        body = b""
-        if scope.get("method") == "POST":
-            request = Request(scope, receive)
-            body = await request.body()
-            rpc_method = _extract_rpc_method(body) or rpc_method
-
         settings = get_mcp_runtime_settings()
         auth_result = self._authenticate_request(headers=headers, settings=settings)
         auth_result = self._enrich_auth_context(headers=headers, settings=settings, auth_result=auth_result)
@@ -494,14 +451,11 @@ class MCPAccessControlApp:
                 status_code,
                 (time.perf_counter() - start) * 1000,
             )
-            await auth_result.response(scope, _build_replay_receive(body) if body else receive, send)
+            await auth_result.response(scope, receive, send)
             return
 
         auth_token = mcp_auth_context.set(auth_result.context)
         settings_token = mcp_runtime_settings_context.set(settings)
-        downstream_receive = receive
-        if body:
-            downstream_receive = _build_replay_receive(body)
 
         async def send_wrapper(message: Message) -> None:
             nonlocal status_code
@@ -510,7 +464,7 @@ class MCPAccessControlApp:
             await send(message)
 
         try:
-            await self.runtime.get_asgi_app()(scope, downstream_receive, send_wrapper)
+            await self.runtime.get_asgi_app()(scope, receive, send_wrapper)
         finally:
             mcp_runtime_settings_context.reset(settings_token)
             mcp_auth_context.reset(auth_token)
@@ -634,7 +588,7 @@ class MCPAccessControlApp:
 
 
 class MCPPathCompatibilityMiddleware:
-    """Route the canonical /mcp path through Starlette's slash-requiring ASGI mount."""
+    """Alias canonical /mcp to the slash-requiring mount without touching the request."""
 
     def __init__(self, app: ASGIApp):
         self.app = app
@@ -642,11 +596,24 @@ class MCPPathCompatibilityMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
             root_path = scope.get("root_path", "")
-            if scope.get("path") == f"{root_path}/mcp":
+            original_path = scope.get("path", "")
+            mounted_path = f"{root_path}/mcp"
+            is_no_slash_alias = original_path == mounted_path
+            if is_no_slash_alias or original_path == f"{mounted_path}/":
+                headers = Headers(scope=scope)
+                logger.info(
+                    "MCP boundary original_path=%s content_type=%s content_length=%s "
+                    "transfer_encoding=%s authorization_present=%s no_slash_alias=%s",
+                    original_path,
+                    headers.get("content-type"),
+                    headers.get("content-length"),
+                    headers.get("transfer-encoding"),
+                    "authorization" in headers,
+                    is_no_slash_alias,
+                )
+            if is_no_slash_alias:
                 scope = dict(scope)
                 scope["path"] = f"{scope['path']}/"
-                if scope.get("raw_path") == f"{root_path}/mcp".encode():
-                    scope["raw_path"] = f"{root_path}/mcp/".encode()
         await self.app(scope, receive, send)
 
 
