@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import time
@@ -10,7 +11,7 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -35,9 +36,13 @@ from api.services.agent_tool_service import (
 from api.services.app_settings import get_setting_value
 from api.services.mcp_auth import (
     MCPAuthContext,
-    authenticate_bearer_token,
+    MCPOAuthSettings,
+    MCPTokenValidation,
+    MCPTokenStatus,
+    build_oauth_challenge,
     get_mcp_oauth_settings,
     resolve_context_from_email,
+    validate_bearer_token,
 )
 from api.services.poster_service import build_public_poster_url, fetch_poster_image_for_rating_key
 from api.services.poster_markup_service import (
@@ -79,6 +84,8 @@ class MCPRuntimeSettings:
     oauth_issuer_url: str | None
     oauth_audience: str | None
     oauth_email_claim: str
+    oauth_resource_url: str | None
+    oauth_required_scopes: tuple[str, ...]
     trusted_user_email_header: str | None
 
 
@@ -103,6 +110,8 @@ def get_mcp_runtime_settings() -> MCPRuntimeSettings:
         oauth_issuer_url=oauth_settings.issuer_url,
         oauth_audience=oauth_settings.audience,
         oauth_email_claim=oauth_settings.email_claim,
+        oauth_resource_url=oauth_settings.resource_url,
+        oauth_required_scopes=oauth_settings.required_scopes,
         trusted_user_email_header=_normalize_optional_header(
             get_setting_value("mcp.trusted_user_email_header", default="X-OpenWebUI-User-Email")
         ),
@@ -372,6 +381,12 @@ class MCPAccessControlApp:
         caller = _extract_caller(scope, headers)
         rpc_method = scope.get("method", "UNKNOWN")
 
+        body = b""
+        if scope.get("method") == "POST":
+            request = Request(scope, receive)
+            body = await request.body()
+            rpc_method = _extract_rpc_method(body) or rpc_method
+
         settings = get_mcp_runtime_settings()
         auth_result = self._authenticate_request(headers=headers, settings=settings)
         auth_result = self._enrich_auth_context(headers=headers, settings=settings, auth_result=auth_result)
@@ -384,15 +399,15 @@ class MCPAccessControlApp:
                 status_code,
                 (time.perf_counter() - start) * 1000,
             )
-            await auth_result.response(scope, receive, send)
+            response = auth_result.response
+            if rpc_method and rpc_method.startswith("tools/call:") and auth_result.oauth_challenge:
+                response = self._tool_auth_error_response(body, auth_result.oauth_challenge)
+            await response(scope, _build_replay_receive(body) if body else receive, send)
             return
 
         auth_token = mcp_auth_context.set(auth_result.context)
         downstream_receive = receive
-        if scope.get("method") == "POST":
-            request = Request(scope, receive)
-            body = await request.body()
-            rpc_method = _extract_rpc_method(body) or rpc_method
+        if body:
             downstream_receive = _build_replay_receive(body)
 
         async def send_wrapper(message: Message) -> None:
@@ -417,6 +432,30 @@ class MCPAccessControlApp:
     class _AuthResult:
         response: JSONResponse | None
         context: MCPAuthContext | None
+        oauth_challenge: str | None = None
+
+    @staticmethod
+    def _tool_auth_error_response(body: bytes, challenge: str) -> JSONResponse:
+        request_id = None
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            if isinstance(payload, dict):
+                request_id = payload.get("id")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [
+                        {"type": "text", "text": "Authentication is required to use this PlexIntel tool."}
+                    ],
+                    "_meta": {"mcp/www_authenticate": [challenge]},
+                    "isError": True,
+                },
+            }
+        )
 
     def _authenticate_request(self, headers: Headers, settings: MCPRuntimeSettings) -> _AuthResult:
         if not settings.enabled:
@@ -441,11 +480,13 @@ class MCPAccessControlApp:
         if auth_mode == "static":
             return self._authenticate_static(bearer_token, settings)
         if auth_mode == "jwt_or_static":
-            jwt_result = self._authenticate_jwt(bearer_token, settings, invalid_status=403)
-            if jwt_result.response is None:
-                return jwt_result
-            if bearer_token and _looks_like_jwt(bearer_token):
-                return jwt_result
+            if bearer_token and settings.api_key and hmac.compare_digest(bearer_token, settings.api_key):
+                return self._AuthResult(
+                    response=None,
+                    context=MCPAuthContext(auth_method="static"),
+                )
+            if not bearer_token or _looks_like_jwt(bearer_token):
+                return self._authenticate_jwt(bearer_token, settings)
             return self._authenticate_static(bearer_token, settings)
 
         return self._AuthResult(
@@ -457,28 +498,63 @@ class MCPAccessControlApp:
         self,
         bearer_token: str | None,
         settings: MCPRuntimeSettings,
-        *,
-        invalid_status: int = 401,
     ) -> _AuthResult:
-        if not settings.oauth_issuer_url:
+        oauth_settings = MCPOAuthSettings(
+            issuer_url=settings.oauth_issuer_url,
+            audience=settings.oauth_audience,
+            email_claim=settings.oauth_email_claim,
+            resource_url=settings.oauth_resource_url,
+            required_scopes=settings.oauth_required_scopes,
+        )
+        if not settings.oauth_issuer_url or not settings.oauth_resource_url or not settings.oauth_required_scopes:
             return self._AuthResult(
-                response=JSONResponse({"detail": "MCP OAuth issuer is not configured"}, status_code=503),
+                response=JSONResponse({"detail": "MCP OAuth resource server is not configured"}, status_code=503),
                 context=None,
             )
+        challenge = build_oauth_challenge(oauth_settings)
         if not bearer_token:
             return self._AuthResult(
-                response=JSONResponse({"detail": "Missing MCP bearer token"}, status_code=invalid_status),
+                response=JSONResponse(
+                    {"detail": "Authentication required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": challenge},
+                ),
                 context=None,
+                oauth_challenge=challenge,
             )
 
-        oauth_settings = get_mcp_oauth_settings()
-        context = authenticate_bearer_token(bearer_token, oauth_settings)
-        if context is None:
+        validation = validate_bearer_token(bearer_token, oauth_settings)
+        if validation.status is MCPTokenStatus.CONFIGURATION_ERROR:
             return self._AuthResult(
-                response=JSONResponse({"detail": "Invalid or expired MCP bearer token"}, status_code=invalid_status),
+                response=JSONResponse({"detail": "MCP OAuth validation is unavailable"}, status_code=503),
                 context=None,
             )
-        return self._AuthResult(response=None, context=context)
+        if validation.status is MCPTokenStatus.INSUFFICIENT_SCOPE:
+            challenge = build_oauth_challenge(
+                oauth_settings,
+                error="insufficient_scope",
+                description="Required OAuth scope is missing",
+            )
+            return self._AuthResult(
+                response=JSONResponse(
+                    {"detail": "Insufficient OAuth scope"},
+                    status_code=403,
+                    headers={"WWW-Authenticate": challenge},
+                ),
+                context=None,
+                oauth_challenge=challenge,
+            )
+        if validation.status not in (MCPTokenStatus.VALID, MCPTokenStatus.UNMAPPED_EMAIL):
+            return self._AuthResult(
+                response=JSONResponse(
+                    {"detail": "Invalid or expired MCP bearer token"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": challenge},
+                ),
+                context=None,
+                oauth_challenge=challenge,
+            )
+        return self._AuthResult(response=None, context=validation.context)
 
     def _authenticate_static(self, bearer_token: str | None, settings: MCPRuntimeSettings) -> _AuthResult:
         if not settings.api_key:
@@ -486,9 +562,7 @@ class MCPAccessControlApp:
                 response=JSONResponse({"detail": "MCP server is not configured"}, status_code=503),
                 context=None,
             )
-        expected = f"Bearer {settings.api_key}"
-        authorization = f"Bearer {bearer_token}" if bearer_token else None
-        if authorization != expected:
+        if bearer_token is None or not hmac.compare_digest(bearer_token, settings.api_key):
             return self._AuthResult(
                 response=JSONResponse({"detail": "Invalid or missing MCP bearer token"}, status_code=403),
                 context=None,
@@ -505,6 +579,8 @@ class MCPAccessControlApp:
         auth_result: _AuthResult,
     ) -> _AuthResult:
         if auth_result.response is not None or auth_result.context is None:
+            return auth_result
+        if auth_result.context.auth_method == "jwt":
             return auth_result
         if auth_result.context.plex_username:
             return auth_result
@@ -542,10 +618,27 @@ def _build_mcp_server() -> FastMCP:
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
+    oauth_settings = get_mcp_oauth_settings()
+    tool_annotations = ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+
+    def oauth_tool_meta() -> dict[str, Any]:
+        return {
+            "securitySchemes": [
+                {"type": "oauth2", "scopes": list(oauth_settings.required_scopes)}
+            ]
+        }
+
     @mcp.tool(
         name="list_users",
         description="List PlexIntel users by username or friendly name.",
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_list_users(
         username: Optional[str] = None,
@@ -566,6 +659,8 @@ def _build_mcp_server() -> FastMCP:
             "when the user asks to see a poster. Omit user to scope to the authenticated user."
         ),
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_recommendations(
         user: Optional[str] = None,
@@ -595,6 +690,8 @@ def _build_mcp_server() -> FastMCP:
             "Omit user to scope to the authenticated user."
         ),
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_recommendation_score(
         user: Optional[str] = None,
@@ -611,6 +708,8 @@ def _build_mcp_server() -> FastMCP:
             "call get_poster_image with a rating_key when the user asks to see a poster."
         ),
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_search_library(
         q: str,
@@ -634,6 +733,8 @@ def _build_mcp_server() -> FastMCP:
             "the same rating_key when the user asks to see its poster."
         ),
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_library_item(rating_key: int) -> LibraryItem:
         return get_agent_library_item(rating_key=rating_key)
@@ -645,6 +746,8 @@ def _build_mcp_server() -> FastMCP:
             "Use this when the user asks to display, show, or view a movie or show poster. "
             "The final assistant response must paste the returned tool text exactly."
         ),
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_poster_image(rating_key: int) -> CallToolResult:
         return build_poster_image_result(rating_key)
@@ -657,6 +760,8 @@ def _build_mcp_server() -> FastMCP:
             "for recent additions or any response with several posters. The final assistant "
             "response must paste the returned tool text exactly."
         ),
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_poster_gallery(
         rating_keys: Optional[list[int]] = None,
@@ -674,6 +779,8 @@ def _build_mcp_server() -> FastMCP:
             "when the user asks to see a poster."
         ),
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_recent_library_additions(
         media_type: Optional[str] = None,
@@ -689,6 +796,8 @@ def _build_mcp_server() -> FastMCP:
             "Omit user to scope to the authenticated user."
         ),
         structured_output=True,
+        annotations=tool_annotations,
+        meta=oauth_tool_meta(),
     )
     def mcp_get_watch_history(
         user: Optional[str] = None,

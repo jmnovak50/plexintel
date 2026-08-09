@@ -23,8 +23,10 @@ class MCPAuthTests(unittest.TestCase):
         cls.issuer = "https://authentik.example/application/o/openwebui"
         cls.oauth_settings = mcp_auth.MCPOAuthSettings(
             issuer_url=cls.issuer,
-            audience=None,
+            audience="https://plexintel.example/mcp/",
             email_claim="email",
+            resource_url="https://plexintel.example/mcp/",
+            required_scopes=("plexintel.read",),
         )
 
     def setUp(self):
@@ -37,6 +39,8 @@ class MCPAuthTests(unittest.TestCase):
             "sub": "user-1",
             "iat": now,
             "exp": now - 60 if expired else now + 3600,
+            "aud": "https://plexintel.example/mcp/",
+            "scope": "openid email plexintel.read",
             **claims,
         }
         return jwt.encode(payload, self.private_key, algorithm="RS256")
@@ -119,6 +123,8 @@ class MCPAuthTests(unittest.TestCase):
             issuer_url=self.issuer,
             audience="openwebui-client-id",
             email_claim="email",
+            resource_url="https://plexintel.example/mcp/",
+            required_scopes=("plexintel.read",),
         )
         token = self._encode_token({"email": "jason@sheffieldave.com", "aud": "wrong-audience"})
 
@@ -131,8 +137,10 @@ class MCPAuthTests(unittest.TestCase):
     def test_decode_jwt_accepts_issuer_with_or_without_trailing_slash(self):
         settings = mcp_auth.MCPOAuthSettings(
             issuer_url="https://authentik.example/application/o/openwebui",
-            audience=None,
+            audience="https://plexintel.example/mcp/",
             email_claim="email",
+            resource_url="https://plexintel.example/mcp/",
+            required_scopes=("plexintel.read",),
         )
         token = self._encode_token(
             {
@@ -146,6 +154,42 @@ class MCPAuthTests(unittest.TestCase):
             claims = mcp_auth._decode_jwt(token, settings)
 
         self.assertEqual(claims["email"], "jason@sheffieldave.com")
+
+    def test_validate_bearer_token_reports_wrong_issuer(self):
+        token = self._encode_token({"iss": "https://issuer.example/wrong", "email": "user@example.com"})
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.WRONG_ISSUER)
+
+    def test_validate_bearer_token_reports_not_yet_valid(self):
+        token = self._encode_token({"nbf": int(time.time()) + 600, "email": "user@example.com"})
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.NOT_YET_VALID)
+
+    def test_validate_bearer_token_requires_all_scopes(self):
+        token = self._encode_token({"scope": "openid email", "email": "user@example.com"})
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.INSUFFICIENT_SCOPE)
+
+    def test_validate_bearer_token_accepts_audience_and_scp_arrays(self):
+        token = self._encode_token(
+            {
+                "aud": ["another-resource", "https://plexintel.example/mcp/"],
+                "scope": None,
+                "scp": ["openid", "plexintel.read"],
+                "email": "user@example.com",
+            }
+        )
+        with patch.object(mcp_auth, "_get_signing_key") as signing_key:
+            signing_key.return_value.key = self.public_pem
+            with patch.object(mcp_auth, "get_user_by_email", return_value=None):
+                result = mcp_auth.validate_bearer_token(token, self.oauth_settings)
+        self.assertEqual(result.status, mcp_auth.MCPTokenStatus.UNMAPPED_EMAIL)
 
 
 if __name__ == "__main__":

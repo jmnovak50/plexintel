@@ -273,6 +273,23 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         ),
     ),
     _setting(
+        "mcp.oauth.resource_url",
+        "mcp",
+        "MCP OAuth Resource URL",
+        "string",
+        env_aliases=("MCP_OAUTH_RESOURCE_URL",),
+        description="Canonical public MCP resource identifier and JWT audience, including its public path.",
+    ),
+    _setting(
+        "mcp.oauth.required_scopes",
+        "mcp",
+        "MCP OAuth Required Scopes",
+        "string",
+        default="plexintel.read",
+        env_aliases=("MCP_OAUTH_REQUIRED_SCOPES",),
+        description="Comma- or whitespace-separated OAuth application scopes required for every MCP JWT.",
+    ),
+    _setting(
         "mcp.oauth.audience",
         "mcp",
         "MCP OAuth Audience",
@@ -301,8 +318,8 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         env_aliases=("MCP_TRUSTED_USER_EMAIL_HEADER",),
         description=(
             "HTTP header carrying the authenticated user's email when Open WebUI MCP uses Bearer auth "
-            "with a template such as {\"X-OpenWebUI-User-Email\": \"{{USER_EMAIL}}\"}. Only honored after "
-            "successful static or jwt_or_static service authentication."
+            "with a template such as {\"X-OpenWebUI-User-Email\": \"{{USER_EMAIL}}\"}. Only honored for a "
+            "successfully authenticated static bearer key; JWT identity always comes from verified claims."
         ),
     ),
     _setting(
