@@ -577,6 +577,23 @@ class MCPAccessControlApp:
                 return
 
 
+class MCPPathCompatibilityMiddleware:
+    """Route the canonical /mcp path through Starlette's slash-requiring ASGI mount."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            root_path = scope.get("root_path", "")
+            if scope.get("path") == f"{root_path}/mcp":
+                scope = dict(scope)
+                scope["path"] = f"{scope['path']}/"
+                if scope.get("raw_path") == f"{root_path}/mcp".encode():
+                    scope["raw_path"] = f"{root_path}/mcp/".encode()
+        await self.app(scope, receive, send)
+
+
 def _build_mcp_server() -> FastMCP:
     server_name = get_setting_value("mcp.server_name", default="PlexIntel")
     instructions = get_setting_value("mcp.instructions")

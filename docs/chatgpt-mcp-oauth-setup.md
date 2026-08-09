@@ -4,7 +4,7 @@ PlexIntel is the OAuth resource server; Authentik remains the authorization serv
 
 ## Public endpoints
 
-- MCP Streamable HTTP: `https://plexintel.kabolly.com/mcp/`
+- Canonical MCP Streamable HTTP: `https://plexintel.kabolly.com/mcp`
 - Protected-resource metadata: `https://plexintel.kabolly.com/.well-known/oauth-protected-resource`
 - Compatibility metadata: `https://plexintel.kabolly.com/.well-known/oauth-protected-resource/mcp`
 
@@ -24,7 +24,7 @@ mcp.oauth.issuer_url = https://auth.kabolly.com/application/o/plexintel-chatgpt/
 mcp.oauth.email_claim = email
 ```
 
-Keep the existing `mcp.api_key` and `mcp.trusted_user_email_header = X-OpenWebUI-User-Email` for OpenWebUI. The issuer must exactly match the access token's `iss`, including its trailing slash. The slashless audience/resource must appear in `aud`; and `scope` (or `scp`) must contain `plexintel.read`. The MCP HTTP endpoint remains `https://plexintel.kabolly.com/mcp/`; it is distinct from the canonical resource identifier.
+Keep the existing `mcp.api_key` and `mcp.trusted_user_email_header = X-OpenWebUI-User-Email` for OpenWebUI. The issuer must exactly match the access token's `iss`, including its trailing slash. The slashless audience/resource must appear in `aud`; and `scope` (or `scp`) must contain `plexintel.read`. The canonical MCP HTTP endpoint is also slashless; `/mcp/` remains accepted for backward compatibility without redirecting.
 
 ## Authentik work outside this repository
 
@@ -44,7 +44,7 @@ The last two items must be verified against the Authentik version in production.
 ## Connect from ChatGPT Developer Mode
 
 1. In ChatGPT on the web, enable Developer mode under **Settings → Security and login**.
-2. Open app/plugin management, create a developer-mode app, and enter `https://plexintel.kabolly.com/mcp/` as the remote MCP URL.
+2. Open app/plugin management, create a developer-mode app, and enter `https://plexintel.kabolly.com/mcp` as the remote MCP URL.
 3. Select **Mixed Authentication** and the client-identification method configured in Authentik.
 4. Copy ChatGPT's displayed callback URL into Authentik's redirect-URI allowlist.
 5. Invoke a protected tool, complete Authentik login/consent when prompted, then refresh the app's tools.
@@ -59,12 +59,13 @@ ChatGPT may therefore finish initial plugin creation without opening Authentik. 
 ```bash
 curl -i https://plexintel.kabolly.com/.well-known/oauth-protected-resource
 curl -i https://plexintel.kabolly.com/.well-known/oauth-protected-resource/mcp
-curl -i -X POST https://plexintel.kabolly.com/mcp/ \
+curl -i -X POST https://plexintel.kabolly.com/mcp \
   -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
-The metadata responses must be JSON, never SPA HTML. Use a stateful MCP client for the discovery sequence so it sends `initialize`, `notifications/initialized`, and `tools/list` according to the negotiated protocol. Those discovery operations must succeed without authentication.
+The metadata responses must be JSON, never SPA HTML. The canonical `/mcp` request and backward-compatible `/mcp/` request must both reach the same MCP transport without redirecting. Use a stateful MCP client for the discovery sequence so it sends `initialize`, `notifications/initialized`, and `tools/list` according to the negotiated protocol. Those discovery operations must succeed without authentication.
 
 An unauthenticated `tools/call` must return an MCP tool error whose `_meta["mcp/www_authenticate"]` contains a challenge resembling:
 
@@ -75,7 +76,7 @@ Bearer resource_metadata="https://plexintel.kabolly.com/.well-known/oauth-protec
 With a short-lived test access token (do not save or paste it into documentation):
 
 ```bash
-curl -i -X POST https://plexintel.kabolly.com/mcp/ \
+curl -i -X POST https://plexintel.kabolly.com/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "Authorization: Bearer $PLEXINTEL_TEST_ACCESS_TOKEN" \

@@ -10,11 +10,13 @@ from fastapi.responses import HTMLResponse
 
 from api.routes import mcp_oauth_metadata
 from api.services.mcp_auth import MCPOAuthSettings
+from api.services.mcp_server import MCPPathCompatibilityMiddleware
 
 
 class MCPProtectedResourceMetadataTests(unittest.TestCase):
     def setUp(self):
         self.app = FastAPI()
+        self.app.add_middleware(MCPPathCompatibilityMiddleware)
         self.app.include_router(mcp_oauth_metadata.router)
 
         @self.app.get("/{path:path}")

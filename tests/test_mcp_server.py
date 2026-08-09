@@ -51,13 +51,14 @@ def _png_bytes() -> bytes:
 class MCPServerTests(unittest.TestCase):
     def setUp(self):
         self.http_app = FastAPI()
+        self.http_app.add_middleware(mcp_server.MCPPathCompatibilityMiddleware)
         self.http_app.mount("/mcp", mcp_server.mcp_mount_app)
 
     async def _request(self, method: str, path: str, **kwargs):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.http_app),
             base_url="http://testserver",
-            follow_redirects=True,
+            follow_redirects=False,
         ) as client:
             return await client.request(method, path, **kwargs)
 
@@ -84,7 +85,7 @@ class MCPServerTests(unittest.TestCase):
                 follow_redirects=True,
             ) as client:
                 async with streamable_http_client(
-                    "http://testserver/mcp/",
+                    "http://testserver/mcp",
                     http_client=client,
                 ) as (read, write, _get_session_id):
                     async with ClientSession(read, write) as session:
@@ -162,7 +163,7 @@ class MCPServerTests(unittest.TestCase):
                 follow_redirects=True,
             ) as client:
                 async with streamable_http_client(
-                    "http://testserver/mcp/",
+                    "http://testserver/mcp",
                     http_client=client,
                 ) as (read, write, _get_session_id):
                     async with ClientSession(read, write) as session:
@@ -498,6 +499,36 @@ class MCPServerTests(unittest.TestCase):
             response = anyio.run(lambda: self._request("POST", "/mcp/", json=INITIALIZE_PAYLOAD))
 
         self.assertEqual(response.status_code, 404)
+
+    def test_initialize_accepts_canonical_and_trailing_slash_paths_without_redirects(self):
+        async def exercise_paths():
+            async with mcp_server.mcp_runtime.lifespan():
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=self.http_app),
+                    base_url="http://testserver",
+                    follow_redirects=False,
+                ) as client:
+                    return [
+                        await client.post(
+                            path,
+                            json=INITIALIZE_PAYLOAD,
+                            headers={"Accept": "application/json, text/event-stream"},
+                        )
+                        for path in ("/mcp", "/mcp/")
+                    ]
+
+        with patch.object(
+            mcp_server,
+            "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="jwt_or_static"),
+        ):
+            responses = anyio.run(exercise_paths)
+
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["result"]["serverInfo"]["name"])
+            self.assertNotIn("location", response.headers)
+            self.assertEqual(response.history, [])
 
     def test_unauthenticated_initialize_and_tools_list_are_data_free(self):
         with patch.object(

@@ -34,7 +34,7 @@ from api.services.plex_service import get_plex_user_info
 from api.services.app_settings import get_setting_value
 from api.services.digest_scheduler import start_digest_scheduler, stop_digest_scheduler
 from api.services.pipeline_scheduler import start_pipeline_scheduler, stop_pipeline_scheduler
-from api.services.mcp_server import mcp_mount_app, mcp_runtime
+from api.services.mcp_server import MCPPathCompatibilityMiddleware, mcp_mount_app, mcp_runtime
 from api.services.recommendation_filter_service import (
     latest_feedback_cte,
     leaf_feedback_join,
@@ -123,6 +123,8 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "dev-secret-key")  # fallback for dev
 )
+
+app.add_middleware(MCPPathCompatibilityMiddleware)
 
 # 👇 ADD THIS TO WIRE UP THE ROUTES
 app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
