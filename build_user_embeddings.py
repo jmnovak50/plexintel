@@ -1,17 +1,16 @@
 from dotenv import load_dotenv
 import numpy as np
-from psycopg2.extras import RealDictCursor
 from pgvector.psycopg2 import register_vector
 from pgvector import Vector
 
 from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
 from api.services.app_settings import get_setting_value
+from user_profile_embeddings import build_user_profiles, fetch_profile_title_rows
 
 # ✅ Load environment variables
 load_dotenv()
 
-EMBEDDING_DIMENSION = 768
 ENGAGEMENT_THRESHOLD = get_setting_value("user_embeddings.engagement_threshold", default=0.5)
 
 
@@ -22,55 +21,23 @@ def connect():
 
 
 def fetch_user_watch_history(conn):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT
-                wh.username,
-                wh.rating_key,
-                wh.played_duration,
-                l.duration
-            FROM watch_history wh
-            JOIN library l ON wh.rating_key = l.rating_key
-            WHERE l.duration > 0
-              AND wh.played_duration IS NOT NULL
-              AND (wh.played_duration::float / (l.duration / 1000.0)) > %s
-        """, (ENGAGEMENT_THRESHOLD,))
-        return cur.fetchall()
+    return fetch_profile_title_rows(conn)
 
 
 def build_user_embeddings(watch_history, conn):
-    user_vectors = {}
-
-    for record in watch_history:
-        username = record['username']
-        rating_key = record['rating_key']
-
-        with conn.cursor() as cur:
-            cur.execute("SELECT embedding FROM media_embeddings WHERE rating_key = %s", (rating_key,))
-            row = cur.fetchone()
-            if not row:
-                continue
-            embedding = row[0]
-            if username not in user_vectors:
-                user_vectors[username] = []
-            # Recent pgvector versions return a pgvector.Vector here.  Convert
-            # it to its numeric payload before handing it to NumPy; otherwise
-            # np.array(Vector(...)) becomes a 0-D object array.
-            if isinstance(embedding, Vector):
-                embedding = embedding.to_numpy()
-            user_vectors[username].append(np.asarray(embedding, dtype=np.float64))
+    profiles = build_user_profiles(
+        watch_history,
+        engagement_threshold=ENGAGEMENT_THRESHOLD,
+    )
 
     with conn.cursor() as cur:
         cur.execute("DELETE FROM user_embeddings")
         print("🧹 Cleared existing user embeddings before rebuild")
 
-        for username, vectors in user_vectors.items():
-            if len(vectors) == 0:
-                continue
-
-            avg_vector = np.mean(vectors, axis=0)
+        for username, profile in profiles.items():
+            avg_vector = profile.mean
             norm = np.linalg.norm(avg_vector)
-            print(f"✅ {username} — vectors: {len(vectors)} — norm: {norm:.4f}")
+            print(f"✅ {username} — titles: {profile.count} — norm: {norm:.4f}")
 
             cur.execute("""
                 INSERT INTO user_embeddings (username, embedding)
@@ -86,7 +53,7 @@ def main():
 
     print("🔍 Fetching engaged watch history...")
     watch_history = fetch_user_watch_history(conn)
-    print(f"🎬 Found {len(watch_history)} engaged watch events")
+    print(f"🎬 Evaluated {len(watch_history)} unique watched user/title pairs")
 
     build_user_embeddings(watch_history, conn)
 

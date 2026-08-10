@@ -280,8 +280,10 @@ class UserEmbeddingRebuildTests(unittest.TestCase):
             }
         )
         watch_history = [
-            {"username": "active", "rating_key": 101},
-            {"username": "active", "rating_key": 102},
+            {"username": "active", "rating_key": 101, "watch_count": 1,
+             "max_engagement_ratio": 0.75, "media_embedding": np.array([1.0, 0.0])},
+            {"username": "active", "rating_key": 102, "watch_count": 1,
+             "max_engagement_ratio": 0.75, "media_embedding": np.array([0.0, 1.0])},
         ]
 
         build_user_embeddings.build_user_embeddings(watch_history, conn)
@@ -309,8 +311,12 @@ class UserEmbeddingRebuildTests(unittest.TestCase):
             }
         )
         watch_history = [
-            {"username": "active", "rating_key": 101},
-            {"username": "active", "rating_key": 102},
+            {"username": "active", "rating_key": 101, "watch_count": 1,
+             "max_engagement_ratio": 0.75,
+             "media_embedding": build_user_embeddings.Vector([1.0, 0.0])},
+            {"username": "active", "rating_key": 102, "watch_count": 1,
+             "max_engagement_ratio": 0.75,
+             "media_embedding": build_user_embeddings.Vector([0.0, 1.0])},
         ]
 
         build_user_embeddings.build_user_embeddings(watch_history, conn)

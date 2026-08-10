@@ -10,6 +10,13 @@ import ast
 from api.db.connection import connect_db
 from api.db.schema import ensure_app_schema
 from api.services.app_settings import get_setting_value
+from user_profile_embeddings import (
+    TrainingProfileResult,
+    build_user_profiles,
+    fetch_profile_title_rows,
+    fuse_media_and_user_embedding,
+    leave_one_title_out,
+)
 
 # ✅ Load environment variables
 load_dotenv()
@@ -22,6 +29,10 @@ WATCH_EMBED_MIN_ENGAGEMENT = get_setting_value("training.watch_embed_min_engagem
 INTERESTED_SAMPLE_WEIGHT = get_setting_value("training.interested_sample_weight", default=0.75)
 WATCHED_LIKE_SAMPLE_WEIGHT = get_setting_value("training.watched_like_sample_weight", default=3.0)
 NEGATIVE_SAMPLE_WEIGHT = get_setting_value("training.negative_sample_weight", default=5.0)
+USER_PROFILE_ENGAGEMENT_THRESHOLD = get_setting_value(
+    "user_embeddings.engagement_threshold",
+    default=0.5,
+)
 
 REQUIRED_TRAINING_COLUMNS = [
     "username",
@@ -196,7 +207,9 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
     directors = row.get("director_tags") or ''
     media_embedding = parse_embedding(row["media_embedding"])
     user_embedding = parse_embedding(row["user_embedding"])
-    combined_emb = Vector(np.concatenate([media_embedding, user_embedding]).tolist())
+    combined_emb = Vector(
+        fuse_media_and_user_embedding(media_embedding, user_embedding).tolist()
+    )
     user_watch_vec = user_watch_vectors.get(username) if user_watch_vectors else None
     watch_sim = cosine_similarity(user_watch_vec, media_embedding) if user_watch_vec is not None else 0.0
 
@@ -327,8 +340,40 @@ def process_row(row, user_watch_vectors=None, from_feedback_only=False):
     }
 
 
-def build_training_data():
-    ensure_app_schema()
+def add_leave_one_out_user_embedding(row, user_profiles):
+    """Attach the only user embedding permitted for a training example."""
+    profile = user_profiles.get(row["username"])
+    if profile is None:
+        result = TrainingProfileResult(
+            embedding=None,
+            qualifying_count=0,
+            training_count=0,
+            current_title_in_profile=False,
+            current_title_excluded=False,
+        )
+        return None, result
+
+    result = leave_one_title_out(profile, row["rating_key"])
+    if result.current_title_in_profile:
+        assert result.current_title_excluded, (
+            "LEAKAGE VIOLATION: qualifying current title was not excluded for "
+            f"{row['username']}/{row['rating_key']}"
+        )
+        assert result.training_count == result.qualifying_count - 1
+    else:
+        assert result.training_count == result.qualifying_count
+
+    if result.embedding is None:
+        return None, result
+
+    training_row = dict(row)
+    training_row["user_embedding"] = result.embedding
+    return training_row, result
+
+
+def build_training_data(diagnostic_samples=0, dry_run=False):
+    if not dry_run:
+        ensure_app_schema()
     conn = connect()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -399,11 +444,9 @@ def build_training_data():
     actor_tags.actor_tags,
     director_tags.director_tags,
     me.embedding AS media_embedding,
-    ue.embedding AS user_embedding,
     f.feedback
 FROM watch_agg t
 JOIN media_embeddings me ON t.rating_key = me.rating_key
-JOIN user_embeddings ue ON t.username = ue.username
 LEFT JOIN latest_feedback f ON f.username = t.username AND f.rating_key = t.rating_key
 
 -- ✅ Subquery joins to fetch tags per media item
@@ -464,12 +507,10 @@ LEFT JOIN LATERAL (
                 JOIN directors d ON md.director_id = d.id
                 WHERE md.media_id = l.rating_key
             ) AS director_tags,
-            me.embedding AS media_embedding,
-            ue.embedding AS user_embedding
+            me.embedding AS media_embedding
         FROM latest_feedback f
         JOIN library l ON f.rating_key = l.rating_key
         JOIN media_embeddings me ON f.rating_key = me.rating_key
-        JOIN user_embeddings ue ON f.username = ue.username
         LEFT JOIN watch_history w ON w.username = f.username AND w.rating_key = f.rating_key
         WHERE w.rating_key IS NULL
     """)
@@ -489,11 +530,20 @@ LEFT JOIN LATERAL (
         cur.close()
         conn.close()
         raise RuntimeError(
-            "No joined media/user embeddings found for training data. "
+            "No media embeddings found for candidate training data. "
             "Leaving existing training_data unchanged."
         )
 
     print(f"✅ Retrieved {len(watched_rows)} aggregated watched + {len(feedback_only_rows)} feedback-only rows")
+
+    print("👤 Fetching title-level user preference profiles...")
+    profile_title_rows = fetch_profile_title_rows(conn)
+    user_profiles = build_user_profiles(
+        profile_title_rows,
+        engagement_threshold=USER_PROFILE_ENGAGEMENT_THRESHOLD,
+        expected_dimension=embedding_dim,
+    )
+    qualifying_profile_titles = sum(profile.count for profile in user_profiles.values())
 
     print("🧮 Building per-user watch-embedding profiles...")
     user_watch_vectors = build_user_watch_vectors(conn)
@@ -502,8 +552,61 @@ LEFT JOIN LATERAL (
     watched_insert_count = 0
     watched_skip_counts = Counter()
     watch_engagement_counts = Counter()
+    loo_excluded_count = 0
+    loo_not_in_profile_count = 0
+    loo_empty_skip_count = 0
+    loo_empty_users = set()
+    diagnostic_candidates = {0: [], 1: []}
+
+    def process_training_candidate(row, *, from_feedback_only=False):
+        nonlocal loo_excluded_count, loo_not_in_profile_count
+        nonlocal loo_empty_skip_count
+
+        training_row, profile_result = add_leave_one_out_user_embedding(
+            row,
+            user_profiles,
+        )
+        if training_row is None:
+            loo_empty_skip_count += 1
+            loo_empty_users.add(row["username"])
+            print(
+                f"[LEAKAGE-GUARD] Skipping {row['username']} / rating_key "
+                f"{row['rating_key']}: no qualifying user-history vectors remain "
+                "after leave-one-out exclusion"
+            )
+            return None, profile_result
+
+        result = process_row(
+            training_row,
+            user_watch_vectors,
+            from_feedback_only=from_feedback_only,
+        )
+        if result and result.get("include_training"):
+            if profile_result.current_title_in_profile:
+                assert profile_result.current_title_excluded
+                loo_excluded_count += 1
+            else:
+                loo_not_in_profile_count += 1
+
+            label_diagnostics = diagnostic_candidates.setdefault(result["label"], [])
+            if len(label_diagnostics) < diagnostic_samples:
+                excluded_display = (
+                    "True" if profile_result.current_title_in_profile else "N/A"
+                )
+                label_diagnostics.append(
+                    "[LOO-DIAGNOSTIC] "
+                    f"username={row['username']} "
+                    f"rating_key={row['rating_key']} "
+                    f"label={result['label']} "
+                    f"qualifying_profile_titles={profile_result.qualifying_count} "
+                    f"current_title_in_profile={profile_result.current_title_in_profile} "
+                    f"training_profile_titles={profile_result.training_count} "
+                    f"current_title_excluded={excluded_display}"
+                )
+        return result, profile_result
+
     for row in watched_rows:
-        result = process_row(row, user_watch_vectors)
+        result, _profile_result = process_training_candidate(row)
         if not result:
             continue
         watch_engagement_counts[result["engagement_type"]] += 1
@@ -514,14 +617,46 @@ LEFT JOIN LATERAL (
             watched_skip_counts[result["engagement_type"]] += 1
 
     for row in feedback_only_rows:
-        result = process_row(row, user_watch_vectors, from_feedback_only=True)
+        result, _profile_result = process_training_candidate(
+            row,
+            from_feedback_only=True,
+        )
         if result and result.get("include_training"):
             inserts.append(result)
 
     label_counts = Counter(r["label"] for r in inserts)
 
+    diagnostics_to_print = []
+    if diagnostic_samples:
+        # Show both classes when available, then fill remaining slots without
+        # exceeding the caller's requested total.
+        for label in (1, 0):
+            if diagnostic_candidates.get(label):
+                diagnostics_to_print.append(diagnostic_candidates[label].pop(0))
+        for label in (1, 0):
+            while (
+                diagnostic_candidates.get(label)
+                and len(diagnostics_to_print) < diagnostic_samples
+            ):
+                diagnostics_to_print.append(diagnostic_candidates[label].pop(0))
+        for diagnostic in diagnostics_to_print[:diagnostic_samples]:
+            print(diagnostic)
+
+    users_processed = {
+        row["username"] for row in watched_rows + feedback_only_rows
+    }
+    print(f"👥 Users processed: {len(users_processed)}")
+    print(f"🎞️ Unique watched titles evaluated: {len(profile_title_rows)}")
+    print(f"✅ Qualifying user-profile titles: {qualifying_profile_titles}")
     print(f"📊 Aggregated user/media pairs: {len(watched_rows)}")
     print(f"🧠 Prepared training_data records: {len(inserts)}")
+    print(f"🧠 Training rows created: {len(inserts)}")
+    print(f"➕ Positive training rows: {label_counts.get(1, 0)}")
+    print(f"➖ Negative training rows: {label_counts.get(0, 0)}")
+    print(f"🚪 Rows where current title was excluded from user embedding: {loo_excluded_count}")
+    print(f"➡️ Rows where current title was not part of user profile: {loo_not_in_profile_count}")
+    print(f"🛡️ Rows skipped because leave-one-out history was empty: {loo_empty_skip_count}")
+    print(f"🛡️ Users affected: {len(loo_empty_users)}")
     print(f"🎬 Inserted watched aggregates: {watched_insert_count}")
     print(f"🚫 Skipped invalid_duration: {watched_skip_counts.get('invalid_duration', 0)}")
     print(f"⏱️ Skipped too_short: {watched_skip_counts.get('too_short', 0)}")
@@ -557,6 +692,25 @@ LEFT JOIN LATERAL (
             "Leaving existing training_data unchanged."
         )
 
+    summary = {
+        "users_processed": len(users_processed),
+        "unique_watched_titles_evaluated": len(profile_title_rows),
+        "qualifying_user_profile_titles": qualifying_profile_titles,
+        "training_rows_created": len(inserts),
+        "positive_training_rows": label_counts.get(1, 0),
+        "negative_training_rows": label_counts.get(0, 0),
+        "current_title_excluded_rows": loo_excluded_count,
+        "current_title_not_in_profile_rows": loo_not_in_profile_count,
+        "zero_leave_one_out_history_rows": loo_empty_skip_count,
+        "zero_leave_one_out_history_users": len(loo_empty_users),
+    }
+
+    if dry_run:
+        cur.close()
+        conn.close()
+        print("🧪 Dry run complete; training_data was not modified.")
+        return summary
+
     print(f"🧠 Inserting {len(inserts)} training records...")
 
     with conn.cursor() as insert_cur:
@@ -582,8 +736,30 @@ LEFT JOIN LATERAL (
     cur.close()
     conn.close()
     print("✅ Training data build complete.")
+    return summary
 
 
 if __name__ == "__main__":
-    ensure_app_schema()
-    build_training_data()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Build leakage-safe PlexIntel training data."
+    )
+    parser.add_argument(
+        "--diagnostic-samples",
+        type=int,
+        default=0,
+        help="Print bounded leave-one-title-out details for this many created rows.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and report all rows without modifying schema or training_data.",
+    )
+    args = parser.parse_args()
+    if args.diagnostic_samples < 0:
+        parser.error("--diagnostic-samples must be zero or greater")
+    build_training_data(
+        diagnostic_samples=args.diagnostic_samples,
+        dry_run=args.dry_run,
+    )
