@@ -190,6 +190,7 @@ class MCPServerTests(unittest.TestCase):
             "get_poster_image_native": {"rating_key": 42},
             "get_poster_gallery_native": {"rating_keys": [42]},
             "get_recent_library_additions": {},
+            "render_recent_library_additions": {"items": []},
             "get_watch_history": {},
         }
         async with mcp_server.mcp_runtime.lifespan():
@@ -465,6 +466,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_poster_image_native",
                 "get_poster_gallery_native",
                 "get_recent_library_additions",
+                "render_recent_library_additions",
                 "get_watch_history",
             },
         )
@@ -1032,6 +1034,7 @@ class MCPServerTests(unittest.TestCase):
             "get_poster_image_native",
             "get_poster_gallery_native",
             "get_recent_library_additions",
+            "render_recent_library_additions",
             "get_watch_history",
         }
         self.assertEqual({tool.name for tool in tools_result.tools}, expected_tools)
@@ -1070,6 +1073,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_poster_image_native",
                 "get_poster_gallery_native",
                 "get_recent_library_additions",
+                "render_recent_library_additions",
                 "get_watch_history",
             },
         )
@@ -1102,6 +1106,7 @@ class MCPServerTests(unittest.TestCase):
             "build_poster_image_native_result",
             "build_poster_gallery_native_result",
             "get_recent_library_additions",
+            "build_recent_additions_render_result",
             "get_agent_watch_history",
         )
         mocks = []
@@ -1119,7 +1124,7 @@ class MCPServerTests(unittest.TestCase):
                 lambda: self._exercise_unauthenticated_protocol(call_tools=True)
             )
 
-        self.assertEqual(len(call_results), 11)
+        self.assertEqual(len(call_results), 12)
         for tool_name, result in call_results.items():
             self.assertTrue(result.isError, tool_name)
             self.assertEqual(result.content[0].text, "Authentication required.", tool_name)

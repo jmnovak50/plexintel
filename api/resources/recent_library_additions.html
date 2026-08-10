@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PlexIntel recent library additions</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: light-dark(#ffffff, #171717);
+      --surface: light-dark(#f7f7f8, #232323);
+      --surface-hover: light-dark(#f0f1f2, #2b2b2b);
+      --text: light-dark(#161616, #f5f5f5);
+      --muted: light-dark(#5e6269, #b8bbc1);
+      --border: light-dark(#d9dce1, #414141);
+      --accent: light-dark(#8f5800, #ffb340);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 0;
+      overflow-x: hidden;
+      color: var(--text);
+      background: var(--background);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    main { padding: 14px; }
+
+    .summary {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+
+    #window-summary {
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .items {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .header,
+    .item {
+      display: grid;
+      grid-template-columns: minmax(300px, 2fr) minmax(100px, .7fr) minmax(70px, .45fr) minmax(130px, .8fr);
+      gap: 14px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .header {
+      padding: 9px 12px;
+      color: var(--muted);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+    }
+
+    .item {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .item:last-child { border-bottom: 0; }
+    .item:hover { background: var(--surface-hover); }
+
+    .title-cell {
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .poster-frame {
+      position: relative;
+      width: 78px;
+      aspect-ratio: 2 / 3;
+      overflow: hidden;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .poster-frame img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .poster-placeholder {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      place-items: center;
+      padding: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.2;
+      text-align: center;
+    }
+
+    .title-wrap,
+    .cell { min-width: 0; }
+
+    .title {
+      overflow-wrap: anywhere;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .show-title,
+    .episode-label,
+    .label {
+      color: var(--muted);
+    }
+
+    .show-title {
+      margin-top: 3px;
+      overflow-wrap: anywhere;
+    }
+
+    .episode-label {
+      margin-top: 4px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+
+    .label {
+      display: none;
+      margin-bottom: 2px;
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+
+    .empty {
+      padding: 30px 18px;
+      color: var(--muted);
+      background: var(--surface);
+      text-align: center;
+    }
+
+    @media (max-width: 660px) {
+      main { padding: 10px; }
+      .summary { align-items: flex-start; }
+      .header { display: none; }
+      .items { border: 0; border-radius: 0; overflow: visible; }
+
+      .item {
+        grid-template-columns: minmax(0, 1fr) minmax(68px, auto);
+        gap: 8px 14px;
+        margin-bottom: 10px;
+        padding: 11px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+      }
+
+      .item:last-child { border-bottom: 1px solid var(--border); }
+      .title-cell { grid-column: 1 / -1; grid-template-columns: 72px minmax(0, 1fr); }
+      .poster-frame { width: 72px; }
+      .label { display: block; }
+      .cell-added { text-align: right; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="summary">
+      <h1>Recent additions</h1>
+      <div id="window-summary" aria-live="polite">Waiting for library additions…</div>
+    </div>
+    <div id="items" class="items" role="table" aria-label="Recent PlexIntel library additions"></div>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const itemsRoot = document.getElementById("items");
+      const summaryRoot = document.getElementById("window-summary");
+      const locale = document.documentElement.lang || "en-US";
+
+      const text = (value, fallback = "—") => {
+        if (value === null || value === undefined || value === "") return fallback;
+        return String(value);
+      };
+
+      const appendText = (parent, value, className) => {
+        const node = document.createElement("div");
+        if (className) node.className = className;
+        node.textContent = text(value);
+        parent.appendChild(node);
+        return node;
+      };
+
+      const appendLabel = (parent, value) => appendText(parent, value, "label");
+
+      const episodeLabel = (item) => {
+        const season = Number.isInteger(item.season_number) ? item.season_number : null;
+        const episode = Number.isInteger(item.episode_number) ? item.episode_number : null;
+        if (season === null && episode === null) return null;
+        const seasonPart = season === null ? "S??" : `S${String(season).padStart(2, "0")}`;
+        const episodePart = episode === null ? "E??" : `E${String(episode).padStart(2, "0")}`;
+        return `${seasonPart}${episodePart}`;
+      };
+
+      const formatDate = (value) => {
+        if (!value) return "—";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return text(value);
+        return new Intl.DateTimeFormat(locale, {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }).format(date);
+      };
+
+      const posterPlaceholder = (frame, title) => {
+        frame.replaceChildren();
+        const placeholder = document.createElement("div");
+        placeholder.className = "poster-placeholder";
+        placeholder.setAttribute("role", "img");
+        placeholder.setAttribute("aria-label", `Poster unavailable for ${text(title, "this title")}`);
+        placeholder.textContent = "Poster unavailable";
+        frame.appendChild(placeholder);
+      };
+
+      const createPoster = (item) => {
+        const frame = document.createElement("div");
+        frame.className = "poster-frame";
+        const title = text(item.title, "Untitled");
+        if (!item.poster_url) {
+          posterPlaceholder(frame, title);
+          return frame;
+        }
+
+        const image = document.createElement("img");
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.alt = `Poster for ${title}`;
+        image.addEventListener("error", () => posterPlaceholder(frame, title), { once: true });
+        image.src = String(item.poster_url);
+        frame.appendChild(image);
+        return frame;
+      };
+
+      const createHeader = () => {
+        const header = document.createElement("div");
+        header.className = "header";
+        header.setAttribute("role", "row");
+        ["Title", "Media type", "Year", "Date added"].forEach((label) => {
+          const cell = appendText(header, label);
+          cell.setAttribute("role", "columnheader");
+        });
+        return header;
+      };
+
+      const createItem = (item) => {
+        const row = document.createElement("article");
+        row.className = "item";
+        row.setAttribute("role", "row");
+
+        const titleCell = document.createElement("div");
+        titleCell.className = "title-cell";
+        titleCell.setAttribute("role", "cell");
+        titleCell.appendChild(createPoster(item));
+
+        const titleWrap = document.createElement("div");
+        titleWrap.className = "title-wrap";
+        appendText(titleWrap, item.title, "title");
+        if (item.show_title) appendText(titleWrap, item.show_title, "show-title");
+        const episode = episodeLabel(item);
+        if (episode) appendText(titleWrap, episode, "episode-label");
+        titleCell.appendChild(titleWrap);
+        row.appendChild(titleCell);
+
+        const mediaCell = document.createElement("div");
+        mediaCell.className = "cell";
+        mediaCell.setAttribute("role", "cell");
+        appendLabel(mediaCell, "Media type");
+        appendText(mediaCell, item.media_type);
+        row.appendChild(mediaCell);
+
+        const yearCell = document.createElement("div");
+        yearCell.className = "cell";
+        yearCell.setAttribute("role", "cell");
+        appendLabel(yearCell, "Year");
+        appendText(yearCell, item.year);
+        row.appendChild(yearCell);
+
+        const addedCell = document.createElement("div");
+        addedCell.className = "cell cell-added";
+        addedCell.setAttribute("role", "cell");
+        appendLabel(addedCell, "Date added");
+        appendText(addedCell, formatDate(item.added_at));
+        row.appendChild(addedCell);
+
+        return row;
+      };
+
+      const render = (result) => {
+        const suppliedItems = Array.isArray(result?.items) ? result.items : [];
+        const fragment = document.createDocumentFragment();
+        itemsRoot.replaceChildren();
+
+        const count = Number.isInteger(result?.count) ? result.count : suppliedItems.length;
+        const windowText = Number.isInteger(result?.days)
+          ? `${count} ${count === 1 ? "item" : "items"} from the past ${result.days} days`
+          : `${count} ${count === 1 ? "item" : "items"}`;
+        summaryRoot.textContent = windowText;
+
+        if (suppliedItems.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No recent library additions were supplied for this view.";
+          fragment.appendChild(empty);
+          itemsRoot.removeAttribute("role");
+          itemsRoot.appendChild(fragment);
+          return;
+        }
+
+        itemsRoot.setAttribute("role", "table");
+        fragment.appendChild(createHeader());
+        suppliedItems.forEach((item) => fragment.appendChild(createItem(item || {})));
+        itemsRoot.appendChild(fragment);
+      };
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.method === "ui/notifications/tool-result") {
+          render(message.params?.structuredContent || {});
+        }
+      }, { passive: true });
+
+      window.addEventListener("openai:set_globals", (event) => {
+        const output = event?.detail?.globals?.toolOutput;
+        if (output) render(output.structuredContent || output);
+      }, { passive: true });
+
+      const compatibilityOutput = window.openai?.toolOutput;
+      if (compatibilityOutput) {
+        render(compatibilityOutput.structuredContent || compatibilityOutput);
+      }
+    })();
+  </script>
+</body>
+</html>

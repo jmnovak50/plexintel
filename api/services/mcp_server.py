@@ -8,13 +8,16 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
-from typing import Any, Optional
+from pathlib import Path
+from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, Icon, ImageContent, TextContent, Tool as MCPTool, ToolAnnotations
 from PIL import Image
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -64,6 +67,13 @@ mcp_auth_context: ContextVar[MCPAuthContext | None] = ContextVar("mcp_auth_conte
 NATIVE_POSTER_WIDTH = 180
 NATIVE_POSTER_MAX_BYTES = 512 * 1024
 NATIVE_POSTER_GALLERY_MAX_ITEMS = 8
+RECENT_ADDITIONS_WIDGET_URI = "ui://plexintel/recent-library-additions.html"
+RECENT_ADDITIONS_WIDGET_MIME_TYPE = "text/html;profile=mcp-app"
+RECENT_ADDITIONS_POSTER_WIDTH = 180
+RECENT_ADDITIONS_POSTER_ORIGIN = "https://plexintel.kabolly.com"
+RECENT_ADDITIONS_WIDGET_PATH = (
+    Path(__file__).resolve().parent.parent / "resources" / "recent_library_additions.html"
+)
 NATIVE_POSTER_MIME_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/gif", "image/webp"}
 )
@@ -82,6 +92,34 @@ USER_IDENTITY_INSTRUCTIONS = (
     "automatically scope to the authenticated user. Do not pass a user argument for "
     '"my recommendations", "what should I watch", or similar first-person requests.'
 )
+
+RECENT_ADDITIONS_UI_INSTRUCTIONS = (
+    "For visual recent-library requests with posters, a visual table, cards, or a gallery, "
+    "first call get_recent_library_additions, then pass its resulting or filtered items and "
+    "days to render_recent_library_additions. Do not call the render tool for ordinary data-only "
+    "recent-additions requests. Continue using the native poster tools for individual-poster "
+    "requests when native MCP image content is appropriate."
+)
+
+
+class RecentAdditionRenderItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    rating_key: int = Field(gt=0, strict=True)
+    title: str
+    media_type: str
+    show_title: Optional[str] = None
+    season_number: Optional[int] = None
+    episode_number: Optional[int] = None
+    year: Optional[int] = None
+    added_at: Optional[datetime] = None
+    poster_url: Optional[str] = None
+
+
+class RecentAdditionsRenderResponse(BaseModel):
+    items: list[RecentAdditionRenderItem]
+    count: int = Field(ge=0)
+    days: Optional[int] = Field(default=None, ge=1)
 
 
 class MCPUserAccessError(ValueError):
@@ -209,6 +247,11 @@ class PlexIntelFastMCP(FastMCP):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._tool_security_schemes: dict[str, list[dict[str, Any]]] = {}
+        self._tool_output_schemas: dict[str, dict[str, Any]] = {}
+
+    def set_tool_output_schema(self, name: str, schema: dict[str, Any]) -> None:
+        """Attach an explicit protocol output schema to a registered FastMCP tool."""
+        self._tool_output_schemas[name] = schema
 
     def tool(
         self,
@@ -243,15 +286,15 @@ class PlexIntelFastMCP(FastMCP):
 
     async def list_tools(self) -> list[MCPTool]:
         tools = await super().list_tools()
-        return [
-            tool.model_copy(
-                update={"securitySchemes": self._tool_security_schemes[tool.name]},
-                deep=True,
-            )
-            if tool.name in self._tool_security_schemes
-            else tool
-            for tool in tools
-        ]
+        discovered_tools = []
+        for tool in tools:
+            updates: dict[str, Any] = {}
+            if tool.name in self._tool_security_schemes:
+                updates["securitySchemes"] = self._tool_security_schemes[tool.name]
+            if tool.name in self._tool_output_schemas:
+                updates["outputSchema"] = self._tool_output_schemas[tool.name]
+            discovered_tools.append(tool.model_copy(update=updates, deep=True) if updates else tool)
+        return discovered_tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
         context = get_current_mcp_auth_context()
@@ -308,6 +351,48 @@ def build_poster_markup_payload(
         media_type=media_type,
         width=width,
         url_builder=build_public_poster_url,
+    )
+
+
+def _read_recent_additions_widget() -> str:
+    return RECENT_ADDITIONS_WIDGET_PATH.read_text(encoding="utf-8")
+
+
+def build_recent_additions_render_result(
+    items: list[RecentAdditionRenderItem],
+    *,
+    days: int | None = None,
+) -> CallToolResult:
+    rendered_items: list[RecentAdditionRenderItem] = []
+    for item in items:
+        canonical_url = build_public_poster_url(
+            item.rating_key,
+            width=RECENT_ADDITIONS_POSTER_WIDTH,
+        )
+        if item.poster_url is not None and item.poster_url != canonical_url:
+            raise ValueError(
+                "poster_url must be omitted or match PlexIntel's public poster URL "
+                f"for rating_key {item.rating_key}."
+            )
+        rendered_items.append(item.model_copy(update={"poster_url": canonical_url}))
+
+    payload = RecentAdditionsRenderResponse(
+        items=rendered_items,
+        count=len(rendered_items),
+        days=days,
+    )
+    window_text = f" from the past {days} days" if days is not None else ""
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Displaying {payload.count} PlexIntel library additions"
+                    f"{window_text}."
+                ),
+            )
+        ],
+        structuredContent=payload.model_dump(mode="json"),
     )
 
 
@@ -857,7 +942,16 @@ class MCPPathCompatibilityMiddleware:
 def _build_mcp_server() -> FastMCP:
     server_name = get_setting_value("mcp.server_name", default="PlexIntel")
     instructions = get_setting_value("mcp.instructions")
-    instruction_parts = [part for part in (instructions, USER_IDENTITY_INSTRUCTIONS, POSTER_RESPONSE_INSTRUCTIONS) if part]
+    instruction_parts = [
+        part
+        for part in (
+            instructions,
+            USER_IDENTITY_INSTRUCTIONS,
+            POSTER_RESPONSE_INSTRUCTIONS,
+            RECENT_ADDITIONS_UI_INSTRUCTIONS,
+        )
+        if part
+    ]
     instructions = "\n\n".join(instruction_parts)
 
     mcp = PlexIntelFastMCP(
@@ -879,6 +973,28 @@ def _build_mcp_server() -> FastMCP:
 
     def oauth_tool_security_schemes() -> list[dict[str, Any]]:
         return [{"type": "oauth2", "scopes": list(oauth_settings.required_scopes)}]
+
+    @mcp.resource(
+        RECENT_ADDITIONS_WIDGET_URI,
+        name="recent-library-additions",
+        title="PlexIntel recent library additions",
+        description="Responsive PlexIntel poster table for finalized recent library additions.",
+        mime_type=RECENT_ADDITIONS_WIDGET_MIME_TYPE,
+        meta={
+            "ui": {
+                "prefersBorder": True,
+                "csp": {
+                    "resourceDomains": [RECENT_ADDITIONS_POSTER_ORIGIN],
+                },
+            },
+            "openai/widgetPrefersBorder": True,
+            "openai/widgetCSP": {
+                "resource_domains": [RECENT_ADDITIONS_POSTER_ORIGIN],
+            },
+        },
+    )
+    def recent_library_additions_widget() -> str:
+        return _read_recent_additions_widget()
 
     @mcp.tool(
         name="list_users",
@@ -1063,6 +1179,36 @@ def _build_mcp_server() -> FastMCP:
         limit: int = 50,
     ) -> RecentLibraryAdditionsResponse:
         return get_recent_library_additions(media_type=media_type, days=days, limit=limit)
+
+    @mcp.tool(
+        name="render_recent_library_additions",
+        description=(
+            "Render finalized recent PlexIntel library additions as a visual poster table or "
+            "responsive card list. Always call get_recent_library_additions first, review or "
+            "filter its records, then pass those items and its days value to this tool. Use this "
+            "when the user asks for recent additions with posters, a visual table, cards, or a "
+            "gallery. For an individual-poster request, continue using the existing native poster "
+            "tools when native MCP image content is appropriate."
+        ),
+        annotations=tool_annotations,
+        meta={
+            "ui": {"resourceUri": RECENT_ADDITIONS_WIDGET_URI},
+            "openai/outputTemplate": RECENT_ADDITIONS_WIDGET_URI,
+            "openai/toolInvocation/invoking": "Preparing recent additions…",
+            "openai/toolInvocation/invoked": "Recent additions ready.",
+        },
+        security_schemes=oauth_tool_security_schemes(),
+    )
+    def mcp_render_recent_library_additions(
+        items: list[RecentAdditionRenderItem],
+        days: Annotated[int | None, Field(ge=1)] = None,
+    ) -> CallToolResult:
+        return build_recent_additions_render_result(items, days=days)
+
+    mcp.set_tool_output_schema(
+        "render_recent_library_additions",
+        RecentAdditionsRenderResponse.model_json_schema(),
+    )
 
     @mcp.tool(
         name="get_watch_history",
