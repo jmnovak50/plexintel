@@ -5,6 +5,7 @@ import hmac
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, Icon, ImageContent, TextContent, Tool as MCPTool, ToolAnnotations
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -66,7 +67,8 @@ mcp_auth_context: ContextVar[MCPAuthContext | None] = ContextVar("mcp_auth_conte
 
 NATIVE_POSTER_WIDTH = 180
 NATIVE_POSTER_MAX_BYTES = 512 * 1024
-NATIVE_POSTER_GALLERY_MAX_ITEMS = 8
+NATIVE_POSTER_GALLERY_MAX_ITEMS = 50
+NATIVE_POSTER_MAX_WORKERS = 12
 RECENT_ADDITIONS_WIDGET_URI = "ui://plexintel/recent-library-additions.html"
 RECENT_ADDITIONS_WIDGET_MIME_TYPE = "text/html;profile=mcp-app"
 RECENT_ADDITIONS_POSTER_WIDTH = 180
@@ -94,11 +96,11 @@ USER_IDENTITY_INSTRUCTIONS = (
 )
 
 RECENT_ADDITIONS_UI_INSTRUCTIONS = (
-    "For visual recent-library requests with posters, a visual table, cards, or a gallery, "
-    "first call get_recent_library_additions, then pass its resulting or filtered items and "
-    "days to render_recent_library_additions. Do not call the render tool for ordinary data-only "
-    "recent-additions requests. Continue using the native poster tools for individual-poster "
-    "requests when native MCP image content is appropriate."
+    "For a recent-additions poster feed in clients that render native MCP images, call "
+    "get_recent_library_additions_native directly. For an explicit visual table or responsive "
+    "card UI, first call get_recent_library_additions, then pass its resulting or filtered items "
+    "and days to render_recent_library_additions. Do not use Markdown poster tools when native "
+    "MCP image content is requested."
 )
 
 
@@ -120,6 +122,42 @@ class RecentAdditionsRenderResponse(BaseModel):
     items: list[RecentAdditionRenderItem]
     count: int = Field(ge=0)
     days: Optional[int] = Field(default=None, ge=1)
+
+
+class NativePosterGalleryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    rating_key: int = Field(
+        gt=0,
+        strict=True,
+        validation_alias=AliasChoices("rating_key", "ratingKey"),
+    )
+    title: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("title", "name"),
+    )
+    episode_title: Optional[str] = None
+    show_title: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("show_title", "showTitle"),
+    )
+    media_type: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("media_type", "mediaType"),
+    )
+    season_number: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("season_number", "seasonNumber"),
+    )
+    episode_number: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("episode_number", "episodeNumber"),
+    )
+    year: Optional[int] = None
+    added_at: Optional[datetime] = Field(
+        default=None,
+        validation_alias=AliasChoices("added_at", "addedAt"),
+    )
 
 
 class MCPUserAccessError(ValueError):
@@ -527,6 +565,169 @@ def _native_poster_label(
     return label
 
 
+def _native_media_type_label(media_type: str | None) -> str:
+    normalized = (media_type or "").strip().replace("_", " ")
+    return normalized.title() if normalized else "Library item"
+
+
+def _native_episode_code(season_number: Any, episode_number: Any) -> str | None:
+    try:
+        season = int(season_number) if season_number is not None else None
+        episode = int(episode_number) if episode_number is not None else None
+    except (TypeError, ValueError):
+        return None
+    if season is None and episode is None:
+        return None
+    season_text = f"S{season}" if season is not None else "S?"
+    episode_text = f"E{episode}" if episode is not None else "E?"
+    return f"{season_text}{episode_text}"
+
+
+def _native_added_at_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed: datetime | None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return f"Added {parsed.strftime('%b')} {parsed.day}, {parsed.year}"
+
+
+def _native_gallery_label(entry: dict[str, Any]) -> str:
+    rating_key = entry["rating_key"]
+    title = (entry.get("title") or entry.get("episode_title") or "").strip()
+    show_title = (entry.get("show_title") or "").strip()
+    media_type = (entry.get("media_type") or "").strip().lower()
+    year = entry.get("year")
+    episode_code = (
+        _native_episode_code(
+            entry.get("season_number"),
+            entry.get("episode_number"),
+        )
+        if media_type == "episode"
+        else None
+    )
+
+    if media_type == "episode":
+        heading_parts = []
+        if show_title:
+            heading_parts.append(show_title)
+        if episode_code:
+            heading_parts.append(episode_code)
+        if title and title != show_title:
+            heading_parts.append(title)
+        heading = " · ".join(heading_parts) or f"rating_key {rating_key}"
+    else:
+        heading = title or show_title or f"rating_key {rating_key}"
+        if media_type == "season":
+            try:
+                season_number = int(entry["season_number"])
+            except (KeyError, TypeError, ValueError):
+                season_number = None
+            if season_number is not None:
+                heading = f"{heading} · S{season_number}"
+        if year is not None:
+            heading = f"{heading} ({year})"
+
+    details = [_native_media_type_label(media_type)]
+    added_label = _native_added_at_label(entry.get("added_at"))
+    if added_label:
+        details.append(added_label)
+    return f"{heading}\n{' · '.join(details)}"
+
+
+def _coerce_native_gallery_entries(
+    rating_keys: Optional[list[int]] = None,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    supported_fields = (
+        "title",
+        "episode_title",
+        "show_title",
+        "media_type",
+        "season_number",
+        "episode_number",
+        "year",
+        "added_at",
+    )
+
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise NativePosterError("Each gallery item must be an object with a rating_key.")
+        rating_key = item.get("rating_key", item.get("ratingKey"))
+        normalized_rating_key = _validate_native_rating_key(rating_key)
+        entry = {"rating_key": normalized_rating_key}
+        for field in supported_fields:
+            if field in item:
+                entry[field] = item[field]
+        if not entry.get("title") and entry.get("episode_title"):
+            entry["title"] = entry["episode_title"]
+        entries.append(entry)
+
+    item_rating_keys = {entry["rating_key"] for entry in entries}
+    for rating_key in rating_keys or []:
+        normalized_rating_key = _validate_native_rating_key(rating_key)
+        if normalized_rating_key not in item_rating_keys:
+            entries.append({"rating_key": normalized_rating_key})
+
+    if len(entries) > NATIVE_POSTER_GALLERY_MAX_ITEMS:
+        raise NativePosterError(
+            f"Native poster galleries are limited to {NATIVE_POSTER_GALLERY_MAX_ITEMS} items."
+        )
+    return entries
+
+
+def _hydrate_native_gallery_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    hydrated = dict(entry)
+    if hydrated.get("title") and hydrated.get("media_type"):
+        return hydrated
+    rating_key = hydrated["rating_key"]
+    try:
+        item = get_agent_library_item(rating_key=rating_key)
+    except Exception:
+        logger.info(
+            "MCP native gallery metadata lookup failed for rating_key=%s",
+            rating_key,
+            exc_info=True,
+        )
+        return hydrated
+
+    for field in (
+        "title",
+        "show_title",
+        "media_type",
+        "season_number",
+        "episode_number",
+        "year",
+    ):
+        if hydrated.get(field) is None:
+            hydrated[field] = getattr(item, field, None)
+    return hydrated
+
+
+def _native_poster_dedupe_key(entry: dict[str, Any]) -> tuple[Any, ...] | None:
+    media_type = (entry.get("media_type") or "").strip().lower()
+    show_title = (entry.get("show_title") or "").strip().casefold()
+    if media_type != "episode" or not show_title:
+        return None
+    return ("episode", show_title, entry.get("season_number"))
+
+
+def _parallel_map_native(function: Callable[[Any], Any], values: list[Any]) -> list[Any]:
+    if not values:
+        return []
+    worker_count = min(NATIVE_POSTER_MAX_WORKERS, len(values))
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mcp-poster") as executor:
+        return list(executor.map(function, values))
+
+
 def _detect_native_image_mime(content: bytes) -> str:
     try:
         with Image.open(BytesIO(content)) as image:
@@ -626,82 +827,85 @@ def build_poster_image_native_result(rating_key: int) -> CallToolResult:
 def build_poster_gallery_native_result(
     rating_keys: Optional[list[int]] = None,
     items: Optional[list[dict[str, Any]]] = None,
+    *,
+    dedupe_posters: bool = False,
 ) -> CallToolResult:
-    requested_count = len(rating_keys or []) + len(items or [])
-    if requested_count > NATIVE_POSTER_GALLERY_MAX_ITEMS:
-        return _native_poster_error(
-            "Native poster galleries are limited to "
-            f"{NATIVE_POSTER_GALLERY_MAX_ITEMS} requested items."
-        )
-
     try:
-        for rating_key in rating_keys or []:
-            _validate_native_rating_key(rating_key)
-        for item in items or []:
-            if not isinstance(item, dict):
-                raise NativePosterError("Each gallery item must be an object with a rating_key.")
-            rating_key = item.get("rating_key", item.get("ratingKey"))
-            _validate_native_rating_key(rating_key)
+        entries = _coerce_native_gallery_entries(rating_keys=rating_keys, items=items)
     except NativePosterError as exc:
         return _native_poster_error(str(exc))
-
-    entries = coerce_gallery_entries(
-        rating_keys=rating_keys,
-        items=items,
-        max_items=NATIVE_POSTER_GALLERY_MAX_ITEMS + 1,
-    )
     if not entries:
         return _native_poster_error("Provide at least one valid rating_key.")
-    if len(entries) > NATIVE_POSTER_GALLERY_MAX_ITEMS:
-        return _native_poster_error(
-            f"Native poster galleries are limited to {NATIVE_POSTER_GALLERY_MAX_ITEMS} items."
-        )
-    try:
-        for entry in entries:
-            entry["rating_key"] = _validate_native_rating_key(entry["rating_key"])
-    except NativePosterError as exc:
-        return _native_poster_error(str(exc))
+
+    hydrated_entries = _parallel_map_native(_hydrate_native_gallery_entry, entries)
+    poster_requests: list[int | None] = []
+    seen_poster_groups: set[tuple[Any, ...]] = set()
+    for entry in hydrated_entries:
+        dedupe_key = _native_poster_dedupe_key(entry) if dedupe_posters else None
+        if dedupe_key is not None and dedupe_key in seen_poster_groups:
+            poster_requests.append(None)
+            continue
+        if dedupe_key is not None:
+            seen_poster_groups.add(dedupe_key)
+        poster_requests.append(entry["rating_key"])
+
+    def fetch_requested_poster(rating_key: int | None):
+        if rating_key is None:
+            return None
+        try:
+            return _fetch_native_poster(rating_key)
+        except Exception as exc:
+            message = (
+                str(exc)
+                if isinstance(exc, NativePosterError)
+                else "Unable to fetch the poster."
+            )
+            return exc, message
+
+    poster_results = _parallel_map_native(fetch_requested_poster, poster_requests)
 
     result_content: list[TextContent | ImageContent] = []
     result_items: list[dict[str, Any]] = []
-    for entry in entries:
+    for entry, requested_rating_key, poster in zip(
+        hydrated_entries,
+        poster_requests,
+        poster_results,
+    ):
         rating_key = entry["rating_key"]
-        title = entry.get("title")
-        media_type = entry.get("media_type")
-        year = None
-        try:
-            item = get_agent_library_item(rating_key=rating_key)
-            title = title or item.title
-            media_type = media_type or item.media_type
-            year = item.year
-        except Exception:
-            logger.info(
-                "MCP native gallery metadata lookup failed for rating_key=%s",
-                rating_key,
-                exc_info=True,
-            )
-
-        label = _native_poster_label(rating_key, title=title, year=year)
+        label = _native_gallery_label(entry)
         item_metadata = {
             "rating_key": rating_key,
-            "title": title,
-            "year": year,
-            "media_type": media_type,
+            "title": entry.get("title"),
+            "show_title": entry.get("show_title"),
+            "year": entry.get("year"),
+            "media_type": entry.get("media_type"),
+            "season_number": entry.get("season_number"),
+            "episode_number": entry.get("episode_number"),
+            "added_at": (
+                entry["added_at"].isoformat()
+                if isinstance(entry.get("added_at"), datetime)
+                else entry.get("added_at")
+            ),
             "found": False,
         }
-        try:
-            poster = _fetch_native_poster(rating_key)
-        except Exception as exc:
-            message = str(exc) if isinstance(exc, NativePosterError) else "Unable to fetch the poster."
+
+        if requested_rating_key is None:
             result_content.append(
-                TextContent(type="text", text=f"Poster unavailable for {label}: {message}")
+                TextContent(type="text", text=f"{label}\nPoster omitted (same season artwork).")
+            )
+            result_items.append({**item_metadata, "deduplicated": True})
+            continue
+
+        if isinstance(poster, tuple) and len(poster) == 2 and isinstance(poster[0], Exception):
+            message = poster[1]
+            result_content.append(
+                TextContent(type="text", text=f"{label}\nPoster unavailable: {message}")
             )
             result_items.append({**item_metadata, "error": message})
             continue
-
         if poster is None:
             result_content.append(
-                TextContent(type="text", text=f"Poster unavailable for {label}.")
+                TextContent(type="text", text=f"{label}\nPoster unavailable.")
             )
             result_items.append(item_metadata)
             continue
@@ -709,7 +913,7 @@ def build_poster_gallery_native_result(
         content, mime_type = poster
         result_content.extend(
             [
-                TextContent(type="text", text=f"Poster for {label}."),
+                TextContent(type="text", text=label),
                 _native_image_content(content, mime_type),
             ]
         )
@@ -719,6 +923,64 @@ def build_poster_gallery_native_result(
         content=result_content,
         structuredContent={"count": len(result_items), "items": result_items},
     )
+
+
+def build_recent_library_additions_native_result(
+    *,
+    days: int = 7,
+    media_type: str | None = None,
+    limit: int = 50,
+    dedupe_posters: bool = False,
+) -> CallToolResult:
+    recent = get_recent_library_additions(
+        media_type=media_type,
+        days=days,
+        limit=limit,
+    )
+    if not recent.items:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"No PlexIntel library additions found in the past {days} days.",
+                )
+            ],
+            structuredContent={
+                "count": 0,
+                "items": [],
+                "days": days,
+                "media_type": media_type,
+            },
+        )
+
+    native_items = [
+        item.model_dump(
+            include={
+                "rating_key",
+                "title",
+                "show_title",
+                "media_type",
+                "season_number",
+                "episode_number",
+                "year",
+                "added_at",
+            },
+            mode="json",
+        )
+        for item in recent.items
+    ]
+    result = build_poster_gallery_native_result(
+        items=native_items,
+        dedupe_posters=dedupe_posters,
+    )
+    if result.structuredContent is not None:
+        result.structuredContent.update(
+            {
+                "days": days,
+                "media_type": media_type,
+            }
+        )
+    return result
 
 
 def _extract_caller(scope: Scope, headers: Headers) -> str:
@@ -1147,18 +1409,30 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_poster_gallery_native",
         description=(
-            "Returns native MCP poster images in library-item order, with a text label "
-            "immediately before each corresponding image. Pass either rating_keys or items "
-            "containing rating_key and optional title."
+            "Return up to 50 native MCP poster images in input order, with a concise metadata "
+            "label immediately before each image. Pass either rating_keys or items containing "
+            "rating_key and optional title, episode_title, show_title, media_type, year, "
+            "season_number, episode_number, and added_at. Missing posters produce text-only "
+            "statuses without failing the gallery. Set dedupe_posters=true to emit one image "
+            "for episodes from the same show and season."
         ),
         annotations=tool_annotations,
         security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_poster_gallery_native(
         rating_keys: Optional[list[int]] = None,
-        items: Optional[list[dict[str, Any]]] = None,
+        items: Optional[list[NativePosterGalleryItem]] = None,
+        dedupe_posters: bool = False,
     ) -> CallToolResult:
-        return build_poster_gallery_native_result(rating_keys=rating_keys, items=items)
+        return build_poster_gallery_native_result(
+            rating_keys=rating_keys,
+            items=(
+                [item.model_dump(mode="json") for item in items]
+                if items is not None
+                else None
+            ),
+            dedupe_posters=dedupe_posters,
+        )
 
     @mcp.tool(
         name="get_recent_library_additions",
@@ -1179,6 +1453,32 @@ def _build_mcp_server() -> FastMCP:
         limit: int = 50,
     ) -> RecentLibraryAdditionsResponse:
         return get_recent_library_additions(media_type=media_type, days=days, limit=limit)
+
+    @mcp.tool(
+        name="get_recent_library_additions_native",
+        description=(
+            "Fetch recent PlexIntel library additions and return a ChatGPT-friendly native MCP "
+            "poster feed in one call. Each found poster is returned as ImageContent immediately "
+            "after its concise title, media, episode, and added-date label; missing posters remain "
+            "as text-only entries. Use this instead of Markdown poster tools when the client "
+            "supports native MCP images. Set dedupe_posters=true to emit one image for episodes "
+            "from the same show and season."
+        ),
+        annotations=tool_annotations,
+        security_schemes=oauth_tool_security_schemes(),
+    )
+    def mcp_get_recent_library_additions_native(
+        days: Annotated[int, Field(ge=1)] = 7,
+        media_type: Optional[str] = None,
+        limit: Annotated[int, Field(ge=1, le=NATIVE_POSTER_GALLERY_MAX_ITEMS)] = 50,
+        dedupe_posters: bool = False,
+    ) -> CallToolResult:
+        return build_recent_library_additions_native_result(
+            days=days,
+            media_type=media_type,
+            limit=limit,
+            dedupe_posters=dedupe_posters,
+        )
 
     @mcp.tool(
         name="render_recent_library_additions",

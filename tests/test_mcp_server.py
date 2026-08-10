@@ -157,6 +157,10 @@ class MCPServerTests(unittest.TestCase):
                             "get_recent_library_additions",
                             {"media_type": "movie", "days": 7, "limit": 5},
                         )
+                        recent_native_result = await session.call_tool(
+                            "get_recent_library_additions_native",
+                            {"media_type": "movie", "days": 7, "limit": 5},
+                        )
                         history_result = await session.call_tool(
                             "get_watch_history",
                             {"user": "jmnovak", "limit": 5},
@@ -175,6 +179,7 @@ class MCPServerTests(unittest.TestCase):
             "native_poster": native_poster_result,
             "native_gallery": native_gallery_result,
             "recent": recent_result,
+            "recent_native": recent_native_result,
             "history": history_result,
         }
 
@@ -190,6 +195,7 @@ class MCPServerTests(unittest.TestCase):
             "get_poster_image_native": {"rating_key": 42},
             "get_poster_gallery_native": {"rating_keys": [42]},
             "get_recent_library_additions": {},
+            "get_recent_library_additions_native": {},
             "render_recent_library_additions": {"items": []},
             "get_watch_history": {},
         }
@@ -466,6 +472,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_poster_image_native",
                 "get_poster_gallery_native",
                 "get_recent_library_additions",
+                "get_recent_library_additions_native",
                 "render_recent_library_additions",
                 "get_watch_history",
             },
@@ -525,6 +532,11 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(results["recent"].structuredContent["days"], 7)
         self.assertEqual(results["recent"].structuredContent["items"][0]["title"], "Black Bag")
         self.assertEqual(results["recent"].structuredContent["items"][0]["duration_formatted"], "00:00:00")
+        self.assertEqual(
+            [content.type for content in results["recent_native"].content],
+            ["text", "image"],
+        )
+        self.assertEqual(results["recent_native"].structuredContent["days"], 7)
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
 
     def test_build_poster_markup_payload_uses_public_agent_url(self):
@@ -716,10 +728,10 @@ class MCPServerTests(unittest.TestCase):
             [item.type for item in result.content],
             ["text", "image", "text", "text", "image"],
         )
-        self.assertEqual(result.content[0].text, "Poster for First (2001).")
+        self.assertEqual(result.content[0].text, "First (2001)\nMovie")
         self.assertEqual(base64.b64decode(result.content[1].data), first_bytes)
-        self.assertEqual(result.content[2].text, "Poster unavailable for Missing (2002).")
-        self.assertEqual(result.content[3].text, "Poster for Third (2003).")
+        self.assertEqual(result.content[2].text, "Missing (2002)\nMovie\nPoster unavailable.")
+        self.assertEqual(result.content[3].text, "Third (2003)\nShow")
         self.assertEqual(base64.b64decode(result.content[4].data), third_bytes)
         self.assertEqual(
             [item["rating_key"] for item in result.structuredContent["items"]],
@@ -745,7 +757,10 @@ class MCPServerTests(unittest.TestCase):
         self.assertTrue(invalid_gallery.isError)
         self.assertIn("positive integer", invalid_gallery.content[0].text)
         self.assertTrue(oversized_gallery.isError)
-        self.assertIn("limited to 8", oversized_gallery.content[0].text)
+        self.assertIn(
+            f"limited to {mcp_server.NATIVE_POSTER_GALLERY_MAX_ITEMS}",
+            oversized_gallery.content[0].text,
+        )
         fetch_poster.assert_not_called()
 
     def test_native_single_poster_enforces_resized_image_limit(self):
@@ -1034,6 +1049,7 @@ class MCPServerTests(unittest.TestCase):
             "get_poster_image_native",
             "get_poster_gallery_native",
             "get_recent_library_additions",
+            "get_recent_library_additions_native",
             "render_recent_library_additions",
             "get_watch_history",
         }
@@ -1073,6 +1089,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_poster_image_native",
                 "get_poster_gallery_native",
                 "get_recent_library_additions",
+                "get_recent_library_additions_native",
                 "render_recent_library_additions",
                 "get_watch_history",
             },
@@ -1091,8 +1108,25 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(single_schema["required"], ["rating_key"])
         self.assertEqual(single_schema["properties"]["rating_key"]["type"], "integer")
         gallery_schema = tools_by_name["get_poster_gallery_native"]["inputSchema"]
-        self.assertEqual(set(gallery_schema["properties"]), {"rating_keys", "items"})
+        self.assertEqual(
+            set(gallery_schema["properties"]),
+            {"rating_keys", "items", "dedupe_posters"},
+        )
         self.assertNotIn("required", gallery_schema)
+        gallery_item_schema = gallery_schema["$defs"]["NativePosterGalleryItem"]
+        self.assertEqual(gallery_item_schema["required"], ["rating_key"])
+        self.assertTrue(
+            {
+                "title",
+                "episode_title",
+                "show_title",
+                "media_type",
+                "season_number",
+                "episode_number",
+                "year",
+                "added_at",
+            }.issubset(gallery_item_schema["properties"])
+        )
 
     def test_unauthenticated_calls_to_every_tool_return_native_oauth_error_without_data_access(self):
         protected_functions = (
@@ -1106,6 +1140,7 @@ class MCPServerTests(unittest.TestCase):
             "build_poster_image_native_result",
             "build_poster_gallery_native_result",
             "get_recent_library_additions",
+            "build_recent_library_additions_native_result",
             "build_recent_additions_render_result",
             "get_agent_watch_history",
         )
@@ -1124,7 +1159,7 @@ class MCPServerTests(unittest.TestCase):
                 lambda: self._exercise_unauthenticated_protocol(call_tools=True)
             )
 
-        self.assertEqual(len(call_results), 12)
+        self.assertEqual(len(call_results), 13)
         for tool_name, result in call_results.items():
             self.assertTrue(result.isError, tool_name)
             self.assertEqual(result.content[0].text, "Authentication required.", tool_name)
