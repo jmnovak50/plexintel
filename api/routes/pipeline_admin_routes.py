@@ -11,6 +11,7 @@ from api.services.pipeline_service import (
     get_pipeline_runs,
     request_pipeline_cancel,
     run_pipeline,
+    try_acquire_pipeline_lock,
 )
 
 router = APIRouter()
@@ -79,6 +80,12 @@ def admin_cancel_pipeline_run(run_id: int, admin_user=Depends(require_admin)):
 @router.post("/admin/pipeline/trigger")
 def admin_trigger_pipeline(admin_user=Depends(require_admin)):
     username = admin_user["username"]
+    pipeline_lock = try_acquire_pipeline_lock(source="web")
+    if pipeline_lock is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Pipeline already running; refusing duplicate execution.",
+        )
 
     def worker() -> None:
         try:
@@ -86,12 +93,20 @@ def admin_trigger_pipeline(admin_user=Depends(require_admin)):
                 delivery_type="manual",
                 triggered_by=username,
                 schedule_key=None,
+                invocation_source="web",
+                acquired_lock=pipeline_lock,
             )
         except Exception as exc:
             print(f"Manual pipeline error: {exc}")
+        finally:
+            pipeline_lock.release()
 
     thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        pipeline_lock.release()
+        raise
     return {
         "status": "accepted",
         "requested_by": username,

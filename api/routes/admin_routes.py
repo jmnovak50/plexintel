@@ -37,7 +37,6 @@ ALLOWED_SCRIPTS = {
     "build_user_embeddings.py",
     "fetch_tautulli_data.py",
     "label_embeddings.py",
-    "run_daily_pipeline.sh",
     "run_email_digest.py",
 }
 

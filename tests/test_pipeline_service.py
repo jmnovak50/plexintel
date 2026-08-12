@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import signal
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -41,6 +43,7 @@ class FakeConnection:
         self.fetchall_results = list(fetchall_results or [])
         self.executed = []
         self.commit_count = 0
+        self.rollback_count = 0
         self.closed = False
 
     def cursor(self, *args, **kwargs):
@@ -49,8 +52,20 @@ class FakeConnection:
     def commit(self):
         self.commit_count += 1
 
+    def rollback(self):
+        self.rollback_count += 1
+
     def close(self):
         self.closed = True
+
+
+class FakePipelineLock:
+    def __init__(self):
+        self.path = Path("/tmp/test-daily-pipeline.lock")
+        self.released = False
+
+    def release(self):
+        self.released = True
 
 
 class PipelineScheduleSlotTests(unittest.TestCase):
@@ -198,14 +213,24 @@ class PipelineRefreshStatusTests(unittest.TestCase):
 
 
 class PipelineRunTests(unittest.TestCase):
-    def test_run_pipeline_reads_named_advisory_lock_result(self):
+    def setUp(self):
+        self.log_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.log_dir.cleanup)
+        self.log_env = patch.dict(
+            "os.environ",
+            {"PIPELINE_LOG_PATH": str(Path(self.log_dir.name) / "pipeline.log")},
+        )
+        self.log_env.start()
+        self.addCleanup(self.log_env.stop)
+
+    def test_run_pipeline_normal_launch_releases_file_lock(self):
         conn = FakeConnection(
             [
-                {"acquired": True},
                 {"run_id": 123},
                 {"status": "success"},
             ]
         )
+        pipeline_lock = FakePipelineLock()
 
         with patch.object(pipeline_service, "connect_db", return_value=conn):
             with patch.object(pipeline_service, "build_pipeline_stages", return_value=[]):
@@ -213,19 +238,128 @@ class PipelineRunTests(unittest.TestCase):
                     delivery_type="manual",
                     triggered_by="admin",
                     schedule_key=None,
+                    acquired_lock=pipeline_lock,
                 )
 
         self.assertEqual(out, {"status": "success", "run_id": 123})
         self.assertTrue(conn.closed)
+        self.assertTrue(pipeline_lock.released)
         executed_sql = " ".join(sql for sql, _params in conn.executed)
-        self.assertIn("pg_try_advisory_lock", executed_sql)
-        self.assertIn("AS acquired", executed_sql)
-        self.assertIn("pg_advisory_unlock", executed_sql)
+        self.assertNotIn("pg_try_advisory_lock", executed_sql)
+        self.assertNotIn("pg_advisory_unlock", executed_sql)
 
-    def test_run_pipeline_returns_locked_when_advisory_lock_denied(self):
-        conn = FakeConnection([{"acquired": False}])
+    def test_run_pipeline_returns_locked_when_file_lock_denied(self):
+        with patch.object(pipeline_service, "try_acquire_pipeline_lock", return_value=None):
+            with patch.object(pipeline_service, "connect_db") as mock_connect:
+                out = pipeline_service.run_pipeline(
+                    delivery_type="manual",
+                    triggered_by="admin",
+                    schedule_key=None,
+                )
 
+        self.assertEqual(out, {"status": "locked"})
+        mock_connect.assert_not_called()
+
+    def test_file_lock_refuses_second_holder(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lock_path = Path(tmp_dir) / "daily.lock"
+            with patch.dict("os.environ", {"PIPELINE_LOCK_PATH": str(lock_path)}):
+                first = pipeline_service.try_acquire_pipeline_lock(source="web")
+                self.assertIsNotNone(first)
+                second = pipeline_service.try_acquire_pipeline_lock(source="cli")
+                self.assertIsNone(second)
+                first.release()
+                third = pipeline_service.try_acquire_pipeline_lock(source="cli")
+                self.assertIsNotNone(third)
+                third.release()
+
+    def test_shell_and_web_use_same_file_lock(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lock_path = Path(tmp_dir) / "daily.lock"
+            env = dict(os.environ)
+            env["PIPELINE_LOCK_PATH"] = str(lock_path)
+            with patch.dict("os.environ", {"PIPELINE_LOCK_PATH": str(lock_path)}):
+                web_lock = pipeline_service.try_acquire_pipeline_lock(source="web")
+                try:
+                    result = subprocess.run(
+                        [str(pipeline_service.PIPELINE_SCRIPT)],
+                        cwd=str(pipeline_service.REPO_ROOT),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=False,
+                    )
+                finally:
+                    web_lock.release()
+
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("Pipeline already running", result.stdout)
+
+    def test_pipeline_connection_closes_before_process_wait(self):
+        class FakeProc:
+            pid = 987
+            returncode = None
+
+            def __init__(self):
+                self.poll_count = 0
+
+            def poll(self):
+                self.poll_count += 1
+                if self.poll_count >= 2:
+                    self.returncode = 0
+                return self.returncode
+
+            def wait(self):
+                self.returncode = 0
+                return 0
+
+        connections = [FakeConnection([]), FakeConnection([{"cancel_requested": False}])]
+        fake_proc = FakeProc()
+
+        def assert_connections_closed(_seconds):
+            self.assertTrue(connections)
+            self.assertTrue(all(conn.closed for conn in connections))
+
+        with patch.object(pipeline_service, "connect_db", side_effect=connections):
+            with patch.object(pipeline_service.subprocess, "Popen", return_value=fake_proc) as popen:
+                with patch.object(pipeline_service.time, "sleep", side_effect=assert_connections_closed):
+                    with patch.object(pipeline_service, "_log_stage_output_files"):
+                        pipeline_service._run_stage_process(
+                            run_id=123,
+                            stage_key="stage_one",
+                            argv=["python", "stage.py"],
+                            env={},
+                            poll_seconds=0.1,
+                        )
+
+        self.assertTrue(all(conn.closed for conn in connections))
+        self.assertTrue(popen.call_args.kwargs["close_fds"])
+        self.assertIsNot(popen.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertIsNot(popen.call_args.kwargs["stderr"], subprocess.PIPE)
+
+    def test_output_tail_is_bounded(self):
+        with tempfile.TemporaryFile(mode="w+b") as output:
+            output.write(("x" * 100_000).encode())
+            tail = pipeline_service._read_output_tail(output, max_len=5000)
+        self.assertEqual(len(tail), 5000)
+
+    def test_run_pipeline_releases_supplied_lock_on_insert_failure(self):
+        conn = FakeConnection([None])
+        pipeline_lock = FakePipelineLock()
         with patch.object(pipeline_service, "connect_db", return_value=conn):
+            with self.assertRaises(TypeError):
+                pipeline_service.run_pipeline(
+                    delivery_type="manual",
+                    triggered_by="admin",
+                    schedule_key=None,
+                    acquired_lock=pipeline_lock,
+                )
+
+        self.assertTrue(pipeline_lock.released)
+
+    def test_run_pipeline_returns_locked_without_database_connection(self):
+        with patch.object(pipeline_service, "try_acquire_pipeline_lock", return_value=None):
             out = pipeline_service.run_pipeline(
                 delivery_type="manual",
                 triggered_by="admin",
@@ -233,15 +367,10 @@ class PipelineRunTests(unittest.TestCase):
             )
 
         self.assertEqual(out, {"status": "locked"})
-        self.assertTrue(conn.closed)
-        executed_sql = " ".join(sql for sql, _params in conn.executed)
-        self.assertIn("pg_try_advisory_lock", executed_sql)
-        self.assertNotIn("pg_advisory_unlock", executed_sql)
 
     def test_run_pipeline_writes_complete_stage_log_to_file(self):
         conn = FakeConnection(
             [
-                {"acquired": True},
                 {"run_id": 123},
                 {"cancel_requested": False},
                 {"stage_id": 456},
@@ -268,6 +397,7 @@ class PipelineRunTests(unittest.TestCase):
                                 delivery_type="manual",
                                 triggered_by="admin",
                                 schedule_key=None,
+                                acquired_lock=FakePipelineLock(),
                             )
 
             self.assertEqual(out, {"status": "success", "run_id": 123})
@@ -279,10 +409,42 @@ class PipelineRunTests(unittest.TestCase):
         self.assertIn("complete stderr\n", log_text)
         self.assertIn("[run:123] Pipeline run completed successfully", log_text)
 
+    def test_run_pipeline_marks_nonzero_child_failed(self):
+        conn = FakeConnection(
+            [
+                {"run_id": 123},
+                {"cancel_requested": False},
+                {"stage_id": 456},
+                {"status": "failed"},
+            ]
+        )
+        failed = pipeline_service.StageProcessResult(
+            returncode=7,
+            stdout="partial output\n",
+            stderr="stage failed\n",
+        )
+
+        with patch.object(pipeline_service, "connect_db", return_value=conn):
+            with patch.object(
+                pipeline_service,
+                "build_pipeline_stages",
+                return_value=[("stage_one", ["python", "stage.py"])],
+            ):
+                with patch.object(pipeline_service, "_run_stage_process", return_value=failed):
+                    out = pipeline_service.run_pipeline(
+                        delivery_type="manual",
+                        triggered_by="admin",
+                        schedule_key=None,
+                        acquired_lock=FakePipelineLock(),
+                    )
+
+        self.assertEqual(out, {"status": "failed", "run_id": 123})
+        executed_sql = " ".join(sql for sql, _params in conn.executed)
+        self.assertIn("SET status = 'failed'", executed_sql)
+
     def test_run_pipeline_cancel_before_next_stage_prevents_next_subprocess(self):
         conn = FakeConnection(
             [
-                {"acquired": True},
                 {"run_id": 123},
                 {"cancel_requested": False},
                 {"stage_id": 456},
@@ -310,6 +472,7 @@ class PipelineRunTests(unittest.TestCase):
                         delivery_type="manual",
                         triggered_by="admin",
                         schedule_key=None,
+                        acquired_lock=FakePipelineLock(),
                     )
 
         self.assertEqual(out, {"status": "cancelled", "run_id": 123})
@@ -342,25 +505,26 @@ class PipelineRunTests(unittest.TestCase):
             def kill(self):
                 self.returncode = -9
 
-        conn = FakeConnection([{"cancel_requested": True}])
         fake_proc = FakeProc()
         signals: list[tuple[int, signal.Signals]] = []
 
         with patch.object(pipeline_service.subprocess, "Popen", return_value=fake_proc):
-            with patch.object(
-                pipeline_service.os,
-                "killpg",
-                side_effect=lambda pid, sig: signals.append((pid, sig)),
-            ):
-                result = pipeline_service._run_stage_process(
-                    conn=conn,
-                    run_id=123,
-                    stage_key="stage_one",
-                    argv=["python", "stage.py"],
-                    env={},
-                    poll_seconds=0,
-                    grace_seconds=0,
-                )
+            with patch.object(pipeline_service, "_update_run_heartbeat_short"):
+                with patch.object(pipeline_service, "_read_pipeline_cancel_requested", return_value=True):
+                    with patch.object(pipeline_service, "_log_stage_output_files"):
+                        with patch.object(
+                            pipeline_service.os,
+                            "killpg",
+                            side_effect=lambda pid, sig: signals.append((pid, sig)),
+                        ):
+                            result = pipeline_service._run_stage_process(
+                                run_id=123,
+                                stage_key="stage_one",
+                                argv=["python", "stage.py"],
+                                env={},
+                                poll_seconds=0,
+                                grace_seconds=0,
+                            )
 
         self.assertTrue(result.cancelled)
         self.assertEqual(result.returncode, -9)

@@ -29,6 +29,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.runtime.txt /app/requirements.runtime.txt

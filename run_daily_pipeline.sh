@@ -5,6 +5,27 @@ APP="/home/jmnovak/projects/plexintel"
 VENV="/home/jmnovak/projects/plexintel/plexenv"
 PY="$VENV/bin/python"
 REFRESH_EXISTING_LABELS="${PIPELINE_REFRESH_EXISTING_LABELS:-false}"
+LOCK_PATH="${PIPELINE_LOCK_PATH:-$APP/logs/daily-pipeline.lock}"
+
+# The outer flock process owns the lock and closes its descriptor in this script
+# and every Python child. PIPELINE_LOCK_HELD prevents recursive wrapping.
+if [ "${PIPELINE_LOCK_HELD:-false}" != "true" ]; then
+  mkdir -p "$(dirname "$LOCK_PATH")"
+  set +e
+  PIPELINE_LOCK_HELD=true flock \
+    --nonblock \
+    --close \
+    --conflict-exit-code 75 \
+    "$LOCK_PATH" \
+    "$APP/run_daily_pipeline.sh" "$@"
+  lock_status=$?
+  set -e
+  if [ "$lock_status" -eq 75 ]; then
+    echo "Pipeline already running; refusing duplicate execution." >&2
+    echo "pipeline invocation source=cli launcher_pid=$$ lock_path=$LOCK_PATH lock_acquired=false another_pipeline_detected=true" >&2
+  fi
+  exit "$lock_status"
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -23,13 +44,15 @@ done
 cd "$APP" || exit 1
 
 echo "🚀 Starting daily pipeline run: $(date)"
-echo "⚠️  Use either this cron script or the Admin in-app scheduler, not both."
+echo "🔒 Shared pipeline lock acquired; overlapping admin, scheduler, and CLI runs will be refused."
 
 # Venv hard-lock: PATH + source; also pin PG to 17 on 5432
 export PATH="$VENV/bin:$PATH"
 [ -f "$VENV/bin/activate" ] && source "$VENV/bin/activate"
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"
+
+echo "pipeline invocation source=cli launcher_pid=$$ effective_uid=$(id -u) effective_user=$(id -un) working_directory=$(pwd) script_path=$APP/run_daily_pipeline.sh PATH=$PATH VIRTUAL_ENV=${VIRTUAL_ENV:-<absent>} start_timestamp=$(date --iso-8601=seconds) lock_path=$LOCK_PATH lock_acquired=true another_pipeline_detected=false"
 
 # 🔎 Debug (temporary): confirm the exact Python & packages in use
 echo "PY used: $PY"

@@ -217,10 +217,10 @@ export default function AdminPipeline() {
           <button
             type="button"
             onClick={() => void triggerRun()}
-            disabled={triggering || loading}
+            disabled={triggering || loading || hasActiveRun}
             className="recs-btn-primary"
           >
-            {triggering ? "Starting…" : "Run pipeline now"}
+            {triggering ? "Starting…" : hasActiveRun ? "Pipeline running" : "Run pipeline now"}
           </button>
           <button
             type="button"

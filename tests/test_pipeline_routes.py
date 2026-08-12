@@ -12,6 +12,14 @@ def _admin_user():
     return {"user_id": 1, "username": "admin", "friendly_name": "Admin", "plex_email": None, "is_admin": True}
 
 
+class FakePipelineLock:
+    def __init__(self):
+        self.released = False
+
+    def release(self):
+        self.released = True
+
+
 class PipelineAdminRoutesTests(unittest.TestCase):
     def test_list_runs(self):
         fake_runs = {
@@ -48,11 +56,59 @@ class PipelineAdminRoutesTests(unittest.TestCase):
 
     @patch.object(pipeline_admin_routes.threading, "Thread")
     def test_trigger_returns_accepted(self, mock_thread):
+        pipeline_lock = FakePipelineLock()
         mock_instance = mock_thread.return_value
-        resp = pipeline_admin_routes.admin_trigger_pipeline(admin_user=_admin_user())
+        with patch.object(
+            pipeline_admin_routes,
+            "try_acquire_pipeline_lock",
+            return_value=pipeline_lock,
+        ):
+            resp = pipeline_admin_routes.admin_trigger_pipeline(admin_user=_admin_user())
         self.assertEqual(resp["status"], "accepted")
         mock_thread.assert_called_once()
         mock_instance.start.assert_called_once()
+
+    def test_duplicate_trigger_returns_conflict_without_thread(self):
+        with patch.object(
+            pipeline_admin_routes,
+            "try_acquire_pipeline_lock",
+            return_value=None,
+        ):
+            with patch.object(pipeline_admin_routes.threading, "Thread") as mock_thread:
+                with self.assertRaises(HTTPException) as ctx:
+                    pipeline_admin_routes.admin_trigger_pipeline(admin_user=_admin_user())
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("already running", ctx.exception.detail.lower())
+        mock_thread.assert_not_called()
+
+    def test_trigger_transfers_lock_to_worker(self):
+        pipeline_lock = FakePipelineLock()
+
+        class InlineThread:
+            def __init__(self, *, target, daemon):
+                self.target = target
+                self.daemon = daemon
+
+            def start(self):
+                self.target()
+
+        with patch.object(
+            pipeline_admin_routes,
+            "try_acquire_pipeline_lock",
+            return_value=pipeline_lock,
+        ):
+            with patch.object(pipeline_admin_routes.threading, "Thread", InlineThread):
+                with patch.object(pipeline_admin_routes, "run_pipeline") as mock_run:
+                    pipeline_admin_routes.admin_trigger_pipeline(admin_user=_admin_user())
+
+        mock_run.assert_called_once_with(
+            delivery_type="manual",
+            triggered_by="admin",
+            schedule_key=None,
+            invocation_source="web",
+            acquired_lock=pipeline_lock,
+        )
 
     def test_cancel_run_returns_accepted(self):
         with patch.object(

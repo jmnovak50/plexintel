@@ -1095,7 +1095,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "boolean",
         default=False,
         env_aliases=("PIPELINE_ENABLED",),
-        description="When enabled, the app runs the training pipeline on the schedule below. Disable overlapping cron jobs that run run_daily_pipeline.sh.",
+        description="When enabled, the app runs the training pipeline on the schedule below. Full-script cron and admin launches share a lock and refuse overlaps.",
     ),
     _setting(
         "pipeline.frequency",
@@ -1108,8 +1108,8 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         description=(
             "How often PlexIntel runs the automated sync, embedding, training, scoring, and labeling process. Use "
             "daily for fresher recommendations. Use weekly if the machine is resource-constrained, the library "
-            "changes slowly, or training/scoring takes too long. Do not run both the in-app scheduler and a separate "
-            "cron job for the same pipeline, or you may double-run it."
+            "changes slowly, or training/scoring takes too long. Prefer one schedule owner; full-script cron and "
+            "in-app launches share a lock and refuse duplicate execution."
         ),
     ),
     _setting(

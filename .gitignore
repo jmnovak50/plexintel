@@ -5,6 +5,7 @@
 __pycache__/
 *.py[cod]
 *.log
+logs/*.lock
 plexenv/           # this is your venv, so yes
 
 # Node junk

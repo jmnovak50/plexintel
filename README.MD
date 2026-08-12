@@ -84,7 +84,9 @@ Start the app, sign in as an admin user, then open `/admin/settings` to configur
 The repo includes `run_daily_pipeline.sh`, which runs the full sequence (Tautulli sync, embeddings, training data, train, score, batch labeling). You can either:
 
 **Option A — In-app scheduler (recommended when the API is always running)**
-In **Admin → Settings → Nightly pipeline**, enable the scheduler and set frequency, day (for weekly), local run time, and timezone. The FastAPI process runs a background poll (default every 60s; override with `PIPELINE_SCHEDULER_INTERVAL_SECONDS`). Disable with `PIPELINE_SCHEDULER_ENABLED=false`. When this is enabled, **do not** also cron the same shell script, or you may double-run the pipeline. Monitor runs under **Admin → Pipeline runs** (`/admin/pipeline`).
+In **Admin → Settings → Nightly pipeline**, enable the scheduler and set frequency, day (for weekly), local run time, and timezone. The FastAPI process runs a background poll (default every 60s; override with `PIPELINE_SCHEDULER_INTERVAL_SECONDS`). Disable with `PIPELINE_SCHEDULER_ENABLED=false`. Monitor runs under **Admin → Pipeline runs** (`/admin/pipeline`).
+
+Admin, in-app scheduler, CLI, and cron launches share a non-blocking OS file lock at `logs/daily-pipeline.lock`. A concurrent launch exits/refuses with “Pipeline already running” instead of starting a second pipeline. Override the shared location with `PIPELINE_LOCK_PATH`; every launch environment must resolve that variable to the same underlying file (the Docker compose log bind mount does this for the default path).
 
 The scheduled pipeline scores all users with `score_model.py --all-users`. SHAP targeting is media-aware by default: it separately targets the configured top movie recommendations, displayed TV show recommendations, and a modest overall catch-all instead of relying on one global rank list. The legacy global SHAP mode remains available in Admin settings, but the recommended default is per-media-type targeting so movie explanations are not crowded out by episode-heavy rankings.
 
@@ -95,7 +97,7 @@ In-app pipeline runs also append the complete stdout/stderr for every stage to `
 Admins can cancel an active in-app run from **Admin → Pipeline runs**. Cancellation is cooperative: the API marks the run for cancellation, the active stage receives `SIGTERM`, and it is force-killed if it does not exit within the grace period. Cancelled scheduled runs count as terminal for that schedule slot, so the scheduler will not immediately retry the same nightly run. This control does not apply to host cron jobs that launch `run_daily_pipeline.sh` outside the API process.
 
 **Option B — Cron**
-Schedule `run_daily_pipeline.sh` (or the individual Python steps) with cron on the host. If you use cron, leave the in-app pipeline scheduler **disabled** in admin settings.
+Schedule `run_daily_pipeline.sh` with cron on the host. Running individual Python stages bypasses the whole-pipeline lock and is not a supported concurrent launch method. It remains clearer operationally to disable the in-app schedule when cron owns the schedule, even though duplicate full-script launches are now refused by the shared lock.
 
 The cron script uses the same coverage-oriented label defaults. To explicitly pass `--refresh_existing` for a manual quality-review run, use `run_daily_pipeline.sh --refresh-existing` or set `PIPELINE_REFRESH_EXISTING_LABELS=true`. Keep it off for normal daily runs.
 
