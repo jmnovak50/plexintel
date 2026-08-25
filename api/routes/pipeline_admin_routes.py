@@ -9,6 +9,7 @@ from api.routes.admin_routes import require_admin
 from api.services.pipeline_service import (
     get_pipeline_run,
     get_pipeline_runs,
+    purge_pipeline_runs,
     request_pipeline_cancel,
     run_pipeline,
     try_acquire_pipeline_lock,
@@ -46,6 +47,27 @@ def admin_list_pipeline_runs(
     payload = get_pipeline_runs(limit=limit)
     runs = [_serialize_run(r) for r in payload.get("runs", [])]
     return {"requested_by": admin_user["username"], "runs": runs}
+
+
+@router.delete("/admin/pipeline/runs")
+def admin_purge_pipeline_runs(
+    keep: int = Query(50, ge=1, le=1000),
+    admin_user=Depends(require_admin),
+):
+    result = purge_pipeline_runs(keep=keep)
+    deleted_count = result["deleted_count"]
+    detail = (
+        f"Purged {deleted_count} older pipeline run{'s' if deleted_count != 1 else ''}."
+        if deleted_count
+        else "No eligible pipeline runs were old enough to purge."
+    )
+    return {
+        "status": "ok",
+        "requested_by": admin_user["username"],
+        "keep": result["keep"],
+        "deleted_count": deleted_count,
+        "detail": detail,
+    }
 
 
 @router.get("/admin/pipeline/runs/{run_id}")

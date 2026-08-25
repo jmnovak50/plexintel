@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { CircleStop } from "lucide-react";
+import { CircleStop, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import AppShell from "../components/AppShell";
 import { ErrorBanner, SuccessBanner } from "../components/StatusBanner";
@@ -95,11 +95,20 @@ export default function AdminPipeline() {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
+  const [purging, setPurging] = useState(false);
   const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null);
+  const [retentionChoice, setRetentionChoice] = useState("50");
+  const [customRetention, setCustomRetention] = useState("50");
   const hasActiveRun = runs.some((run) => isActiveRun(run.status));
+  const retentionCount = retentionChoice === "custom"
+    ? Number(customRetention)
+    : Number(retentionChoice);
+  const retentionCountIsValid = Number.isInteger(retentionCount)
+    && retentionCount >= 1
+    && retentionCount <= 1000;
 
   const loadRuns = useCallback(async () => {
     const response = await fetch("/api/admin/pipeline/runs?limit=50", { credentials: "include" });
@@ -201,6 +210,45 @@ export default function AdminPipeline() {
     }
   }
 
+  async function purgeRuns() {
+    if (!retentionCountIsValid) {
+      setStatus(null);
+      setError("Keep newest must be a whole number from 1 to 1000.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Purge completed pipeline runs older than the newest ${retentionCount}? `
+      + "Active runs and the current scheduler record will be protected. This cannot be undone.",
+    );
+    if (!confirmed) return;
+
+    setPurging(true);
+    setStatus(null);
+    setError(null);
+    try {
+      const response = await fetch(`/api/admin/pipeline/runs?keep=${retentionCount}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(await responseMessage(response, `Purge failed (${response.status})`));
+      }
+      const data = await response.json();
+      setStatus(data.detail || (
+        data.deleted_count
+          ? `Purged ${data.deleted_count} older pipeline runs.`
+          : "No eligible pipeline runs were old enough to purge."
+      ));
+      setExpandedRunId(null);
+      await loadRuns();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Purge failed.");
+    } finally {
+      setPurging(false);
+    }
+  }
+
   function toggleExpand(runId: number) {
     setExpandedRunId((prev) => (prev === runId ? null : runId));
   }
@@ -241,12 +289,65 @@ export default function AdminPipeline() {
         </div>
       ) : (
         <section className="recs-surface overflow-hidden">
-          <div className="border-b border-slate-100 bg-slate-50/80 px-5 py-4">
-            <h2 className="text-lg font-semibold text-slate-900">Recent runs</h2>
-            <p className="text-sm text-slate-500">
-              Scheduled runs appear when the in-app scheduler is enabled and a slot completes successfully once per
-              schedule key. Failed scheduled runs retry until success.
-            </p>
+          <div className="flex flex-col gap-4 border-b border-slate-100 bg-slate-50/80 px-5 py-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">Recent runs</h2>
+              <p className="text-sm text-slate-500">
+                Scheduled runs appear when the in-app scheduler is enabled and a slot completes successfully once per
+                schedule key. Failed scheduled runs retry until success.
+              </p>
+            </div>
+            <div className="recs-notice-red flex flex-wrap items-end gap-2 p-3">
+              <div>
+                <label htmlFor="pipeline-retention" className="mb-1 block text-xs font-medium text-slate-700">
+                  Keep newest
+                </label>
+                <select
+                  id="pipeline-retention"
+                  value={retentionChoice}
+                  onChange={(event) => setRetentionChoice(event.target.value)}
+                  disabled={purging}
+                  className="recs-input w-28 py-2"
+                >
+                  <option value="10">10</option>
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              {retentionChoice === "custom" && (
+                <div>
+                  <label htmlFor="pipeline-custom-retention" className="mb-1 block text-xs font-medium text-slate-700">
+                    Run count
+                  </label>
+                  <input
+                    id="pipeline-custom-retention"
+                    type="number"
+                    min="1"
+                    max="1000"
+                    step="1"
+                    value={customRetention}
+                    onChange={(event) => setCustomRetention(event.target.value)}
+                    disabled={purging}
+                    aria-invalid={!retentionCountIsValid}
+                    className="recs-input w-28 py-2"
+                  />
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => void purgeRuns()}
+                disabled={purging || !retentionCountIsValid}
+                className="inline-flex items-center gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm font-medium text-red-800 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                {purging ? "Purging…" : "Purge older runs"}
+              </button>
+              {retentionChoice === "custom" && !retentionCountIsValid && (
+                <p className="w-full text-xs text-red-700">Enter a whole number from 1 to 1000.</p>
+              )}
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-slate-100 text-sm text-slate-900">

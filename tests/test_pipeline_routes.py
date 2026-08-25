@@ -3,9 +3,9 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 
-from api.routes import pipeline_admin_routes
+from api.routes import admin_routes, pipeline_admin_routes
 
 
 def _admin_user():
@@ -53,6 +53,65 @@ class PipelineAdminRoutesTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as ctx:
                 pipeline_admin_routes.admin_get_pipeline_run(run_id=999, admin_user=_admin_user())
             self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_purge_runs_forwards_retention_count(self):
+        with patch.object(
+            pipeline_admin_routes,
+            "purge_pipeline_runs",
+            return_value={"keep": 25, "deleted_count": 4},
+        ) as mock_purge:
+            resp = pipeline_admin_routes.admin_purge_pipeline_runs(
+                keep=25,
+                admin_user=_admin_user(),
+            )
+
+        mock_purge.assert_called_once_with(keep=25)
+        self.assertEqual(resp["status"], "ok")
+        self.assertEqual(resp["requested_by"], "admin")
+        self.assertEqual(resp["keep"], 25)
+        self.assertEqual(resp["deleted_count"], 4)
+        self.assertEqual(resp["detail"], "Purged 4 older pipeline runs.")
+
+    def test_purge_runs_reports_when_nothing_is_eligible(self):
+        with patch.object(
+            pipeline_admin_routes,
+            "purge_pipeline_runs",
+            return_value={"keep": 50, "deleted_count": 0},
+        ):
+            resp = pipeline_admin_routes.admin_purge_pipeline_runs(
+                keep=50,
+                admin_user=_admin_user(),
+            )
+
+        self.assertEqual(resp["deleted_count"], 0)
+        self.assertIn("No eligible", resp["detail"])
+
+    def test_purge_runs_rejects_retention_outside_allowed_range(self):
+        app = FastAPI()
+        app.include_router(pipeline_admin_routes.router)
+        purge_operation = app.openapi()["paths"]["/admin/pipeline/runs"]["delete"]
+        keep_parameter = next(
+            parameter
+            for parameter in purge_operation["parameters"]
+            if parameter["name"] == "keep"
+        )
+
+        self.assertEqual(keep_parameter["schema"]["minimum"], 1)
+        self.assertEqual(keep_parameter["schema"]["maximum"], 1000)
+        self.assertEqual(keep_parameter["schema"]["default"], 50)
+
+    def test_purge_runs_requires_admin(self):
+        purge_route = next(
+            route
+            for route in pipeline_admin_routes.router.routes
+            if route.path == "/admin/pipeline/runs" and "DELETE" in route.methods
+        )
+        dependency_calls = [dependency.call for dependency in purge_route.dependant.dependencies]
+        self.assertIn(admin_routes.require_admin, dependency_calls)
+
+        with self.assertRaises(HTTPException) as ctx:
+            admin_routes.require_admin(user={**_admin_user(), "is_admin": False})
+        self.assertEqual(ctx.exception.status_code, 403)
 
     @patch.object(pipeline_admin_routes.threading, "Thread")
     def test_trigger_returns_accepted(self, mock_thread):

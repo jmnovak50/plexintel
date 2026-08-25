@@ -1159,6 +1159,47 @@ def get_pipeline_runs(*, limit: int = 50) -> dict[str, Any]:
         conn.close()
 
 
+def purge_pipeline_runs(*, keep: int) -> dict[str, int]:
+    """Delete older terminal run history while preserving scheduler safety markers."""
+    current_schedule_key = get_pipeline_schedule_slot()["schedule_key"]
+    conn = connect_db(cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                WITH ranked_terminal_runs AS (
+                    SELECT
+                        run_id,
+                        schedule_key,
+                        ROW_NUMBER() OVER (
+                            ORDER BY started_at DESC, run_id DESC
+                        ) AS retention_rank
+                    FROM public.pipeline_runs
+                    WHERE status IN %s
+                ),
+                purge_candidates AS (
+                    SELECT run_id
+                    FROM ranked_terminal_runs
+                    WHERE retention_rank > %s
+                      AND schedule_key IS DISTINCT FROM %s
+                )
+                DELETE FROM public.pipeline_runs
+                WHERE run_id IN (SELECT run_id FROM purge_candidates)
+                RETURNING run_id
+                """,
+                (
+                    tuple(sorted(TERMINAL_RUN_STATUSES)),
+                    keep,
+                    current_schedule_key,
+                ),
+            )
+            deleted_rows = list(cur.fetchall() or [])
+        conn.commit()
+        return {"keep": keep, "deleted_count": len(deleted_rows)}
+    finally:
+        conn.close()
+
+
 def get_pipeline_run(run_id: int) -> dict[str, Any] | None:
     conn = connect_db(cursor_factory=RealDictCursor)
     try:

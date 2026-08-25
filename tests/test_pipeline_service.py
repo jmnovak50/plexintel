@@ -94,6 +94,48 @@ class PipelineScheduleSlotTests(unittest.TestCase):
             self.assertEqual(out["status"], "disabled")
 
 
+class PipelineRetentionTests(unittest.TestCase):
+    def test_purge_keeps_newest_terminal_runs_and_current_schedule_slot(self):
+        conn = FakeConnection([], fetchall_results=[[{"run_id": 1}, {"run_id": 2}]])
+
+        with patch.object(
+            pipeline_service,
+            "get_pipeline_schedule_slot",
+            return_value={"schedule_key": "daily:current"},
+        ):
+            with patch.object(pipeline_service, "connect_db", return_value=conn):
+                result = pipeline_service.purge_pipeline_runs(keep=25)
+
+        self.assertEqual(result, {"keep": 25, "deleted_count": 2})
+        self.assertEqual(conn.commit_count, 1)
+        self.assertTrue(conn.closed)
+        sql, params = conn.executed[0]
+        self.assertIn("ROW_NUMBER()", sql)
+        self.assertIn("ORDER BY started_at DESC, run_id DESC", sql)
+        self.assertIn("status IN %s", sql)
+        self.assertIn("retention_rank > %s", sql)
+        self.assertIn("schedule_key IS DISTINCT FROM %s", sql)
+        self.assertIn("DELETE FROM public.pipeline_runs", sql)
+        self.assertEqual(params[0], ("cancelled", "failed", "success"))
+        self.assertEqual(params[1], 25)
+        self.assertEqual(params[2], "daily:current")
+
+    def test_purge_returns_zero_when_no_runs_are_eligible(self):
+        conn = FakeConnection([], fetchall_results=[[]])
+
+        with patch.object(
+            pipeline_service,
+            "get_pipeline_schedule_slot",
+            return_value={"schedule_key": "weekly:current"},
+        ):
+            with patch.object(pipeline_service, "connect_db", return_value=conn):
+                result = pipeline_service.purge_pipeline_runs(keep=50)
+
+        self.assertEqual(result, {"keep": 50, "deleted_count": 0})
+        self.assertEqual(conn.commit_count, 1)
+        self.assertTrue(conn.closed)
+
+
 class PipelineStageTests(unittest.TestCase):
     def test_build_pipeline_stages_uses_label_batch_setting_defaults(self):
         with patch.object(pipeline_service, "get_setting_value", side_effect=lambda _key, default=None: default):
