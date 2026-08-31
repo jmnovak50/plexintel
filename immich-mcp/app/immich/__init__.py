@@ -1,0 +1,2 @@
+"""Typed Immich upstream boundary."""
+

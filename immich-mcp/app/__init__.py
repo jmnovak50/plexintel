@@ -1,0 +1,2 @@
+"""Immich MCP service."""
+
