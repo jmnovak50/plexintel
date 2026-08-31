@@ -10,8 +10,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from mcp.server.transport_security import TransportSecuritySettings
 
+from app.account.routes import account_router
+from app.auth.account_oidc import AccountOIDC
 from app.auth.oidc import OIDCJWTVerifier
 from app.config import Settings, get_settings
+from app.credentials.crypto import CredentialCipher
+from app.credentials.sqlite import SQLiteCredentialProvider
 from app.immich.client import ImmichClient, ImmichError
 from app.immich.shares import validate_share_key
 from app.mcp.server import create_mcp_server
@@ -38,12 +42,24 @@ def create_app(
     *,
     immich_client: ImmichClient | None = None,
     oidc_client: httpx.AsyncClient | None = None,
+    credential_provider: SQLiteCredentialProvider | None = None,
+    account_oidc: AccountOIDC | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
     client = immich_client or ImmichClient(settings)
     verifier = OIDCJWTVerifier(settings, oidc_client)
-    mcp = create_mcp_server(settings, client, verifier)
+    provider = credential_provider
+    if settings.private_access_enabled and provider is None:
+        assert settings.credential_encryption_key is not None
+        assert settings.account_session_secret is not None
+        provider = SQLiteCredentialProvider(
+            settings.credential_db_path,
+            CredentialCipher(settings.credential_encryption_key.get_secret_value()),
+            settings.account_session_secret.get_secret_value(),
+        )
+    browser_oidc = account_oidc or (AccountOIDC(settings, verifier) if provider is not None else None)
+    mcp = create_mcp_server(settings, client, verifier, provider)
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[value.strip() for value in settings.allowed_hosts.split(",") if value.strip()],
@@ -60,17 +76,24 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
+            if provider is not None:
+                await provider.initialize()
             async with mcp.session_manager.run():
                 yield
         finally:
             await verifier.aclose()
             await client.aclose()
 
-    app = FastAPI(title="Immich MCP", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Immich MCP", version="0.2.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.immich = client
     app.state.oidc_verifier = verifier
     app.state.mcp = mcp
+    app.state.credentials = provider
+    app.state.account_oidc = browser_oidc
+
+    if provider is not None and browser_oidc is not None:
+        app.include_router(account_router(settings, provider, client, browser_oidc))
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -81,6 +104,8 @@ def create_app(
         try:
             await verifier.warm()
             await client.ping()
+            if provider is not None and not await provider.ready():
+                raise RuntimeError("credential storage is unavailable")
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Required upstream is unavailable") from exc
         return {"status": "ready"}

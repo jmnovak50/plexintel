@@ -1,4 +1,4 @@
-"""Private album API boundary (intentionally inactive until delegation is supported)."""
+"""Private Immich credential provider boundary."""
 
 from typing import Protocol
 
@@ -12,4 +12,3 @@ class PrivateImmichCredentialProvider(Protocol):
 class UnsupportedDelegationProvider:
     async def credential_for(self, user: AuthenticatedUser) -> None:
         return None
-

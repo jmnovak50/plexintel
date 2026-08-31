@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,28 +49,14 @@ class OIDCJWTVerifier:
     async def warm(self) -> None:
         await self._refresh(force=False)
 
+    async def metadata(self) -> dict[str, Any]:
+        await self._refresh(force=False)
+        return dict(self._metadata or {})
+
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
-            header = jwt.get_unverified_header(token)
-            kid = header.get("kid")
-            algorithm = header.get("alg")
-            if not kid or not algorithm or algorithm.lower() == "none":
-                return None
-            await self._refresh(force=False)
-            key = self._keys.get(str(kid))
-            if key is None:
-                await self._refresh(force=True)
-                key = self._keys.get(str(kid))
-            if key is None or key.algorithm_name != algorithm:
-                return None
-            claims = jwt.decode(
-                token,
-                key.key,
-                algorithms=[algorithm],
-                audience=self.settings.oidc_audience,
-                issuer=self.issuer,
-                options={"require": ["exp", "sub", "iss", "aud"]},
-                leeway=30,
+            claims = await self._decode(
+                token, audience=str(self.settings.oidc_audience), required=["exp", "sub", "iss", "aud"]
             )
             scopes = _scopes(claims)
             if not set(self.settings.required_scopes).issubset(scopes):
@@ -91,6 +78,42 @@ class OIDCJWTVerifier:
         except (jwt.PyJWTError, OIDCConfigurationError, httpx.HTTPError, ValueError, TypeError):
             # Authentication failures are intentionally indistinguishable and never include the token.
             return None
+
+    async def verify_id_token(
+        self, token: str, *, audience: str, nonce: str
+    ) -> dict[str, Any] | None:
+        try:
+            claims = await self._decode(
+                token, audience=audience, required=["exp", "sub", "iss", "aud", "nonce"]
+            )
+            if not hmac.compare_digest(str(claims.get("nonce", "")), nonce):
+                return None
+            return claims
+        except (jwt.PyJWTError, OIDCConfigurationError, httpx.HTTPError, ValueError, TypeError):
+            return None
+
+    async def _decode(self, token: str, *, audience: str, required: list[str]) -> dict[str, Any]:
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        algorithm = header.get("alg")
+        if not kid or not algorithm or str(algorithm).lower() == "none":
+            raise OIDCConfigurationError("OIDC token header is invalid")
+        await self._refresh(force=False)
+        key = self._keys.get(str(kid))
+        if key is None:
+            await self._refresh(force=True)
+            key = self._keys.get(str(kid))
+        if key is None or key.algorithm_name != algorithm:
+            raise OIDCConfigurationError("OIDC signing key is unavailable")
+        return jwt.decode(
+            token,
+            key.key,
+            algorithms=[str(algorithm)],
+            audience=audience,
+            issuer=self.issuer,
+            options={"require": required},
+            leeway=30,
+        )
 
     async def _refresh(self, *, force: bool) -> None:
         if not force and self._metadata is not None and time.monotonic() < self._cache_until:

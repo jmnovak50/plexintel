@@ -54,6 +54,7 @@ class SharedAlbumResult(BaseModel):
 
 
 class AuthenticatedUser(BaseModel):
+    issuer: str
     sub: str
     email: str | None = None
     preferred_username: str | None = None
@@ -61,6 +62,13 @@ class AuthenticatedUser(BaseModel):
 
 
 class PrivateImmichCredential(BaseModel):
-    kind: Literal["session"]
+    kind: Literal["api_key", "session"]
     token: str = Field(repr=False)
 
+
+class ShareCredential(BaseModel):
+    kind: Literal["share"] = "share"
+    token: str = Field(repr=False)
+
+
+ImmichCredential = PrivateImmichCredential | ShareCredential

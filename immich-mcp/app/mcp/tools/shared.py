@@ -3,16 +3,20 @@ import json
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from app.config import Settings
 from app.immich.client import ImmichClient, InvalidShareLink
 from app.immich.models import SharedAlbumResult
 from app.immich.shares import resolve_share_input, validate_share_key
 
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+
 
 def register_shared_tools(server: MCPServer, client: ImmichClient, settings: Settings) -> None:
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     async def get_shared_album(
         share_url: str | None = None, share_key: str | None = None
     ) -> SharedAlbumResult:
@@ -35,7 +39,7 @@ def register_shared_tools(server: MCPServer, client: ImmichClient, settings: Set
             },
         )
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     async def list_shared_album_assets(
         share_url: str | None = None, share_key: str | None = None
     ) -> list[dict[str, Any]]:
@@ -45,12 +49,12 @@ def register_shared_tools(server: MCPServer, client: ImmichClient, settings: Set
         assert link.album is not None
         return await client.list_shared_album_assets(key, link.album.id)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     async def get_shared_asset_metadata(share_key: str, asset_id: str) -> dict[str, Any]:
         """Return metadata Immich exposes for an asset under shared-link authorization."""
         return await client.get_shared_asset_metadata(validate_share_key(share_key), asset_id)
 
-    @server.tool(structured_output=False)
+    @server.tool(structured_output=False, annotations=READ_ONLY)
     async def get_shared_asset_image(
         share_key: str,
         asset_id: str,
@@ -69,7 +73,7 @@ def register_shared_tools(server: MCPServer, client: ImmichClient, settings: Set
             )
         ]
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     async def get_shared_album_gallery(
         share_url: str | None = None,
         share_key: str | None = None,
@@ -121,4 +125,3 @@ async def _album_link(client: ImmichClient, key: str):
     if link.type.upper() != "ALBUM" or link.album is None:
         raise InvalidShareLink("Shared link is not an album share")
     return link
-

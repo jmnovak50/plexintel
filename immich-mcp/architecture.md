@@ -25,7 +25,7 @@ Immich is an OIDC relying party/client, not an OAuth authorization server:
 * There is no documented token-exchange, on-behalf-of, JWT bearer grant, or session-delegation endpoint that turns an arbitrary Authentik access token issued to this MCP resource into an Immich user session.
 * Consequently, sending the MCP's Authentik bearer token to Immich is unsupported and will not authenticate unless it accidentally equals an opaque Immich session. Automating Immich's browser callback inside the MCP server would conflate OAuth clients, redirect URIs, state, and sessions and is not a supported delegation protocol.
 
-Decision: Phase 3 remains disabled behind a `PrivateImmichCredentialProvider` abstraction. The implementation does not accept a global admin key or scrape/reuse browser cookies. A future implementation requires an Immich-supported token exchange/delegation API, or a separately consented per-user Immich credential lifecycle with clear revocation and secure storage.
+Decision: external Authentik tokens are still never translated or forwarded to Immich. Private access instead uses a separately consented, least-privilege Immich API key created by each user. The key is encrypted locally and selected only by the verified Authentik issuer plus `sub`. No MCP tool accepts a key or an identity selector.
 
 Primary sources:
 
@@ -34,6 +34,49 @@ Primary sources:
 * Immich `oauth.repository.ts`: https://github.com/immich-app/immich/blob/main/server/src/repositories/oauth.repository.ts
 * Immich OpenAPI: https://github.com/immich-app/immich/blob/main/open-api/immich-openapi-specs.json
 * Immich OAuth documentation: https://docs.immich.app/administration/oauth
+
+## Current Immich API-key findings
+
+Research snapshot: Immich `main` OpenAPI on 2026-08-31.
+
+Immich API keys use the `x-api-key` header. The supported identity check is `GET /api/users/me`. The read-only private surface used by this service is:
+
+| Operation | Current endpoint | API-key permission |
+| --- | --- | --- |
+| Validate key/current user | `GET /api/users/me` | `user.read` |
+| List albums | `GET /api/albums` | `album.read` |
+| Read album | `GET /api/albums/{id}` | `album.read` |
+| List album assets | `POST /api/search/metadata`, filter `albumIds.any` | `asset.read` |
+| Asset metadata | `GET /api/assets/{id}` | `asset.read` |
+| Thumbnail/preview | `GET /api/assets/{id}/thumbnail` | `asset.view` |
+| Original image | `GET /api/assets/{id}/original` | `asset.download` |
+| Metadata search/recent assets | `POST /api/search/metadata` | `asset.read` |
+| Natural-language smart search | `POST /api/search/smart` | `asset.read` |
+
+The current album response no longer embeds its asset list, and there is no read endpoint named `/albums/{id}/assets`. Album enumeration therefore uses the current cursor-based metadata search contract. Current search filters are structured objects (for example, `{"albumIds":{"any":[id]}}`); deprecated flat fields are not used.
+
+Minimum recommended permissions for every tool in this release are `user.read`, `album.read`, `asset.read`, `asset.view`, and `asset.download`. Omit `asset.download` if original-image retrieval is not wanted; thumbnails continue to work. No create, update, upload, delete, sharing, or admin permission is requested.
+
+Primary implementation contracts:
+
+* Immich OpenAPI: https://github.com/immich-app/immich/blob/main/open-api/immich-openapi-specs.json
+* Immich album controller: https://github.com/immich-app/immich/blob/main/server/src/controllers/album.controller.ts
+* Immich search controller: https://github.com/immich-app/immich/blob/main/server/src/controllers/search.controller.ts
+* Immich auth service: https://github.com/immich-app/immich/blob/main/server/src/services/auth.service.ts
+
+## Private identity and authorization boundary
+
+```text
+verified Authentik issuer + sub
+              |
+              v
+encrypted SQLite credential record
+              |
+              v
+that user's x-api-key --> configured Immich
+```
+
+Authentik answers “who is this MCP user?” The Immich API key answers “what may this user access in Immich?” The browser account flow uses its own Authentik client, Authorization Code, PKCE, state, nonce, and a server-side opaque session. OAuth tokens and Immich keys are never stored in the browser cookie.
 
 ## Public share behavior
 
@@ -51,6 +94,8 @@ The Python MCP SDK runs Streamable HTTP at `/mcp` and publishes RFC 9728 protect
 * Fixed upstream base URL, fixed API paths, encoded identifiers, TLS verification by default.
 * Timeouts, bounded GET-only retries, response-size limits, gallery image limits.
 * No token/share-key logging; sanitized upstream errors.
+* Fernet-authenticated encryption at rest; SQLite records are keyed only by issuer+subject.
+* Opaque HMAC-indexed browser sessions, short-lived OAuth state/PKCE records, secure cookies, and CSRF checks.
+* Readiness verifies SQLite itself but never a particular user's credential.
 * Native MCP `ImageContent` preserves the upstream `Content-Type`.
 * Public HTML uses the same client and an image proxy authorized by the same share key.
-

@@ -7,7 +7,14 @@ import httpx
 import structlog
 
 from app.config import Settings
-from app.immich.models import ImagePayload, SharedLink, TimelineBucket
+from app.immich.models import (
+    ImagePayload,
+    ImmichCredential,
+    PrivateImmichCredential,
+    ShareCredential,
+    SharedLink,
+    TimelineBucket,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -17,6 +24,14 @@ class ImmichError(Exception):
 
 
 class InvalidShareLink(ImmichError):
+    pass
+
+
+class ImmichUnauthorized(ImmichError):
+    pass
+
+
+class InvalidImmichCredential(ImmichUnauthorized):
     pass
 
 
@@ -65,7 +80,7 @@ class ImmichClient:
             timeout=timeout,
             verify=settings.tls_verify,
             follow_redirects=False,
-            headers={"User-Agent": "immich-mcp/0.1"},
+            headers={"User-Agent": "immich-mcp/0.2"},
         )
 
     async def aclose(self) -> None:
@@ -77,39 +92,84 @@ class ImmichClient:
         path: str,
         *,
         share_key: str | None = None,
+        credential: ImmichCredential | None = None,
+        send_credential: bool = True,
         params: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
-        headers = {"x-immich-share-key": share_key} if share_key else None
-        for attempt in range(self.settings.http_max_retries + 1):
+        if share_key and credential:
+            raise ValueError("only one Immich credential may be supplied")
+        auth = credential or (ShareCredential(token=share_key) if share_key else None)
+        return await self._request(
+            "GET", path, credential=auth, send_credential=send_credential, params=params
+        )
+
+    async def _post(
+        self,
+        path: str,
+        *,
+        credential: ImmichCredential,
+        json_body: Mapping[str, Any],
+    ) -> httpx.Response:
+        return await self._request("POST", path, credential=credential, json_body=json_body)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        credential: ImmichCredential | None = None,
+        send_credential: bool = True,
+        params: Mapping[str, Any] | None = None,
+        json_body: Mapping[str, Any] | None = None,
+    ) -> httpx.Response:
+        headers = self._credential_headers(credential) if send_credential else None
+        retries = self.settings.http_max_retries if method == "GET" else 0
+        for attempt in range(retries + 1):
             try:
-                response = await self._client.get(path, headers=headers, params=params)
+                response = await self._client.request(
+                    method, path, headers=headers, params=params, json=json_body
+                )
             except httpx.TimeoutException as exc:
-                if attempt < self.settings.http_max_retries:
+                if attempt < retries:
                     await asyncio.sleep(0.05 * (2**attempt))
                     continue
                 raise ImmichTimeout("Immich request timed out") from exc
             except httpx.RequestError as exc:
-                if attempt < self.settings.http_max_retries:
+                if attempt < retries:
                     await asyncio.sleep(0.05 * (2**attempt))
                     continue
                 raise ImmichUnavailable("Immich could not be reached") from exc
 
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < self.settings.http_max_retries:
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < retries:
                 await asyncio.sleep(0.05 * (2**attempt))
                 continue
-            self._raise_for_status(response)
+            self._raise_for_status(response, credential)
             return response
         raise ImmichUnavailable("Immich request failed")  # pragma: no cover
 
     @staticmethod
-    def _raise_for_status(response: httpx.Response) -> None:
+    def _credential_headers(credential: ImmichCredential | None) -> dict[str, str] | None:
+        if credential is None:
+            return None
+        if credential.kind == "share":
+            return {"x-immich-share-key": credential.token}
+        if credential.kind == "api_key":
+            return {"x-api-key": credential.token}
+        return {"x-immich-session-token": credential.token}
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response, credential: ImmichCredential | None) -> None:
         status = response.status_code
         if status < 400:
             return
         if status == 401:
-            raise InvalidShareLink("Invalid or expired Immich share credential")
+            if credential and credential.kind == "share":
+                raise InvalidShareLink("Invalid or expired Immich share credential")
+            if credential and credential.kind in {"api_key", "session"}:
+                raise InvalidImmichCredential("The stored Immich credential is no longer valid")
+            raise ImmichUnauthorized("Immich authentication is required")
         if status == 403:
-            raise ImmichForbidden("Immich denied this shared-link operation")
+            raise ImmichForbidden("Immich denied this operation")
         if status == 404:
             raise ImmichNotFound("Immich resource was not found")
         if status == 429:
@@ -192,13 +252,196 @@ class ImmichClient:
             params["size"] = size
         if edited is not None:
             params["edited"] = str(edited).lower()
-        response = await self._get(f"assets/{quote(asset_id, safe='')}/thumbnail", params=params)
+        # The query credential is required by Immich for public thumbnails; retaining the
+        # share auth context ensures a 401 is classified correctly without adding a second key.
+        response = await self._get(
+            f"assets/{quote(asset_id, safe='')}/thumbnail",
+            credential=ShareCredential(token=share_key),
+            send_credential=False,
+            params=params,
+        )
+        return self._image_payload(response)
+
+    async def get_current_user(self, credential: PrivateImmichCredential) -> dict[str, Any]:
+        return self._dict_json(await self._get("users/me", credential=credential), "current user")
+
+    async def list_albums(self, credential: PrivateImmichCredential) -> list[dict[str, Any]]:
+        payload = self._json(await self._get("albums", credential=credential))
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise MalformedImmichResponse("Immich returned malformed albums")
+        return payload
+
+    async def get_album(self, credential: PrivateImmichCredential, album_id: str) -> dict[str, Any]:
+        response = await self._get(f"albums/{quote(album_id, safe='')}", credential=credential)
+        return self._dict_json(response, "album")
+
+    async def list_album_assets(
+        self, credential: PrivateImmichCredential, album_id: str, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        body: dict[str, Any] = {
+            "filter": {"albumIds": {"any": [album_id]}},
+            "orderBy": {"field": "fileCreatedAt", "direction": "asc"},
+            "size": min(max(offset + limit, 1), 1000),
+        }
+        collected: list[dict[str, Any]] = []
+        next_cursor: str | None = None
+        for _ in range(100):
+            if next_cursor:
+                body["cursor"] = next_cursor
+            items, next_cursor = await self._metadata_search_page(credential, body)
+            collected.extend(items)
+            if len(collected) >= offset + limit or not next_cursor:
+                return collected[offset : offset + limit], next_cursor
+        raise MalformedImmichResponse("Immich search pagination exceeded safety limit")
+
+    async def get_asset_metadata(
+        self, credential: PrivateImmichCredential, asset_id: str
+    ) -> dict[str, Any]:
+        response = await self._get(f"assets/{quote(asset_id, safe='')}", credential=credential)
+        return self._dict_json(response, "asset metadata")
+
+    async def get_asset_thumbnail(
+        self,
+        credential: PrivateImmichCredential,
+        asset_id: str,
+        *,
+        size: str = "preview",
+        edited: bool | None = None,
+    ) -> ImagePayload:
+        if size not in {"fullsize", "preview", "thumbnail"}:
+            raise ValueError("size must be fullsize, preview, or thumbnail")
+        params: dict[str, Any] = {"size": size}
+        if edited is not None:
+            params["edited"] = str(edited).lower()
+        response = await self._get(
+            f"assets/{quote(asset_id, safe='')}/thumbnail", credential=credential, params=params
+        )
+        return self._image_payload(response)
+
+    async def get_asset_image(
+        self, credential: PrivateImmichCredential, asset_id: str, *, edited: bool | None = None
+    ) -> ImagePayload:
+        params = None if edited is None else {"edited": str(edited).lower()}
+        response = await self._get(
+            f"assets/{quote(asset_id, safe='')}/original", credential=credential, params=params
+        )
+        return self._image_payload(response)
+
+    async def search_assets(
+        self,
+        credential: PrivateImmichCredential,
+        *,
+        query: str | None = None,
+        city: str | None = None,
+        country: str | None = None,
+        person_id: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        media_type: str | None = None,
+        favorite: bool | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        filters = self._search_filters(
+            city=city, country=country, person_id=person_id, start_date=start_date,
+            end_date=end_date, media_type=media_type, favorite=favorite,
+        )
+        if query:
+            body: dict[str, Any] = {"query": query, "size": limit, "withExif": True}
+            if filters:
+                body["filter"] = filters
+            payload = self._json(await self._post("search/smart", credential=credential, json_body=body))
+            items, _ = self._search_asset_page(payload)
+            return items
+        body = {
+            "size": limit,
+            "withExif": True,
+            "orderBy": {"field": "fileCreatedAt", "direction": "desc"},
+        }
+        if filters:
+            body["filter"] = filters
+        items, _ = await self._metadata_search_page(credential, body)
+        return items
+
+    async def get_recent_assets(
+        self, credential: PrivateImmichCredential, *, limit: int
+    ) -> list[dict[str, Any]]:
+        body = {
+            "filter": {"visibility": {"eq": "timeline"}},
+            "orderBy": {"field": "fileCreatedAt", "direction": "desc"},
+            "size": limit,
+            "withExif": True,
+        }
+        items, _ = await self._metadata_search_page(credential, body)
+        return items
+
+    async def _metadata_search_page(
+        self, credential: PrivateImmichCredential, body: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        payload = self._json(await self._post("search/metadata", credential=credential, json_body=body))
+        return self._search_asset_page(payload)
+
+    @classmethod
+    def _search_asset_page(cls, payload: Any) -> tuple[list[dict[str, Any]], str | None]:
+        if not isinstance(payload, dict):
+            raise MalformedImmichResponse("Immich returned malformed search results")
+        # Current SearchResponseDto wraps the asset page under `assets`; accepting the
+        # page directly retains compatibility with older Immich search responses.
+        page = payload.get("assets", payload)
+        if not isinstance(page, dict):
+            raise MalformedImmichResponse("Immich returned malformed asset search results")
+        next_cursor = page.get("nextCursor")
+        return cls._search_items(page), None if next_cursor in (None, "") else str(next_cursor)
+
+    @staticmethod
+    def _search_items(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise MalformedImmichResponse("Immich returned malformed search results")
+        items = payload["items"]
+        if not all(isinstance(item, dict) for item in items):
+            raise MalformedImmichResponse("Immich search contained invalid assets")
+        return items
+
+    @staticmethod
+    def _search_filters(**values: Any) -> dict[str, Any]:
+        filters: dict[str, Any] = {}
+        if values.get("city") is not None:
+            filters["city"] = {"eq": values["city"]}
+        if values.get("country") is not None:
+            filters["country"] = {"eq": values["country"]}
+        if values.get("person_id") is not None:
+            filters["personIds"] = {"any": [values["person_id"]]}
+        date_filter = {
+            key: value
+            for key, value in {"gte": values.get("start_date"), "lte": values.get("end_date")}.items()
+            if value is not None
+        }
+        if date_filter:
+            filters["takenAt"] = date_filter
+        if values.get("media_type") is not None:
+            media_type = str(values["media_type"]).upper()
+            if media_type not in {"IMAGE", "VIDEO", "AUDIO", "OTHER"}:
+                raise ValueError("media_type must be IMAGE, VIDEO, AUDIO, or OTHER")
+            filters["type"] = {"eq": media_type}
+        if values.get("favorite") is not None:
+            filters["isFavorite"] = {"eq": values["favorite"]}
+        return filters
+
+    def _image_payload(self, response: httpx.Response) -> ImagePayload:
+        content_length = response.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > self.settings.max_image_bytes:
+            raise PayloadTooLarge("Immich image exceeds the configured response limit")
         mime = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip()
         if not mime.startswith("image/"):
-            raise MalformedImmichResponse("Immich thumbnail did not return an image")
+            raise MalformedImmichResponse("Immich asset did not return an image")
         if len(response.content) > self.settings.max_image_bytes:
             raise PayloadTooLarge("Immich image exceeds the configured response limit")
         return ImagePayload(data=response.content, mime_type=mime)
+
+    def _dict_json(self, response: httpx.Response, name: str) -> dict[str, Any]:
+        payload = self._json(response)
+        if not isinstance(payload, dict):
+            raise MalformedImmichResponse(f"Immich returned malformed {name}")
+        return payload
 
     async def _get_paginated_list(
         self, path: str, share_key: str, base_params: dict[str, Any]

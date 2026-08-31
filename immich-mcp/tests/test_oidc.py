@@ -88,3 +88,24 @@ async def test_wrong_audience_is_rejected(settings):
     assert await verifier.verify_token(token(private, settings, aud="some-other-api")) is None
     await verifier.aclose()
 
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_account_id_token_nonce_validation(settings):
+    private, jwk = key_material()
+    mock_discovery(settings, jwk)
+    verifier = OIDCJWTVerifier(settings)
+    signed = token(
+        private,
+        settings,
+        aud=settings.account_oidc_client_id,
+        nonce="expected-nonce",
+    )
+    claims = await verifier.verify_id_token(
+        signed, audience=str(settings.account_oidc_client_id), nonce="expected-nonce"
+    )
+    assert claims is not None and claims["sub"] == "authentik-user-id"
+    assert await verifier.verify_id_token(
+        signed, audience=str(settings.account_oidc_client_id), nonce="wrong-nonce"
+    ) is None
+    await verifier.aclose()

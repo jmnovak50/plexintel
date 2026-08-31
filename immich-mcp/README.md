@@ -1,84 +1,154 @@
 # Immich MCP
 
-A thin, typed Python MCP resource server for Immich. Phase 1 exposes public album shares; `/mcp` is protected by Authentik OAuth/OIDC. It deliberately does **not** translate Authentik tokens into private Immich access because current Immich has no supported per-user token exchange.
+A thin, typed Python MCP server for public Immich shares and read-only private libraries. FastAPI hosts stateless Streamable HTTP at `/mcp`; Authentik authenticates the MCP user; each user separately connects their own least-privilege Immich API key at `/account`.
 
-## 1. Architecture
+## Architecture
 
-FastAPI hosts health/readiness, public share helpers, and a no-JavaScript gallery. MCP Python SDK 2.1 provides stateless Streamable HTTP at `/mcp` and RFC 9728 protected-resource metadata. `ImmichClient` is the only layer that calls Immich and uses async `httpx`.
-
-See [architecture.md](architecture.md) for the researched auth decision and source links.
+Authentication and Immich authorization are deliberately separate:
 
 ```text
-ChatGPT/OpenWebUI -> Authentik Authorization Code + PKCE -> access token
-ChatGPT/OpenWebUI -> /mcp (Bearer token) -> validated sub/scopes -> MCP tools
-public share key  -> typed ImmichClient -> configured IMMICH_BASE_URL only
+ChatGPT/OpenWebUI -> Authentik OAuth -> verified issuer + sub -> Immich MCP
+                                                        |
+                                                        v
+                                      encrypted SQLite credential record
+                                                        |
+                                                        v
+                                          that user's Immich API key -> Immich
 ```
 
-## 2. Security model
+Authentik answers “who is this MCP user?” The selected Immich API key answers “what may this user access in Immich?” The LLM never supplies an API key, username, email, or subject used to select a credential. Public share keys remain independent capability credentials and retain the existing Phase 1 behavior. See [architecture.md](architecture.md) for the current Immich OpenAPI/source findings.
 
-* Authentik signs users in and issues audience-restricted access tokens. This server validates discovery issuer, JWKS signature/algorithm, `iss`, `aud`, `exp`, `nbf`, and scopes.
-* `sub` is the user identity. `email` and `preferred_username` are attributes only.
-* `/mcp` requires `immich.read`; health and public share routes do not. Public routes still require an existing Immich share capability and cannot expand it.
-* A supplied share URL must exactly match the configured Immich origin. Only the extracted key is used; the supplied URL is never fetched.
-* There is no global Immich API key, admin impersonation, browser-cookie scraping, or external bearer-token forwarding.
-* Tokens and keys are not logged by application code. The container disables Uvicorn access logging because routes containing share keys would otherwise log them. Configure reverse-proxy access-log redaction too.
-* TLS verification is on by default. Disabling it is intended only for a controlled development CA scenario.
+## Security model
 
-## 3. Authentik setup
+- `/mcp` validates Authentik JWT signatures through discovered JWKS and enforces issuer, audience, `exp`, `nbf`, and `immich.read` scope. The verified `iss` plus `sub` is the credential-store primary key.
+- `/account` uses a dedicated Authentik OIDC client with Authorization Code, PKCE S256, state, nonce, signed ID-token validation, and an opaque server-side session.
+- Browser cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` by default. POSTs require CSRF tokens. OAuth tokens and Immich keys are never stored in cookies.
+- Immich API keys are encrypted with Fernet before SQLite persistence. Keys, ciphertext, OAuth tokens, authorization codes, and share keys are excluded from application logs and tool results.
+- No global Immich administrator key exists. No Authentik token is forwarded or exchanged with Immich. No write tool is registered.
+- Caller-provided share URLs must match `IMMICH_BASE_URL` exactly. TLS verification, fixed timeouts, GET-only retries, image limits, pagination limits, and sanitized errors are enabled.
+- Uvicorn access logging is disabled. Apply equivalent reverse-proxy redaction for `/account/callback`, `/account/connect`, `/simple-share/*`, and `/public/shared-albums/*`.
 
-Create a dedicated Authentik OAuth2/OpenID Provider for the MCP resource; do not reuse Immich's own OIDC client.
+## Current Immich API and permissions
 
-1. Create an OAuth2/OpenID Provider using Authorization Code. Require PKCE (`S256`) for public clients; use a confidential client for OpenWebUI static OAuth.
-2. Set the exact redirect URIs shown by each MCP client. ChatGPT provides its callback during custom-app creation. OpenWebUI uses its configured public `WEBUI_URL` callback and registers/uses the static client through its Integration UI.
-3. Add a scope mapping named `immich.read`; ensure it is emitted in the access token's `scope` claim.
-4. Configure the access-token audience as the value used for `OIDC_AUDIENCE` (typically `immich-mcp`). The access token—not merely the ID token—must be a signed JWT with this audience.
-5. Include standard `sub`; optionally map `email` and `preferred_username`.
-6. If the client needs long-lived connectivity, enable refresh tokens and advertise/allow `offline_access` in Authentik. Add it to the client request without adding it to `OIDC_REQUIRED_SCOPE`.
-7. Set `OIDC_ISSUER` to the exact discovery issuer, normally `https://auth.example.com/application/o/immich-mcp/`. Confirm `${OIDC_ISSUER}.well-known/openid-configuration` returns the same exact `issuer` and an issuer-hosted `jwks_uri`.
+The implementation was checked against Immich `main` OpenAPI on 2026-08-31. API keys use `x-api-key`.
 
-`OIDC_CLIENT_ID` identifies the expected MCP application/client configuration and is the default audience. `OIDC_CLIENT_SECRET` is accepted for deployment parity but is not used by this resource server to validate JWTs; the OAuth client (ChatGPT/OpenWebUI) holds its own secret when confidential.
+| Operation | Immich endpoint | Required permission |
+| --- | --- | --- |
+| Connect/current user | `GET /api/users/me` | `user.read` |
+| List/read albums | `GET /api/albums`, `GET /api/albums/{id}` | `album.read` |
+| List album assets | `POST /api/search/metadata`, `albumIds.any` filter | `asset.read` |
+| Metadata/search/recent | `GET /api/assets/{id}`, `POST /api/search/metadata`, `POST /api/search/smart` | `asset.read` |
+| Thumbnail/preview | `GET /api/assets/{id}/thumbnail` | `asset.view` |
+| Original image | `GET /api/assets/{id}/original` | `asset.download` |
 
-## 4. Immich assumptions
+Select these read permissions for the complete tool set:
 
-Immich is an upstream API and is not modified. Album shares must support:
+```text
+user.read
+album.read
+asset.read
+asset.view
+asset.download
+```
 
-* `GET /api/shared-links/me` with `x-immich-share-key`
-* `GET /api/timeline/buckets` and `/api/timeline/bucket` with the same share header
-* `GET /api/assets/{id}` under share authorization
-* `GET /api/assets/{id}/thumbnail?key=...`
+Omit `asset.download` if original retrieval is not wanted; thumbnails continue to work. Do not select create, update, upload, delete, sharing, user-administration, or admin permissions.
 
-The implementation intentionally ignores an empty embedded `assets` list for album shares and enumerates the timeline. Password-protected share login is not implemented.
+Create an API key in each user's Immich account settings, assign the permissions above, copy it once, and connect it through `/account`. A revoked key produces a reconnect message; MCP does not delete or rotate keys inside Immich.
 
-## 5. Environment variables
+## Authentik setup
 
-Copy `.env.example` to `.env`. Required values are `IMMICH_BASE_URL`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_AUDIENCE`, and `MCP_PUBLIC_URL`. `MCP_PUBLIC_URL` must be the externally visible URL including `/mcp`. Set `ALLOWED_HOSTS` to the Host headers your proxy sends and `ALLOWED_ORIGINS` to any browser origins allowed to call MCP (server-to-server clients normally omit `Origin`).
+Create two Authentik OAuth2/OpenID providers/applications. Do not reuse Immich's own OIDC client.
 
-Timeout/retry and payload controls are documented in `.env.example`. Retries apply only to safe GET operations and only to network failures, 429, and selected 5xx responses.
+### MCP OAuth client
 
-## 6. Docker deployment
+1. Enable Authorization Code. Require PKCE S256 for public clients; OpenWebUI can use a confidential/static client.
+2. Register the exact callback URI displayed by each MCP client.
+3. Add and emit a scope mapping named `immich.read`.
+4. Issue a signed JWT access token with audience equal to `OIDC_AUDIENCE`.
+5. Include `sub`; optionally include `email` and `preferred_username`.
+6. If refresh is needed, allow `offline_access`, but do not add it to `OIDC_REQUIRED_SCOPE`.
+7. Set `OIDC_ISSUER` to the exact discovery issuer. Discovery must return the same issuer and an issuer-origin `jwks_uri`.
+
+### Account-page OIDC client
+
+1. Create a separate confidential Authorization Code client.
+2. Register exactly `ACCOUNT_REDIRECT_URI`, such as `https://mcp.example.com/account/callback`.
+3. Allow `openid profile email`; this application sends PKCE S256.
+4. Configure `ACCOUNT_OIDC_CLIENT_ID` and `ACCOUNT_OIDC_CLIENT_SECRET`.
+5. Ensure its ID token uses the same issuer and stable `sub` as the MCP access token for that user.
+
+The account client creates only a short-lived local browser session after ID-token validation. Its access and refresh tokens are discarded.
+
+## Per-user account linking
+
+1. Visit `ACCOUNT_PUBLIC_URL` and sign in directly to Authentik.
+2. Paste your own Immich API key into the browser form.
+3. The server validates it through `/api/users/me`, encrypts it, and stores it under the signed-in issuer+`sub`.
+4. Return to the MCP client. Private tools now resolve that record from the verified MCP request identity.
+
+The page never displays the key again. Disconnect removes only MCP's encrypted copy; revoke it separately in Immich when appropriate.
+
+## Environment variables
+
+Copy `.env.example` to `.env` and set all blank secrets.
+
+| Variable | Purpose |
+| --- | --- |
+| `IMMICH_BASE_URL` | One fixed Immich origin |
+| `OIDC_ISSUER` | Exact Authentik discovery issuer |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | MCP OAuth client metadata |
+| `OIDC_AUDIENCE`, `OIDC_REQUIRED_SCOPE` | Required MCP token audience/scopes |
+| `MCP_PUBLIC_URL` | External URL including `/mcp` |
+| `CREDENTIAL_DB_PATH` | SQLite path; default `/data/credentials.sqlite3` |
+| `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key |
+| `ACCOUNT_OIDC_CLIENT_ID`, `ACCOUNT_OIDC_CLIENT_SECRET` | Dedicated account OIDC client |
+| `ACCOUNT_REDIRECT_URI`, `ACCOUNT_PUBLIC_URL` | Trusted account callback/page URLs |
+| `ACCOUNT_SESSION_SECRET` | At least 32 random characters for session/state HMACs |
+| `ACCOUNT_COOKIE_SECURE` | Keep `true` in production |
+| `MAX_IMAGE_BYTES`, `PRIVATE_TOOL_MAX_ITEMS` | Tool payload/result limits |
+
+Generate secrets:
+
+```bash
+python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+openssl rand -base64 48
+```
+
+Private access fails startup configuration validation if required settings are missing or the Fernet key is malformed.
+
+## Docker deployment and migration
+
+Compose mounts a named volume at `/data`; the image creates it for the non-root user. From the existing installation:
 
 ```bash
 cd immich-mcp
-cp .env.example .env
-docker build --pull -t immich-mcp:local .
-docker run --rm --name immich-mcp --env-file .env \
-  -p 127.0.0.1:8000:8000 immich-mcp:local
-```
-
-Or:
-
-```bash
-cd immich-mcp
+cp .env.example .env.new
+# Merge the new credential/account variables into the existing .env.
+# Generate both secrets, then configure both Authentik clients.
 docker compose build --pull
 docker compose up -d
 docker compose logs -f immich-mcp
 ```
 
-Terminate TLS at a trusted reverse proxy, forward only to `127.0.0.1:8000`, preserve the public Host header, and redact `/simple-share/*` and `/public/shared-albums/*` paths from proxy logs.
+Direct Docker run:
 
-## 7. MCP client configuration
+```bash
+cd immich-mcp
+docker build --pull -t immich-mcp:local .
+docker volume create immich_mcp_data
+docker run -d --name immich-mcp --restart unless-stopped \
+  --env-file .env -p 127.0.0.1:8000:8000 \
+  --read-only --tmpfs /tmp:size=16m,noexec,nosuid \
+  -v immich_mcp_data:/data immich-mcp:local
+```
 
-Conceptual configuration (clients with JSON configuration support):
+Terminate TLS at a trusted reverse proxy, preserve the public Host header, and forward only to `127.0.0.1:8000`.
+
+Backup warning: the database is useless without its Fernet key. The database and key together grant access to every stored Immich API key. Back them up separately with equivalent secret controls. Losing or rotating the key without migrating ciphertext makes existing records unrecoverable.
+
+## MCP clients
+
+The exact JSON shape varies by client:
 
 ```json
 {
@@ -96,49 +166,59 @@ Conceptual configuration (clients with JSON configuration support):
 }
 ```
 
-The JSON shape is client-specific; the protocol endpoint and OAuth values are the invariant parts. The server advertises Authentik through `/.well-known/oauth-protected-resource/mcp`.
+Protected-resource metadata is at `/.well-known/oauth-protected-resource/mcp`.
 
-## 8. ChatGPT and OpenWebUI notes
+### OpenWebUI flow
 
-For ChatGPT, enable developer mode, create a custom app, enter `https://mcp.example.com/mcp`, select OAuth, complete authorization, then scan tools. Add the exact callback ChatGPT displays to the Authentik provider. ChatGPT remote MCP requires a publicly reachable HTTPS endpoint (or an approved secure tunnel). Refresh-token support generally requires `offline_access` to be advertised and issued.
+The administrator adds this server once as a Streamable HTTP external tool server, chooses OAuth 2.1 Static against Authentik, supplies the MCP client ID/secret and issuer, requests `openid profile email offline_access immich.read`, and grants access to intended groups.
 
-For OpenWebUI 0.6.31+, set a persistent `WEBUI_SECRET_KEY`, then go to **Admin Settings → Integrations → External Tool Servers**, choose **MCP (Streamable HTTP)**, and use **OAuth 2.1 (Static)** because this server/Authenik setup does not expose dynamic client registration. Enter the MCP URL, Authentik client ID/secret, and Authentik issuer as OAuth Server URL; request `openid profile email offline_access immich.read`. Leave the OAuth resource parameter on Automatic unless Authentik policy requires otherwise. Each OpenWebUI user authorizes their own Authentik identity.
+Each user authorizes the connector, opens `/account`, signs in with the same Authentik identity, and pastes their own Immich key. Never put a shared Immich key in the OpenWebUI connector.
 
-## 9. Public-share behavior
+### ChatGPT implications
 
-MCP tools:
+A ChatGPT-authenticated issuer+`sub` resolves the same record as any other client. The user links `/account` separately; there is no ChatGPT-specific identity logic. Current official OpenAI guidance places developer mode under **Settings → Security and login**, then adds the `/mcp` endpoint from ChatGPT Plugins; availability can depend on workspace policy. Public deployment needs a stable HTTPS Streamable HTTP endpoint, while Secure MCP Tunnel is appropriate for developer-mode testing. See [OpenAI's MCP server guide](https://developers.openai.com/plugins/build/mcp-server) and [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
-* `get_shared_album`
-* `list_shared_album_assets`
-* `get_shared_asset_metadata`
-* `get_shared_asset_image`
-* `get_shared_album_gallery`
+## MCP tools
 
-The image tool emits native `ImageContent` and preserves `image/webp`, `image/jpeg`, or the actual upstream type. Gallery responses inline at most `GALLERY_INLINE_IMAGE_LIMIT` thumbnails and return metadata/tool references for the rest. REST helpers are `/public/shared-albums/{key}` and `/public/shared-albums/{key}/assets`. `/simple-share/{key}` is a basic HTML gallery whose image proxy remains constrained by that share.
+Public shares (unchanged):
 
-## 10. Private-library limitation
+- `get_shared_album`
+- `list_shared_album_assets`
+- `get_shared_asset_metadata`
+- `get_shared_asset_image`
+- `get_shared_album_gallery`
 
-Phase 3 is not enabled. Immich currently starts its own OIDC flow at `/api/oauth/authorize`, completes it at `/api/oauth/callback`, maps `sub`, and issues a new opaque Immich session. It does not document accepting external Authentik bearer tokens or exchanging a token issued to this MCP audience for an Immich session.
+Authenticated private library:
 
-The clean boundary is `PrivateImmichCredentialProvider` in `app/immich/albums.py`. Private tools will only be added when that provider can obtain a supported, revocable per-user credential. A global admin key is not an acceptable substitute.
+- `get_immich_connection_status`
+- `list_albums`
+- `get_album`
+- `list_album_assets`
+- `get_asset_metadata`
+- `get_asset_thumbnail`
+- `get_asset_image`
+- `search_assets`
+- `get_recent_assets`
 
-## 11. curl tests
+Image tools return native MCP `ImageContent` with Immich's MIME type. Search supports current smart text search plus city, country, person ID, capture-date range, media type, favorite status, and a bounded limit. List/search/recent tools return compact metadata and never inline images.
+
+## Public shares
+
+Album shares resolve through `/api/shared-links/me`; assets are enumerated through every timeline bucket because current Immich can return an empty embedded `assets` list. Parallel arrays are defensively normalized. REST helpers remain at `/public/shared-albums/{key}` and `/public/shared-albums/{key}/assets`; `/simple-share/{key}` remains a no-JavaScript gallery constrained by the same share.
+
+## Health, readiness, and curl
+
+`/health` only confirms the process is alive. `/ready` checks OIDC discovery/JWKS, Immich ping, and SQLite; it never depends on a user's key.
 
 ```bash
 curl -fsS https://mcp.example.com/health
 curl -fsS https://mcp.example.com/ready
 curl -fsS https://mcp.example.com/public/shared-albums/SHARE_KEY
 curl -fsS https://mcp.example.com/public/shared-albums/SHARE_KEY/assets
-curl -fsS https://mcp.example.com/simple-share/SHARE_KEY
-```
-
-Protected-resource discovery:
-
-```bash
 curl -fsS https://mcp.example.com/.well-known/oauth-protected-resource/mcp
 ```
 
-MCP initialization with a real Authentik access token:
+MCP initialization with an Authentik access token:
 
 ```bash
 curl -i https://mcp.example.com/mcp \
@@ -148,7 +228,7 @@ curl -i https://mcp.example.com/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
-Run tests locally:
+Tests:
 
 ```bash
 python -m venv .venv
@@ -156,3 +236,12 @@ python -m venv .venv
 pip install -e '.[test]'
 pytest -q
 ```
+
+## Known limitations
+
+- Users must create, paste, rotate, and revoke their own Immich keys; Immich has no delegated Authentik-token exchange for this service.
+- SQLite/Fernet targets one service instance sharing one volume. Multiple replicas need a coordinated store and key-management plan.
+- Originals are rejected above `MAX_IMAGE_BYTES`; use thumbnails for large files. The upstream HTTP client may receive the response before the final byte-count check.
+- Search uses current Immich v3.2 structured filters. Older releases using only deprecated flat filters may need an adapter.
+- The minimal account UI rotates a key by reconnecting with its replacement.
+- Password-protected public share login is not implemented.
