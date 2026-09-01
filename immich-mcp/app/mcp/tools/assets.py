@@ -30,7 +30,12 @@ def register_asset_tools(
     async def get_asset_thumbnail(
         asset_id: str, size: str = "preview", edited: bool | None = None
     ) -> list[ImageContent]:
-        """Return a bounded native MCP image preview using the user's Immich permissions."""
+        """Return a broadly compatible image preview for viewing, vision analysis, and display.
+
+        Use this tool whenever the model needs to inspect, describe, analyze, or show
+        an Immich image. Prefer this over get_asset_image for normal visual use because
+        the original asset may be HEIC or another format unsupported by some vision models.
+        """
         credential = await private_credential(provider, settings)
         try:
             image = await client.get_asset_thumbnail(credential, asset_id, size=size, edited=edited)
@@ -42,7 +47,12 @@ def register_asset_tools(
     async def get_asset_image(
         asset_id: str, edited: bool | None = None
     ) -> list[ImageContent]:
-        """Return original native MCP image content, bounded by MAX_IMAGE_BYTES."""
+        """Return the original Immich image in its native file format.
+
+        The original asset may be HEIC or another format unsupported by some vision models.
+        Do not use this tool for ordinary visual inspection, image description, or display.
+        Use get_asset_thumbnail instead unless the user explicitly requests the original
+        or native image file."""
         credential = await private_credential(provider, settings)
         try:
             image = await client.get_asset_image(credential, asset_id, edited=edited)
