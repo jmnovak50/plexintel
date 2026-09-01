@@ -42,6 +42,7 @@ def create_app(
     *,
     immich_client: ImmichClient | None = None,
     oidc_client: httpx.AsyncClient | None = None,
+    account_oidc_client: httpx.AsyncClient | None = None,
     credential_provider: SQLiteCredentialProvider | None = None,
     account_oidc: AccountOIDC | None = None,
 ) -> FastAPI:
@@ -49,6 +50,17 @@ def create_app(
     configure_logging(settings.log_level)
     client = immich_client or ImmichClient(settings)
     verifier = OIDCJWTVerifier(settings, oidc_client)
+    account_verifier = (
+        OIDCJWTVerifier(
+            settings,
+            account_oidc_client,
+            issuer=str(settings.account_oidc_issuer),
+            audience=str(settings.account_oidc_client_id),
+            required_scopes=[],
+        )
+        if settings.private_access_enabled and account_oidc is None
+        else None
+    )
     provider = credential_provider
     if settings.private_access_enabled and provider is None:
         assert settings.credential_encryption_key is not None
@@ -57,8 +69,13 @@ def create_app(
             settings.credential_db_path,
             CredentialCipher(settings.credential_encryption_key.get_secret_value()),
             settings.account_session_secret.get_secret_value(),
+            settings.identity_namespace,
         )
-    browser_oidc = account_oidc or (AccountOIDC(settings, verifier) if provider is not None else None)
+    browser_oidc = account_oidc or (
+        AccountOIDC(settings, account_verifier)
+        if provider is not None and account_verifier is not None
+        else None
+    )
     mcp = create_mcp_server(settings, client, verifier, provider)
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -81,6 +98,8 @@ def create_app(
             async with mcp.session_manager.run():
                 yield
         finally:
+            if account_verifier is not None:
+                await account_verifier.aclose()
             await verifier.aclose()
             await client.aclose()
 
@@ -88,6 +107,7 @@ def create_app(
     app.state.settings = settings
     app.state.immich = client
     app.state.oidc_verifier = verifier
+    app.state.account_oidc_verifier = account_verifier
     app.state.mcp = mcp
     app.state.credentials = provider
     app.state.account_oidc = browser_oidc
@@ -103,6 +123,8 @@ def create_app(
     async def ready() -> dict[str, str]:
         try:
             await verifier.warm()
+            if account_verifier is not None:
+                await account_verifier.warm()
             await client.ping()
             if provider is not None and not await provider.ready():
                 raise RuntimeError("credential storage is unavailable")

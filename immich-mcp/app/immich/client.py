@@ -112,6 +112,61 @@ class ImmichClient:
     ) -> httpx.Response:
         return await self._request("POST", path, credential=credential, json_body=json_body)
 
+    async def _get_image(
+        self,
+        path: str,
+        *,
+        credential: ImmichCredential,
+        send_credential: bool = True,
+        params: Mapping[str, Any] | None = None,
+    ) -> ImagePayload:
+        """Fetch an image without ever buffering more than the configured byte limit."""
+        headers = self._credential_headers(credential) if send_credential else None
+        retries = self.settings.http_max_retries
+        for attempt in range(retries + 1):
+            try:
+                async with self._client.stream(
+                    "GET", path, headers=headers, params=params
+                ) as response:
+                    if response.status_code in {429, 500, 502, 503, 504} and attempt < retries:
+                        await asyncio.sleep(0.05 * (2**attempt))
+                        continue
+                    self._raise_for_status(response, credential)
+                    mime = response.headers.get("content-type", "").split(";", 1)[0].strip()
+                    if not mime.startswith("image/"):
+                        raise MalformedImmichResponse("Immich asset did not return an image")
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            declared_length = int(content_length)
+                        except ValueError:
+                            declared_length = -1
+                        if declared_length > self.settings.max_image_bytes:
+                            raise PayloadTooLarge(
+                                "Immich image exceeds the configured response limit"
+                            )
+                    chunks: list[bytes] = []
+                    received = 0
+                    async for chunk in response.aiter_bytes():
+                        received += len(chunk)
+                        if received > self.settings.max_image_bytes:
+                            raise PayloadTooLarge(
+                                "Immich image exceeds the configured response limit"
+                            )
+                        chunks.append(chunk)
+                    return ImagePayload(data=b"".join(chunks), mime_type=mime)
+            except httpx.TimeoutException as exc:
+                if attempt < retries:
+                    await asyncio.sleep(0.05 * (2**attempt))
+                    continue
+                raise ImmichTimeout("Immich request timed out") from exc
+            except httpx.RequestError as exc:
+                if attempt < retries:
+                    await asyncio.sleep(0.05 * (2**attempt))
+                    continue
+                raise ImmichUnavailable("Immich could not be reached") from exc
+        raise ImmichUnavailable("Immich request failed")  # pragma: no cover
+
     async def _request(
         self,
         method: str,
@@ -254,13 +309,12 @@ class ImmichClient:
             params["edited"] = str(edited).lower()
         # The query credential is required by Immich for public thumbnails; retaining the
         # share auth context ensures a 401 is classified correctly without adding a second key.
-        response = await self._get(
+        return await self._get_image(
             f"assets/{quote(asset_id, safe='')}/thumbnail",
             credential=ShareCredential(token=share_key),
             send_credential=False,
             params=params,
         )
-        return self._image_payload(response)
 
     async def get_current_user(self, credential: PrivateImmichCredential) -> dict[str, Any]:
         return self._dict_json(await self._get("users/me", credential=credential), "current user")
@@ -313,19 +367,17 @@ class ImmichClient:
         params: dict[str, Any] = {"size": size}
         if edited is not None:
             params["edited"] = str(edited).lower()
-        response = await self._get(
+        return await self._get_image(
             f"assets/{quote(asset_id, safe='')}/thumbnail", credential=credential, params=params
         )
-        return self._image_payload(response)
 
     async def get_asset_image(
         self, credential: PrivateImmichCredential, asset_id: str, *, edited: bool | None = None
     ) -> ImagePayload:
         params = None if edited is None else {"edited": str(edited).lower()}
-        response = await self._get(
+        return await self._get_image(
             f"assets/{quote(asset_id, safe='')}/original", credential=credential, params=params
         )
-        return self._image_payload(response)
 
     async def search_assets(
         self,
@@ -425,17 +477,6 @@ class ImmichClient:
         if values.get("favorite") is not None:
             filters["isFavorite"] = {"eq": values["favorite"]}
         return filters
-
-    def _image_payload(self, response: httpx.Response) -> ImagePayload:
-        content_length = response.headers.get("content-length")
-        if content_length and content_length.isdigit() and int(content_length) > self.settings.max_image_bytes:
-            raise PayloadTooLarge("Immich image exceeds the configured response limit")
-        mime = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip()
-        if not mime.startswith("image/"):
-            raise MalformedImmichResponse("Immich asset did not return an image")
-        if len(response.content) > self.settings.max_image_bytes:
-            raise PayloadTooLarge("Immich image exceeds the configured response limit")
-        return ImagePayload(data=response.content, mime_type=mime)
 
     def _dict_json(self, response: httpx.Response, name: str) -> dict[str, Any]:
         payload = self._json(response)

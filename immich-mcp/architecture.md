@@ -25,7 +25,7 @@ Immich is an OIDC relying party/client, not an OAuth authorization server:
 * There is no documented token-exchange, on-behalf-of, JWT bearer grant, or session-delegation endpoint that turns an arbitrary Authentik access token issued to this MCP resource into an Immich user session.
 * Consequently, sending the MCP's Authentik bearer token to Immich is unsupported and will not authenticate unless it accidentally equals an opaque Immich session. Automating Immich's browser callback inside the MCP server would conflate OAuth clients, redirect URIs, state, and sessions and is not a supported delegation protocol.
 
-Decision: external Authentik tokens are still never translated or forwarded to Immich. Private access instead uses a separately consented, least-privilege Immich API key created by each user. The key is encrypted locally and selected only by the verified Authentik issuer plus `sub`. No MCP tool accepts a key or an identity selector.
+Decision: external Authentik tokens are still never translated or forwarded to Immich. Private access instead uses a separately consented, least-privilege Immich API key created by each user. The key is encrypted locally and selected only after Authentik token validation. No MCP tool accepts a key or an identity selector.
 
 Primary sources:
 
@@ -67,7 +67,10 @@ Primary implementation contracts:
 ## Private identity and authorization boundary
 
 ```text
-verified Authentik issuer + sub
+strictly verified application issuer + sub
+              |
+              v
+       identity namespace + sub
               |
               v
 encrypted SQLite credential record
@@ -78,6 +81,14 @@ that user's x-api-key --> configured Immich
 
 Authentik answers “who is this MCP user?” The Immich API key answers “what may this user access in Immich?” The browser account flow uses its own Authentik client, Authorization Code, PKCE, state, nonce, and a server-side opaque session. OAuth tokens and Immich keys are never stored in the browser cookie.
 
+The MCP verifier discovers only `OIDC_ISSUER` and validates access tokens against `OIDC_AUDIENCE`. A separate verifier discovers only `ACCOUNT_OIDC_ISSUER` and validates account ID tokens against `ACCOUNT_OIDC_CLIENT_ID`. Issuers and discovery documents are never interchangeable.
+
+After validation, persistent credential identity is `(IDENTITY_NAMESPACE, sub)`. This intentionally permits two trusted Authentik applications with different per-provider issuers to find the same user's record. It does not weaken issuer checks: an unvalidated `sub` never reaches lookup. Email and `preferred_username` remain display metadata only.
+
+Both Authentik providers must use the same subject mode for the same directory user. Configure **Based on user UUID** on both providers; this is stable and does not depend on mutable email or username. Authentik's current implementation resolves this mode from the user's UUID, while issuer selection remains provider-specific. See the official [OAuth provider documentation](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/), [`SubModes` definitions](https://github.com/goauthentik/authentik/blob/main/authentik/common/oauth/constants.py), and [ID-token subject resolution](https://github.com/goauthentik/authentik/blob/main/authentik/providers/oauth2/id_token.py).
+
+Legacy SQLite databases using primary key `(issuer, subject)` are transactionally migrated at startup. Each row is assigned the configured namespace, the encrypted API key and timestamps are copied unchanged, and its issuer is retained as `source_issuer`. Duplicate subjects across legacy issuers make the migration fail closed before mutation because they cannot be merged without an operator decision. The legacy `last_validated_at` column is retained for compatibility but means “validated when connected or reconnected”; the account UI now labels it accordingly.
+
 ## Public share behavior
 
 Album links are resolved with `GET /api/shared-links/me` and `x-immich-share-key`. The embedded `assets` list is not trusted for album enumeration. The client requests every `/api/timeline/buckets` result and every corresponding `/api/timeline/bucket`, then converts parallel arrays into ordinary asset objects. Missing arrays are allowed; every present parallel array must have the same length as `id`, otherwise the upstream response is rejected as malformed.
@@ -86,15 +97,15 @@ Pagination wrappers (`items`, `results`, or `buckets`, with `nextPage`/`nextCurs
 
 ## MCP and OIDC
 
-The Python MCP SDK runs Streamable HTTP at `/mcp` and publishes RFC 9728 protected-resource metadata. The MCP server is only a resource server: MCP clients perform Authorization Code flow (PKCE for public clients) directly with Authentik using its discovery document. Tokens are validated locally against discovered JWKS, with signature algorithm, issuer, audience, `exp`, `nbf`, and required scopes enforced. `sub` is the stable identity; email and preferred username are optional attributes.
+The Python MCP SDK runs Streamable HTTP at `/mcp` and publishes RFC 9728 protected-resource metadata. The MCP server is only a resource server: MCP clients perform Authorization Code flow (PKCE for public clients) directly with Authentik using its discovery document. Tokens are validated locally against discovered JWKS, with signature algorithm, issuer, audience, `exp`, `nbf`, and required scopes enforced. `sub` is the stable identity within the configured namespace; email and preferred username are optional attributes.
 
 ## Threat controls
 
 * Exact configured origin matching for supplied share URLs; URL credentials are rejected.
 * Fixed upstream base URL, fixed API paths, encoded identifiers, TLS verification by default.
-* Timeouts, bounded GET-only retries, response-size limits, gallery image limits.
+* Timeouts, bounded GET-only retries, streaming response-size limits, gallery image limits. Image requests reject an oversized declared length before reading and stop iteration immediately when an undeclared/incorrect-length body exceeds `MAX_IMAGE_BYTES`.
 * No token/share-key logging; sanitized upstream errors.
-* Fernet-authenticated encryption at rest; SQLite records are keyed only by issuer+subject.
+* Fernet-authenticated encryption at rest; SQLite records are keyed only by identity namespace plus validated subject.
 * Opaque HMAC-indexed browser sessions, short-lived OAuth state/PKCE records, secure cookies, and CSRF checks.
 * Readiness verifies SQLite itself but never a particular user's credential.
 * Native MCP `ImageContent` preserves the upstream `Content-Type`.

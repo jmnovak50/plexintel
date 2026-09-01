@@ -82,6 +82,7 @@ def account_router(
         if claims is None:
             return _error_page("OIDC ID token validation failed", 400)
         identity = BrowserIdentity(
+            identity_namespace=settings.identity_namespace,
             issuer=str(claims["iss"]),
             subject=str(claims["sub"]),
             email=_optional_text(claims.get("email")),
@@ -170,7 +171,7 @@ def _account_page(
         <p><strong>Immich:</strong> Connected</p>
         <dl><dt>User</dt><dd>{html.escape(status.immich_name or status.immich_user_id or "Unknown")}</dd>
         <dt>Email</dt><dd>{html.escape(status.immich_email or "Not provided")}</dd>
-        <dt>Last validated</dt><dd>{html.escape(status.last_validated_at.isoformat())}</dd></dl>
+        <dt>Validated on connect</dt><dd>{html.escape(status.validated_at_on_connect.isoformat())}</dd></dl>
         <p>Disconnecting removes this API key from Immich MCP. It does not delete the key from Immich.</p>
         <form method="post" action="/account/disconnect">
           <input type="hidden" name="csrf_token" value="{html.escape(session.csrf_token)}">

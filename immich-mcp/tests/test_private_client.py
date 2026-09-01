@@ -47,6 +47,23 @@ async def test_private_status_mapping(settings, status, error):
     await client.aclose()
 
 
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(401, InvalidImmichCredential), (403, ImmichForbidden), (429, ImmichRateLimited),
+     (500, ImmichUnavailable)],
+)
+@pytest.mark.asyncio
+@respx.mock
+async def test_private_streaming_image_status_mapping(settings, status, error):
+    respx.get("https://photo.example.com/api/assets/x1/thumbnail").mock(
+        return_value=httpx.Response(status)
+    )
+    client = ImmichClient(settings)
+    with pytest.raises(error):
+        await client.get_asset_thumbnail(credential(), "x1")
+    await client.aclose()
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_private_timeout(settings):

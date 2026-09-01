@@ -4,17 +4,19 @@ from pydantic import BaseModel, Field
 
 
 class CredentialStatus(BaseModel):
-    issuer: str = Field(exclude=True)
+    identity_namespace: str = Field(exclude=True)
+    source_issuer: str = Field(exclude=True)
     subject: str = Field(exclude=True)
     immich_user_id: str | None = None
     immich_email: str | None = None
     immich_name: str | None = None
     created_at: datetime
     updated_at: datetime
-    last_validated_at: datetime
+    validated_at_on_connect: datetime
 
 
 class BrowserIdentity(BaseModel):
+    identity_namespace: str
     issuer: str
     subject: str
     email: str | None = None

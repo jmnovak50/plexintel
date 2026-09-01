@@ -6,8 +6,9 @@ import jwt
 import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
+from pydantic import ValidationError
 
-from app.auth.oidc import OIDCJWTVerifier
+from app.auth.oidc import OIDCConfigurationError, OIDCJWTVerifier
 
 
 def b64uint(value: int) -> str:
@@ -46,12 +47,19 @@ def token(private, settings, scope="openid immich.read", **overrides):
     return jwt.encode(claims, private, algorithm="RS256", headers={"kid": "test-key"})
 
 
-def mock_discovery(settings, jwk):
-    issuer = str(settings.oidc_issuer)
+def mock_discovery(settings, jwk, issuer=None):
+    issuer = issuer or str(settings.oidc_issuer)
     respx.get(issuer.rstrip("/") + "/.well-known/openid-configuration").mock(
         return_value=httpx.Response(200, json={"issuer": issuer, "jwks_uri": issuer + "jwks/"})
     )
     respx.get(issuer + "jwks/").mock(return_value=httpx.Response(200, json={"keys": [jwk]}))
+
+
+def test_private_access_requires_explicit_account_issuer(settings):
+    values = settings.model_dump()
+    values.pop("account_oidc_issuer")
+    with pytest.raises(ValidationError, match="ACCOUNT_OIDC_ISSUER"):
+        type(settings)(_env_file=None, **values)
 
 
 @pytest.mark.asyncio
@@ -64,6 +72,7 @@ async def test_oidc_jwt_validation(settings):
     assert access is not None
     assert access.subject == "authentik-user-id"
     assert access.claims["email"] == "user@example.com"  # type: ignore[index]
+    assert access.claims["identity_namespace"] == "authentik"  # type: ignore[index]
     assert "immich.read" in access.scopes
     assert access.token == "validated"
     await verifier.aclose()
@@ -91,13 +100,31 @@ async def test_wrong_audience_is_rejected(settings):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_account_id_token_nonce_validation(settings):
+async def test_wrong_issuer_is_rejected(settings):
     private, jwk = key_material()
     mock_discovery(settings, jwk)
     verifier = OIDCJWTVerifier(settings)
+    signed = token(private, settings, iss="https://auth.example.com/application/o/wrong/")
+    assert await verifier.verify_token(signed) is None
+    await verifier.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_account_id_token_nonce_validation(settings):
+    private, jwk = key_material()
+    account_issuer = str(settings.account_oidc_issuer)
+    mock_discovery(settings, jwk, account_issuer)
+    verifier = OIDCJWTVerifier(
+        settings,
+        issuer=account_issuer,
+        audience=str(settings.account_oidc_client_id),
+        required_scopes=[],
+    )
     signed = token(
         private,
         settings,
+        iss=account_issuer,
         aud=settings.account_oidc_client_id,
         nonce="expected-nonce",
     )
@@ -108,4 +135,40 @@ async def test_account_id_token_nonce_validation(settings):
     assert await verifier.verify_id_token(
         signed, audience=str(settings.account_oidc_client_id), nonce="wrong-nonce"
     ) is None
+    wrong_issuer = token(
+        private,
+        settings,
+        aud=settings.account_oidc_client_id,
+        nonce="expected-nonce",
+    )
+    assert await verifier.verify_id_token(
+        wrong_issuer,
+        audience=str(settings.account_oidc_client_id),
+        nonce="expected-nonce",
+    ) is None
+    await verifier.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_account_discovery_rejects_mcp_issuer_substitution(settings):
+    account_issuer = str(settings.account_oidc_issuer)
+    route = respx.get(account_issuer.rstrip("/") + "/.well-known/openid-configuration").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "issuer": str(settings.oidc_issuer),
+                "jwks_uri": account_issuer + "jwks/",
+            },
+        )
+    )
+    verifier = OIDCJWTVerifier(
+        settings,
+        issuer=account_issuer,
+        audience=str(settings.account_oidc_client_id),
+        required_scopes=[],
+    )
+    with pytest.raises(OIDCConfigurationError):
+        await verifier.warm()
+    assert route.called
     await verifier.aclose()

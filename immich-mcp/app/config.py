@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     private_access_enabled: bool = True
     credential_db_path: Path = Path("/data/credentials.sqlite3")
     credential_encryption_key: SecretStr | None = None
+    identity_namespace: str = "authentik"
+    account_oidc_issuer: AnyHttpUrl | None = None
     account_oidc_client_id: str | None = None
     account_oidc_client_secret: SecretStr | None = None
     account_redirect_uri: AnyHttpUrl | None = None
@@ -44,7 +46,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @field_validator(
-        "oidc_issuer", "immich_base_url", "mcp_public_url", "account_redirect_uri", "account_public_url"
+        "oidc_issuer",
+        "immich_base_url",
+        "mcp_public_url",
+        "account_oidc_issuer",
+        "account_redirect_uri",
+        "account_public_url",
     )
     @classmethod
     def no_url_credentials(cls, value: AnyHttpUrl | None) -> AnyHttpUrl | None:
@@ -59,6 +66,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def default_audience(self) -> "Settings":
+        if not self.identity_namespace.strip():
+            raise ValueError("IDENTITY_NAMESPACE must not be empty")
         if self.oidc_audience is None:
             self.oidc_audience = self.oidc_client_id
         if self.private_access_enabled:
@@ -66,6 +75,7 @@ class Settings(BaseSettings):
                 name
                 for name, value in {
                     "CREDENTIAL_ENCRYPTION_KEY": self.credential_encryption_key,
+                    "ACCOUNT_OIDC_ISSUER": self.account_oidc_issuer,
                     "ACCOUNT_OIDC_CLIENT_ID": self.account_oidc_client_id,
                     "ACCOUNT_OIDC_CLIENT_SECRET": self.account_oidc_client_secret,
                     "ACCOUNT_REDIRECT_URI": self.account_redirect_uri,

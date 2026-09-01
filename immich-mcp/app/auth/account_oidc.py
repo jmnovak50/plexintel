@@ -60,7 +60,7 @@ class AccountOIDC:
         endpoint = metadata.get(name)
         if not isinstance(endpoint, str):
             raise OIDCConfigurationError(f"OIDC discovery is missing {name}")
-        issuer = urlsplit(str(self.settings.oidc_issuer))
+        issuer = urlsplit(self.verifier.issuer)
         candidate = urlsplit(endpoint)
         if (candidate.scheme, candidate.hostname, candidate.port) != (
             issuer.scheme,

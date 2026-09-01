@@ -14,8 +14,24 @@ from app.immich.client import (
     ImmichUnavailable,
     InvalidShareLink,
     MalformedImmichResponse,
+    PayloadTooLarge,
     normalize_parallel_assets,
 )
+
+
+class CountingAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.yielded = 0
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
 
 
 def link_payload(*, album_id="album-1", expires_at=None):
@@ -129,13 +145,111 @@ def test_missing_parallel_arrays_are_allowed():
 @pytest.mark.asyncio
 @respx.mock
 async def test_webp_thumbnail_preserves_mime(settings):
-    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+    route = respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
         return_value=httpx.Response(200, content=b"webp", headers={"content-type": "image/webp"})
     )
     client = ImmichClient(settings)
     image = await client.get_shared_asset_thumbnail("secret", "id1")
     assert image.data == b"webp"
     assert image.mime_type == "image/webp"
+    assert route.calls[0].request.url.params["key"] == "secret"
+    assert "x-immich-share-key" not in route.calls[0].request.headers
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_content_length_under_image_limit(settings):
+    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+        return_value=httpx.Response(
+            200, content=b"jpeg", headers={"content-type": "image/jpeg", "content-length": "4"}
+        )
+    )
+    client = ImmichClient(settings)
+    image = await client.get_shared_asset_thumbnail("secret", "id1")
+    assert image.data == b"jpeg" and image.mime_type == "image/jpeg"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_content_length_over_limit_aborts_before_body(settings):
+    limited = settings.model_copy(update={"max_image_bytes": 1024})
+    stream = CountingAsyncStream([b"not-read"])
+    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+        return_value=httpx.Response(
+            200,
+            stream=stream,
+            headers={"content-type": "image/jpeg", "content-length": "1025"},
+        )
+    )
+    client = ImmichClient(limited)
+    with pytest.raises(PayloadTooLarge):
+        await client.get_shared_asset_thumbnail("secret", "id1")
+    assert stream.yielded == 0 and stream.closed
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_without_content_length_under_limit(settings):
+    limited = settings.model_copy(update={"max_image_bytes": 1024})
+    stream = CountingAsyncStream([b"a" * 400, b"b" * 400])
+    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+        return_value=httpx.Response(200, stream=stream, headers={"content-type": "image/png"})
+    )
+    client = ImmichClient(limited)
+    image = await client.get_shared_asset_thumbnail("secret", "id1")
+    assert len(image.data) == 800 and image.mime_type == "image/png"
+    assert stream.yielded == 2 and stream.closed
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_without_content_length_stops_at_limit(settings):
+    limited = settings.model_copy(update={"max_image_bytes": 1024})
+    stream = CountingAsyncStream([b"a" * 700, b"b" * 400, b"must-not-be-read"])
+    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+        return_value=httpx.Response(200, stream=stream, headers={"content-type": "image/jpeg"})
+    )
+    client = ImmichClient(limited)
+    with pytest.raises(PayloadTooLarge):
+        await client.get_shared_asset_thumbnail("secret", "id1")
+    assert stream.yielded == 2 and stream.closed
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_image_rejects_non_image_before_reading(settings):
+    stream = CountingAsyncStream([b'{"error":"no"}'])
+    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+        return_value=httpx.Response(
+            200, stream=stream, headers={"content-type": "application/json"}
+        )
+    )
+    client = ImmichClient(settings)
+    with pytest.raises(MalformedImmichResponse):
+        await client.get_shared_asset_thumbnail("secret", "id1")
+    assert stream.yielded == 0 and stream.closed
+    await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(401, InvalidShareLink), (403, ImmichForbidden), (429, ImmichRateLimited),
+     (500, ImmichUnavailable)],
+)
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_shared_image_status_mapping(settings, status, error):
+    respx.get("https://photo.example.com/api/assets/id1/thumbnail").mock(
+        return_value=httpx.Response(status)
+    )
+    client = ImmichClient(settings)
+    with pytest.raises(error):
+        await client.get_shared_asset_thumbnail("secret", "id1")
     await client.aclose()
 
 
@@ -171,4 +285,3 @@ async def test_timeout_behavior(settings):
     with pytest.raises(ImmichTimeout):
         await client.get_shared_link("secret")
     await client.aclose()
-

@@ -29,7 +29,8 @@ def register_connection_tools(
             "immichUserId": status.immich_user_id,
             "email": status.immich_email,
             "name": status.immich_name,
-            "lastValidatedAt": status.last_validated_at.isoformat(),
+            # Backward-compatible output name; this is validation performed on connect/reconnect.
+            "lastValidatedAt": status.validated_at_on_connect.isoformat(),
             "accountUrl": str(settings.account_public_url),
         }
 

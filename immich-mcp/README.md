@@ -7,7 +7,9 @@ A thin, typed Python MCP server for public Immich shares and read-only private l
 Authentication and Immich authorization are deliberately separate:
 
 ```text
-ChatGPT/OpenWebUI -> Authentik OAuth -> verified issuer + sub -> Immich MCP
+ChatGPT/OpenWebUI -> Authentik MCP OAuth -> verified issuer + sub -> Immich MCP
+                                                        |
+                                        IDENTITY_NAMESPACE + sub
                                                         |
                                                         v
                                       encrypted SQLite credential record
@@ -20,12 +22,13 @@ Authentik answers “who is this MCP user?” The selected Immich API key answer
 
 ## Security model
 
-- `/mcp` validates Authentik JWT signatures through discovered JWKS and enforces issuer, audience, `exp`, `nbf`, and `immich.read` scope. The verified `iss` plus `sub` is the credential-store primary key.
-- `/account` uses a dedicated Authentik OIDC client with Authorization Code, PKCE S256, state, nonce, signed ID-token validation, and an opaque server-side session.
+- `/mcp` validates Authentik JWT signatures through the `OIDC_ISSUER` discovery/JWKS document and enforces issuer, audience, `exp`, `nbf`, and `immich.read` scope.
+- `/account` independently discovers and validates against `ACCOUNT_OIDC_ISSUER`; it uses a dedicated Authentik OIDC client with Authorization Code, PKCE S256, state, nonce, signed ID-token validation, and an opaque server-side session. Discovery documents are never shared between the two applications.
+- Credential lookup uses `IDENTITY_NAMESPACE + sub`, not OAuth issuer, email, or username. Each token's own issuer is still strictly validated before its `sub` may enter that namespace.
 - Browser cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` by default. POSTs require CSRF tokens. OAuth tokens and Immich keys are never stored in cookies.
 - Immich API keys are encrypted with Fernet before SQLite persistence. Keys, ciphertext, OAuth tokens, authorization codes, and share keys are excluded from application logs and tool results.
 - No global Immich administrator key exists. No Authentik token is forwarded or exchanged with Immich. No write tool is registered.
-- Caller-provided share URLs must match `IMMICH_BASE_URL` exactly. TLS verification, fixed timeouts, GET-only retries, image limits, pagination limits, and sanitized errors are enabled.
+- Caller-provided share URLs must match `IMMICH_BASE_URL` exactly. TLS verification, fixed timeouts, GET-only retries, bounded streaming image limits, pagination limits, and sanitized errors are enabled.
 - Uvicorn access logging is disabled. Apply equivalent reverse-proxy redaction for `/account/callback`, `/account/connect`, `/simple-share/*`, and `/public/shared-albums/*`.
 
 ## Current Immich API and permissions
@@ -74,8 +77,10 @@ Create two Authentik OAuth2/OpenID providers/applications. Do not reuse Immich's
 1. Create a separate confidential Authorization Code client.
 2. Register exactly `ACCOUNT_REDIRECT_URI`, such as `https://mcp.example.com/account/callback`.
 3. Allow `openid profile email`; this application sends PKCE S256.
-4. Configure `ACCOUNT_OIDC_CLIENT_ID` and `ACCOUNT_OIDC_CLIENT_SECRET`.
-5. Ensure its ID token uses the same issuer and stable `sub` as the MCP access token for that user.
+4. Set `ACCOUNT_OIDC_ISSUER` to this provider's exact issuer, then configure `ACCOUNT_OIDC_CLIENT_ID` and `ACCOUNT_OIDC_CLIENT_SECRET`.
+5. In both Authentik providers, select the same **Subject mode**. Prefer **Based on user UUID** for a stable, non-email identifier. Both applications must emit the same `sub` for one user. Do not use email or username as the reconciliation key.
+
+Authentik normally uses a per-provider issuer such as `/application/o/immich-mcp/` and `/application/o/immich-mcp-account/`; different issuers are expected. Strict issuer validation remains separate for each application. `IDENTITY_NAMESPACE=authentik` deliberately joins their already-validated subjects in the credential store. If the providers emit different `sub` values, linking cannot work and the server will not fall back to email.
 
 The account client creates only a short-lived local browser session after ID-token validation. Its access and refresh tokens are discarded.
 
@@ -83,7 +88,7 @@ The account client creates only a short-lived local browser session after ID-tok
 
 1. Visit `ACCOUNT_PUBLIC_URL` and sign in directly to Authentik.
 2. Paste your own Immich API key into the browser form.
-3. The server validates it through `/api/users/me`, encrypts it, and stores it under the signed-in issuer+`sub`.
+3. The server validates it through `/api/users/me`, encrypts it, and stores it under `IDENTITY_NAMESPACE` plus the signed-in `sub`.
 4. Return to the MCP client. Private tools now resolve that record from the verified MCP request identity.
 
 The page never displays the key again. Disconnect removes only MCP's encrypted copy; revoke it separately in Immich when appropriate.
@@ -101,6 +106,8 @@ Copy `.env.example` to `.env` and set all blank secrets.
 | `MCP_PUBLIC_URL` | External URL including `/mcp` |
 | `CREDENTIAL_DB_PATH` | SQLite path; default `/data/credentials.sqlite3` |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key |
+| `IDENTITY_NAMESPACE` | Stable local identity domain shared by the two trusted Authentik applications; default `authentik` |
+| `ACCOUNT_OIDC_ISSUER` | Exact, separately discovered issuer for the account application |
 | `ACCOUNT_OIDC_CLIENT_ID`, `ACCOUNT_OIDC_CLIENT_SECRET` | Dedicated account OIDC client |
 | `ACCOUNT_REDIRECT_URI`, `ACCOUNT_PUBLIC_URL` | Trusted account callback/page URLs |
 | `ACCOUNT_SESSION_SECRET` | At least 32 random characters for session/state HMACs |
@@ -146,6 +153,8 @@ Terminate TLS at a trusted reverse proxy, preserve the public Host header, and f
 
 Backup warning: the database is useless without its Fernet key. The database and key together grant access to every stored Immich API key. Back them up separately with equivalent secret controls. Losing or rotating the key without migrating ciphertext makes existing records unrecoverable.
 
+On first startup after this correction, an existing `(issuer, subject)` credential table is migrated in place and transactionally to `(identity_namespace, subject)`. Ciphertext and metadata are preserved, the old issuer is retained as `source_issuer` for audit, and existing rows receive the configured `IDENTITY_NAMESPACE`. If the old table contains the same `subject` under multiple issuers, startup stops before changing the table because choosing one credential would discard or overwrite data; resolve those duplicate rows manually, then restart. Back up the SQLite database before upgrading. Changing `IDENTITY_NAMESPACE` later does not rewrite records and will make the old namespace's credentials unavailable until explicitly migrated.
+
 ## MCP clients
 
 The exact JSON shape varies by client:
@@ -176,7 +185,7 @@ Each user authorizes the connector, opens `/account`, signs in with the same Aut
 
 ### ChatGPT implications
 
-A ChatGPT-authenticated issuer+`sub` resolves the same record as any other client. The user links `/account` separately; there is no ChatGPT-specific identity logic. Current official OpenAI guidance places developer mode under **Settings → Security and login**, then adds the `/mcp` endpoint from ChatGPT Plugins; availability can depend on workspace policy. Public deployment needs a stable HTTPS Streamable HTTP endpoint, while Secure MCP Tunnel is appropriate for developer-mode testing. See [OpenAI's MCP server guide](https://developers.openai.com/plugins/build/mcp-server) and [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+A ChatGPT-authenticated `IDENTITY_NAMESPACE + sub` resolves the same record as the account application even when their validated issuers differ. The user links `/account` separately; there is no ChatGPT-specific identity logic. Current official OpenAI guidance places developer mode under **Settings → Security and login**, then adds the `/mcp` endpoint from ChatGPT Plugins; availability can depend on workspace policy. Public deployment needs a stable HTTPS Streamable HTTP endpoint, while Secure MCP Tunnel is appropriate for developer-mode testing. See [OpenAI's MCP server guide](https://developers.openai.com/plugins/build/mcp-server) and [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
 ## MCP tools
 
@@ -200,7 +209,7 @@ Authenticated private library:
 - `search_assets`
 - `get_recent_assets`
 
-Image tools return native MCP `ImageContent` with Immich's MIME type. Search supports current smart text search plus city, country, person ID, capture-date range, media type, favorite status, and a bounded limit. List/search/recent tools return compact metadata and never inline images.
+Image tools return native MCP `ImageContent` with Immich's MIME type. Image bodies are streamed: an oversized `Content-Length` is rejected before reading, and responses without a length are stopped as soon as accumulated decoded bytes exceed `MAX_IMAGE_BYTES`. Search supports current smart text search plus city, country, person ID, capture-date range, media type, favorite status, and a bounded limit. List/search/recent tools return compact metadata and never inline images.
 
 ## Public shares
 
@@ -208,7 +217,7 @@ Album shares resolve through `/api/shared-links/me`; assets are enumerated throu
 
 ## Health, readiness, and curl
 
-`/health` only confirms the process is alive. `/ready` checks OIDC discovery/JWKS, Immich ping, and SQLite; it never depends on a user's key.
+`/health` only confirms the process is alive. `/ready` checks both independent OIDC discovery/JWKS documents, Immich ping, and SQLite; it never depends on a user's key.
 
 ```bash
 curl -fsS https://mcp.example.com/health
@@ -241,7 +250,8 @@ pytest -q
 
 - Users must create, paste, rotate, and revoke their own Immich keys; Immich has no delegated Authentik-token exchange for this service.
 - SQLite/Fernet targets one service instance sharing one volume. Multiple replicas need a coordinated store and key-management plan.
-- Originals are rejected above `MAX_IMAGE_BYTES`; use thumbnails for large files. The upstream HTTP client may receive the response before the final byte-count check.
+- Images are rejected above `MAX_IMAGE_BYTES`; use thumbnails for large originals. A malicious compressed HTTP body can expand while decoding, but the limit is applied to the decoded bytes retained for MCP and streaming stops immediately when it is crossed.
+- `IDENTITY_NAMESPACE` is a local trust boundary. Only configure both issuer applications into one namespace when they are controlled by the same Authentik deployment and guaranteed to emit the same stable `sub` semantics.
 - Search uses current Immich v3.2 structured filters. Older releases using only deprecated flat filters may need an adapter.
 - The minimal account UI rotates a key by reconnecting with its replacement.
 - Password-protected public share login is not implemented.

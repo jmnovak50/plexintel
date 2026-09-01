@@ -22,9 +22,19 @@ class OIDCConfigurationError(RuntimeError):
 class OIDCJWTVerifier:
     """Validate Authentik JWT access tokens using discovered OIDC metadata and JWKS."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        issuer: str | None = None,
+        audience: str | None = None,
+        required_scopes: list[str] | None = None,
+    ) -> None:
         self.settings = settings
-        self.issuer = str(settings.oidc_issuer)
+        self.issuer = issuer or str(settings.oidc_issuer)
+        self.audience = audience or str(settings.oidc_audience)
+        self.required_scopes = settings.required_scopes if required_scopes is None else required_scopes
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(settings.http_timeout_seconds, connect=settings.http_connect_timeout_seconds),
             verify=settings.tls_verify,
@@ -56,10 +66,10 @@ class OIDCJWTVerifier:
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
             claims = await self._decode(
-                token, audience=str(self.settings.oidc_audience), required=["exp", "sub", "iss", "aud"]
+                token, audience=self.audience, required=["exp", "sub", "iss", "aud"]
             )
             scopes = _scopes(claims)
-            if not set(self.settings.required_scopes).issubset(scopes):
+            if not set(self.required_scopes).issubset(scopes):
                 return None
             client_id = str(claims.get("client_id") or claims.get("azp") or self.settings.oidc_client_id)
             return AccessToken(
@@ -71,6 +81,7 @@ class OIDCJWTVerifier:
                 subject=str(claims["sub"]),
                 claims={
                     "iss": claims["iss"],
+                    "identity_namespace": self.settings.identity_namespace,
                     "email": claims.get("email"),
                     "preferred_username": claims.get("preferred_username"),
                 },
@@ -125,7 +136,7 @@ class OIDCJWTVerifier:
             metadata_response.raise_for_status()
             metadata = metadata_response.json()
             if not isinstance(metadata, dict) or metadata.get("issuer") != self.issuer:
-                raise OIDCConfigurationError("OIDC discovery issuer does not match OIDC_ISSUER")
+                raise OIDCConfigurationError("OIDC discovery issuer does not match configured issuer")
             jwks_uri = metadata.get("jwks_uri")
             if not isinstance(jwks_uri, str) or not jwks_uri.startswith("https://") and not jwks_uri.startswith("http://"):
                 raise OIDCConfigurationError("OIDC discovery does not contain a valid jwks_uri")

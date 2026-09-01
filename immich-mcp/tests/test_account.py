@@ -17,7 +17,7 @@ class FakeIDTokenVerifier:
         assert token == "signed-id-token"
         assert audience == "immich-mcp-account"
         return {
-            "iss": "https://auth.example.com/application/o/immich-mcp/",
+            "iss": "https://auth.example.com/application/o/immich-mcp-account/",
             "sub": "authentik-subject-a",
             "email": "same@example.com",
             "preferred_username": "user-a",
@@ -42,6 +42,7 @@ async def account_test_app(settings):
         settings.credential_db_path,
         CredentialCipher(settings.credential_encryption_key.get_secret_value()),
         settings.account_session_secret.get_secret_value(),
+        settings.identity_namespace,
     )
     await provider.initialize()
     immich = ImmichClient(settings)
@@ -103,6 +104,7 @@ async def test_connect_csrf_secret_redaction_identity_and_disconnect(settings):
         assert "private-user-api-key" not in page.text
         assert route.calls[0].request.headers["x-api-key"] == "private-user-api-key"
         identity = AuthenticatedUser(
+            identity_namespace=settings.identity_namespace,
             issuer=str(settings.oidc_issuer), sub="authentik-subject-a", email="same@example.com",
             scopes=["immich.read"],
         )
@@ -131,6 +133,7 @@ async def test_invalid_api_key_is_rejected_and_not_echoed(settings):
         assert response.status_code == 400
         assert "bad-secret-key" not in response.text
         identity = AuthenticatedUser(
+            identity_namespace=settings.identity_namespace,
             issuer=str(settings.oidc_issuer), sub="authentik-subject-a", scopes=["immich.read"]
         )
         assert await provider.credential_for(identity) is None

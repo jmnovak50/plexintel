@@ -54,6 +54,7 @@ class SharedAlbumResult(BaseModel):
 
 
 class AuthenticatedUser(BaseModel):
+    identity_namespace: str
     issuer: str
     sub: str
     email: str | None = None

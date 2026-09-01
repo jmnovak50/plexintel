@@ -15,6 +15,7 @@ from app.mcp.server import create_mcp_server
 
 def mcp_user(subject: str) -> AuthenticatedUser:
     return AuthenticatedUser(
+        identity_namespace="authentik",
         issuer="https://auth.example.com/application/o/immich-mcp/",
         sub=subject,
         email="same@example.com",
@@ -27,6 +28,7 @@ async def private_server(settings):
         settings.credential_db_path,
         CredentialCipher(settings.credential_encryption_key.get_secret_value()),
         settings.account_session_secret.get_secret_value(),
+        settings.identity_namespace,
     )
     await provider.initialize()
     await provider.store_api_key(mcp_user("user-a"), "api-key-a", {"id": "ia"})
