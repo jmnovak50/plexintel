@@ -20,10 +20,24 @@ def register_connection_tools(
 ) -> None:
     @server.tool(annotations=READ_ONLY)
     async def get_immich_connection_status() -> dict[str, Any]:
-        """Report whether the authenticated MCP user has connected an Immich API key."""
+        """Check whether the authenticated user has connected their personal Immich account.
+
+        Call this before using private Immich tools when the user's connection state is unknown.
+
+        If connected is false, do not call other private Immich tools. Tell the user to visit
+        the returned accountUrl to connect their Immich account, then check this tool again
+        after they complete the connection.
+        """
         status = await provider.status_for(current_user())
         if status is None:
-            return {"connected": False, "accountUrl": str(settings.account_public_url)}
+            return {
+                "connected": False,
+                "actionRequired": "connect_immich_account",
+                "message": (
+                    "This user has not connected their Immich account. "
+                    "Ask them to visit accountUrl before continuing."
+                ),
+                "accountUrl": str(settings.account_public_url)}
         return {
             "connected": True,
             "immichUserId": status.immich_user_id,

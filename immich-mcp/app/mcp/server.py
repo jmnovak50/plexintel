@@ -24,7 +24,17 @@ def create_mcp_server(
         instructions=(
             "Read Immich public album shares. Share keys are capability credentials; do not reveal them. "
             "Private tools use the authenticated user's separately connected Immich API key. "
-            "The caller cannot choose another user's credential."
+            "The caller cannot choose another user's credential. "
+
+            "Before using any private Immich tool, if the user's Immich connection state is not already "
+            "known for this conversation, call get_immich_connection_status first. "
+
+            "If get_immich_connection_status returns connected=false, do not attempt other private tools. "
+            "Tell the user that their Immich account must be connected and direct them to the accountUrl "
+            "returned by the tool. "
+
+            "After the user says they have connected or reconnected their Immich account, call "
+            "get_immich_connection_status again before continuing. "
         ),
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(str(settings.oidc_issuer)),

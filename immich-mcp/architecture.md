@@ -37,7 +37,7 @@ Primary sources:
 
 ## Current Immich API-key findings
 
-Research snapshot: Immich `main` OpenAPI on 2026-08-31.
+Research snapshot: current stable Immich `v3.1.0` API and source on 2026-09-02.
 
 Immich API keys use the `x-api-key` header. The supported identity check is `GET /api/users/me`. The read-only private surface used by this service is:
 
@@ -46,14 +46,20 @@ Immich API keys use the `x-api-key` header. The supported identity check is `GET
 | Validate key/current user | `GET /api/users/me` | `user.read` |
 | List albums | `GET /api/albums` | `album.read` |
 | Read album | `GET /api/albums/{id}` | `album.read` |
-| List album assets | `POST /api/search/metadata`, filter `albumIds.any` | `asset.read` |
+| List album assets | `POST /api/search/metadata`, flat filter `albumIds` | `asset.read` |
+| Exact filename lookup | `POST /api/search/metadata`, flat `originalFileName` and optional `albumIds` | `asset.read` |
 | Asset metadata | `GET /api/assets/{id}` | `asset.read` |
 | Thumbnail/preview | `GET /api/assets/{id}/thumbnail` | `asset.view` |
 | Original image | `GET /api/assets/{id}/original` | `asset.download` |
 | Metadata search/recent assets | `POST /api/search/metadata` | `asset.read` |
 | Natural-language smart search | `POST /api/search/smart` | `asset.read` |
 
-The current album response no longer embeds its asset list, and there is no read endpoint named `/albums/{id}/assets`. Album enumeration therefore uses the current cursor-based metadata search contract. Current search filters are structured objects (for example, `{"albumIds":{"any":[id]}}`); deprecated flat fields are not used.
+The current album response no longer embeds its asset list, and there is no read endpoint named
+`/albums/{id}/assets`. Stable Immich v3.1 metadata search uses flat `albumIds`, `order`, and
+one-based `page` fields and returns `nextPage`. The structured `filter`, `orderBy`, and `cursor`
+shape is part of the v3.2 release-candidate line and is not sent to stable v3.1. Filename lookup
+uses v3.1's case-insensitive substring metadata filter, then requires a case-insensitive complete
+filename match in the MCP client; duplicate full-name matches are returned explicitly.
 
 Minimum recommended permissions for every tool in this release are `user.read`, `album.read`, `asset.read`, `asset.view`, and `asset.download`. Omit `asset.download` if original-image retrieval is not wanted; thumbnails continue to work. No create, update, upload, delete, sharing, or admin permission is requested.
 

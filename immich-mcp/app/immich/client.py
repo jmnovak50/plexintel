@@ -125,9 +125,7 @@ class ImmichClient:
         retries = self.settings.http_max_retries
         for attempt in range(retries + 1):
             try:
-                async with self._client.stream(
-                    "GET", path, headers=headers, params=params
-                ) as response:
+                async with self._client.stream("GET", path, headers=headers, params=params) as response:
                     if response.status_code in {429, 500, 502, 503, 504} and attempt < retries:
                         await asyncio.sleep(0.05 * (2**attempt))
                         continue
@@ -142,17 +140,13 @@ class ImmichClient:
                         except ValueError:
                             declared_length = -1
                         if declared_length > self.settings.max_image_bytes:
-                            raise PayloadTooLarge(
-                                "Immich image exceeds the configured response limit"
-                            )
+                            raise PayloadTooLarge("Immich image exceeds the configured response limit")
                     chunks: list[bytes] = []
                     received = 0
                     async for chunk in response.aiter_bytes():
                         received += len(chunk)
                         if received > self.settings.max_image_bytes:
-                            raise PayloadTooLarge(
-                                "Immich image exceeds the configured response limit"
-                            )
+                            raise PayloadTooLarge("Immich image exceeds the configured response limit")
                         chunks.append(chunk)
                     return ImagePayload(data=b"".join(chunks), mime_type=mime)
             except httpx.TimeoutException as exc:
@@ -333,24 +327,29 @@ class ImmichClient:
         self, credential: PrivateImmichCredential, album_id: str, *, limit: int, offset: int
     ) -> tuple[list[dict[str, Any]], str | None]:
         body: dict[str, Any] = {
-            "filter": {"albumIds": {"any": [album_id]}},
-            "orderBy": {"field": "fileCreatedAt", "direction": "asc"},
+            "albumIds": [album_id],
+            "order": "asc",
+            "page": 1,
             "size": min(max(offset + limit, 1), 1000),
         }
         collected: list[dict[str, Any]] = []
-        next_cursor: str | None = None
+        next_page: str | None = None
+        seen_pages: set[str] = set()
         for _ in range(100):
-            if next_cursor:
-                body["cursor"] = next_cursor
-            items, next_cursor = await self._metadata_search_page(credential, body)
+            items, next_page = await self._metadata_search_page(credential, body)
             collected.extend(items)
-            if len(collected) >= offset + limit or not next_cursor:
-                return collected[offset : offset + limit], next_cursor
+            if len(collected) >= offset + limit or not next_page:
+                return collected[offset : offset + limit], next_page
+            if next_page in seen_pages:
+                raise MalformedImmichResponse("Immich search pagination repeated a page")
+            seen_pages.add(next_page)
+            try:
+                body["page"] = int(next_page)
+            except ValueError as exc:
+                raise MalformedImmichResponse("Immich returned an invalid search page") from exc
         raise MalformedImmichResponse("Immich search pagination exceeded safety limit")
 
-    async def get_asset_metadata(
-        self, credential: PrivateImmichCredential, asset_id: str
-    ) -> dict[str, Any]:
+    async def get_asset_metadata(self, credential: PrivateImmichCredential, asset_id: str) -> dict[str, Any]:
         response = await self._get(f"assets/{quote(asset_id, safe='')}", credential=credential)
         return self._dict_json(response, "asset metadata")
 
@@ -394,32 +393,79 @@ class ImmichClient:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         filters = self._search_filters(
-            city=city, country=country, person_id=person_id, start_date=start_date,
-            end_date=end_date, media_type=media_type, favorite=favorite,
+            city=city,
+            country=country,
+            person_id=person_id,
+            start_date=start_date,
+            end_date=end_date,
+            media_type=media_type,
+            favorite=favorite,
         )
         if query:
             body: dict[str, Any] = {"query": query, "size": limit, "withExif": True}
-            if filters:
-                body["filter"] = filters
+            body.update(filters)
             payload = self._json(await self._post("search/smart", credential=credential, json_body=body))
             items, _ = self._search_asset_page(payload)
             return items
         body = {
             "size": limit,
             "withExif": True,
-            "orderBy": {"field": "fileCreatedAt", "direction": "desc"},
+            "order": "desc",
         }
-        if filters:
-            body["filter"] = filters
+        body.update(filters)
         items, _ = await self._metadata_search_page(credential, body)
         return items
+
+    async def find_assets_by_filename(
+        self,
+        credential: PrivateImmichCredential,
+        original_file_name: str,
+        *,
+        album_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return bounded, case-insensitive exact filename matches in stable order."""
+        requested_name = original_file_name.strip()
+        if not requested_name:
+            raise ValueError("original_file_name must not be empty")
+        body: dict[str, Any] = {
+            "originalFileName": requested_name,
+            "order": "asc",
+            "page": 1,
+            "size": 1000,
+            "withExif": True,
+        }
+        if album_id is not None:
+            body["albumIds"] = [album_id]
+
+        matches: list[dict[str, Any]] = []
+        seen_pages: set[str] = set()
+        requested_casefold = requested_name.casefold()
+        for _ in range(100):
+            items, next_page = await self._metadata_search_page(credential, body)
+            for item in items:
+                candidate = item.get("originalFileName")
+                if isinstance(candidate, str) and candidate.casefold() == requested_casefold:
+                    matches.append(item)
+                    if len(matches) > limit:
+                        return self._sort_filename_matches(matches)[:limit], True
+            if not next_page:
+                return self._sort_filename_matches(matches), False
+            if next_page in seen_pages:
+                raise MalformedImmichResponse("Immich search pagination repeated a page")
+            seen_pages.add(next_page)
+            try:
+                body["page"] = int(next_page)
+            except ValueError as exc:
+                raise MalformedImmichResponse("Immich returned an invalid search page") from exc
+        raise MalformedImmichResponse("Immich search pagination exceeded safety limit")
 
     async def get_recent_assets(
         self, credential: PrivateImmichCredential, *, limit: int
     ) -> list[dict[str, Any]]:
         body = {
-            "filter": {"visibility": {"eq": "timeline"}},
-            "orderBy": {"field": "fileCreatedAt", "direction": "desc"},
+            "visibility": "timeline",
+            "order": "desc",
             "size": limit,
             "withExif": True,
         }
@@ -441,8 +487,8 @@ class ImmichClient:
         page = payload.get("assets", payload)
         if not isinstance(page, dict):
             raise MalformedImmichResponse("Immich returned malformed asset search results")
-        next_cursor = page.get("nextCursor")
-        return cls._search_items(page), None if next_cursor in (None, "") else str(next_cursor)
+        next_page = page.get("nextPage", page.get("nextCursor"))
+        return cls._search_items(page), None if next_page in (None, "") else str(next_page)
 
     @staticmethod
     def _search_items(payload: Any) -> list[dict[str, Any]]:
@@ -457,26 +503,33 @@ class ImmichClient:
     def _search_filters(**values: Any) -> dict[str, Any]:
         filters: dict[str, Any] = {}
         if values.get("city") is not None:
-            filters["city"] = {"eq": values["city"]}
+            filters["city"] = values["city"]
         if values.get("country") is not None:
-            filters["country"] = {"eq": values["country"]}
+            filters["country"] = values["country"]
         if values.get("person_id") is not None:
-            filters["personIds"] = {"any": [values["person_id"]]}
-        date_filter = {
-            key: value
-            for key, value in {"gte": values.get("start_date"), "lte": values.get("end_date")}.items()
-            if value is not None
-        }
-        if date_filter:
-            filters["takenAt"] = date_filter
+            filters["personIds"] = [values["person_id"]]
+        if values.get("start_date") is not None:
+            filters["takenAfter"] = values["start_date"]
+        if values.get("end_date") is not None:
+            filters["takenBefore"] = values["end_date"]
         if values.get("media_type") is not None:
             media_type = str(values["media_type"]).upper()
             if media_type not in {"IMAGE", "VIDEO", "AUDIO", "OTHER"}:
                 raise ValueError("media_type must be IMAGE, VIDEO, AUDIO, or OTHER")
-            filters["type"] = {"eq": media_type}
+            filters["type"] = media_type
         if values.get("favorite") is not None:
-            filters["isFavorite"] = {"eq": values["favorite"]}
+            filters["isFavorite"] = values["favorite"]
         return filters
+
+    @staticmethod
+    def _sort_filename_matches(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            items,
+            key=lambda item: (
+                str(item.get("fileCreatedAt") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
 
     def _dict_json(self, response: httpx.Response, name: str) -> dict[str, Any]:
         payload = self._json(response)

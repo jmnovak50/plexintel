@@ -33,13 +33,15 @@ Authentik answers “who is this MCP user?” The selected Immich API key answer
 
 ## Current Immich API and permissions
 
-The implementation was checked against Immich `main` OpenAPI on 2026-08-31. API keys use `x-api-key`.
+The implementation was checked against the current stable Immich `v3.1.0` API and source on
+2026-09-02. API keys use `x-api-key`.
 
 | Operation | Immich endpoint | Required permission |
 | --- | --- | --- |
 | Connect/current user | `GET /api/users/me` | `user.read` |
 | List/read albums | `GET /api/albums`, `GET /api/albums/{id}` | `album.read` |
-| List album assets | `POST /api/search/metadata`, `albumIds.any` filter | `asset.read` |
+| List album assets | `POST /api/search/metadata`, flat `albumIds` filter | `asset.read` |
+| Exact filename lookup | `POST /api/search/metadata`, flat `originalFileName` and optional `albumIds` | `asset.read` |
 | Metadata/search/recent | `GET /api/assets/{id}`, `POST /api/search/metadata`, `POST /api/search/smart` | `asset.read` |
 | Thumbnail/preview | `GET /api/assets/{id}/thumbnail` | `asset.view` |
 | Original image | `GET /api/assets/{id}/original` | `asset.download` |

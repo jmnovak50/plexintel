@@ -44,9 +44,7 @@ def register_asset_tools(
         return [_image_content(image.data, image.mime_type)]
 
     @server.tool(structured_output=False, annotations=READ_ONLY)
-    async def get_asset_image(
-        asset_id: str, edited: bool | None = None
-    ) -> list[ImageContent]:
+    async def get_asset_image(asset_id: str, edited: bool | None = None) -> list[ImageContent]:
         """Return the original Immich image in its native file format.
 
         The original asset may be HEIC or another format unsupported by some vision models.
@@ -79,13 +77,55 @@ def register_asset_tools(
         credential = await private_credential(provider, settings)
         try:
             assets = await client.search_assets(
-                credential, query=query, city=city, country=country, person_id=person_id,
-                start_date=start_date, end_date=end_date, media_type=media_type,
-                favorite=favorite, limit=limit,
+                credential,
+                query=query,
+                city=city,
+                country=country,
+                person_id=person_id,
+                start_date=start_date,
+                end_date=end_date,
+                media_type=media_type,
+                favorite=favorite,
+                limit=limit,
             )
         except ImmichError as exc:
             raise private_error(exc, "asset search (requires asset.read)", settings) from exc
         return [_compact_asset(asset) for asset in assets]
+
+    @server.tool(annotations=READ_ONLY)
+    async def find_asset_by_filename(
+        original_file_name: str,
+        album_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve visible Immich assets deterministically by original filename.
+
+        Use this for requests containing exact filenames such as IMG_0818.heic.
+        Optionally supply an album ID to restrict the lookup to that exact album.
+        Matching is case-insensitive but requires the complete filename. This does not
+        perform semantic image search. Multiple matches are returned as an explicit
+        ambiguity; never select one arbitrarily.
+        """
+        if not original_file_name.strip():
+            raise ValueError("original_file_name must not be empty")
+        credential = await private_credential(provider, settings)
+        try:
+            assets, has_more_matches = await client.find_assets_by_filename(
+                credential,
+                original_file_name,
+                album_id=album_id,
+                limit=settings.private_tool_max_items,
+            )
+        except ImmichError as exc:
+            raise private_error(exc, "filename lookup (requires asset.read)", settings) from exc
+        ambiguous = len(assets) > 1 or has_more_matches
+        return {
+            "originalFileName": original_file_name.strip(),
+            "albumId": album_id,
+            "status": "ambiguous" if ambiguous else ("unique" if assets else "not_found"),
+            "returned": len(assets),
+            "hasMoreMatches": has_more_matches,
+            "assets": [_compact_asset(asset) for asset in assets],
+        }
 
     @server.tool(annotations=READ_ONLY)
     async def get_recent_assets(limit: int = 25) -> list[dict[str, Any]]:
@@ -102,6 +142,4 @@ def register_asset_tools(
 
 
 def _image_content(data: bytes, mime_type: str) -> ImageContent:
-    return ImageContent(
-        type="image", data=base64.b64encode(data).decode("ascii"), mime_type=mime_type
-    )
+    return ImageContent(type="image", data=base64.b64encode(data).decode("ascii"), mime_type=mime_type)

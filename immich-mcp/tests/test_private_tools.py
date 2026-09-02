@@ -1,16 +1,18 @@
+import json
+
 import httpx
 import pytest
 import respx
-from mcp.types import ImageContent
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ImageContent
 
-import app.mcp.tools.connection as connection
 from app.auth.oidc import OIDCJWTVerifier
 from app.credentials.crypto import CredentialCipher
 from app.credentials.sqlite import SQLiteCredentialProvider
 from app.immich.client import ImmichClient
 from app.immich.models import AuthenticatedUser
 from app.mcp.server import create_mcp_server
+from app.mcp.tools import connection
 
 
 def mcp_user(subject: str) -> AuthenticatedUser:
@@ -81,8 +83,12 @@ async def test_private_mcp_tools_and_native_images(settings, monkeypatch):
     )
     respx.post("https://photo.example.com/api/search/metadata").mock(
         side_effect=[
-            httpx.Response(200, json={"assets": {"items": [{"id": "x1", "type": "IMAGE"}], "nextCursor": None}}),
-            httpx.Response(200, json={"assets": {"items": [{"id": "recent", "type": "IMAGE"}], "nextCursor": None}}),
+            httpx.Response(
+                200, json={"assets": {"items": [{"id": "x1", "type": "IMAGE"}], "nextCursor": None}}
+            ),
+            httpx.Response(
+                200, json={"assets": {"items": [{"id": "recent", "type": "IMAGE"}], "nextCursor": None}}
+            ),
         ]
     )
     respx.post("https://photo.example.com/api/search/smart").mock(
@@ -116,5 +122,105 @@ async def test_disconnected_user_gets_account_link(settings, monkeypatch):
     monkeypatch.setattr(connection, "current_user", lambda: mcp_user("not-connected"))
     with pytest.raises(ToolError, match="mcp.example.com/account"):
         await server.call_tool("list_albums", {})
+    await verifier.aclose()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_filename_tool_uses_each_users_credential_for_shared_album(settings, monkeypatch):
+    route = respx.post("https://photo.example.com/api/search/metadata").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json={
+                "assets": {
+                    "items": [
+                        {
+                            "id": "shared-asset",
+                            "originalFileName": "IMG_0818.HEIC",
+                            "fileCreatedAt": "2026-01-01T00:00:00Z",
+                        }
+                    ]
+                    if json.loads(request.content).get("albumIds") == ["shared-album"]
+                    else [],
+                    "nextPage": None,
+                }
+            },
+        )
+    )
+    smart = respx.post("https://photo.example.com/api/search/smart").mock(return_value=httpx.Response(500))
+    server, _, client, verifier = await private_server(settings)
+
+    results = []
+    for subject in ("user-a", "user-b"):
+        monkeypatch.setattr(connection, "current_user", lambda subject=subject: mcp_user(subject))
+        results.append(
+            await server.call_tool(
+                "find_asset_by_filename",
+                {"original_file_name": "IMG_0818.heic", "album_id": "shared-album"},
+            )
+        )
+
+    assert [result.structured_content["status"] for result in results] == ["unique", "unique"]
+    assert [result.structured_content["assets"][0]["id"] for result in results] == [
+        "shared-asset",
+        "shared-asset",
+    ]
+    assert [call.request.headers["x-api-key"] for call in route.calls] == ["api-key-a", "api-key-b"]
+    assert smart.call_count == 0
+    await verifier.aclose()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_filename_tool_preserves_unauthorized_album_denial(settings, monkeypatch):
+    route = respx.post("https://photo.example.com/api/search/metadata").mock(
+        side_effect=lambda request: httpx.Response(
+            403
+            if request.headers["x-api-key"] == "api-key-b"
+            and json.loads(request.content).get("albumIds") == ["private-album"]
+            else 200,
+            json=None,
+        )
+    )
+    server, _, client, verifier = await private_server(settings)
+    monkeypatch.setattr(connection, "current_user", lambda: mcp_user("user-b"))
+
+    with pytest.raises(ToolError, match="Immich denied filename lookup"):
+        await server.call_tool(
+            "find_asset_by_filename",
+            {"original_file_name": "IMG_0818.heic", "album_id": "private-album"},
+        )
+
+    assert route.calls[0].request.headers["x-api-key"] == "api-key-b"
+    await verifier.aclose()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_filename_tool_reports_duplicate_ambiguity(settings, monkeypatch):
+    respx.post("https://photo.example.com/api/search/metadata").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "assets": {
+                    "items": [
+                        {"id": "x2", "originalFileName": "dup.jpg", "fileCreatedAt": "2026-02-01"},
+                        {"id": "x1", "originalFileName": "DUP.JPG", "fileCreatedAt": "2026-01-01"},
+                    ],
+                    "nextPage": None,
+                }
+            },
+        )
+    )
+    server, _, client, verifier = await private_server(settings)
+    monkeypatch.setattr(connection, "current_user", lambda: mcp_user("user-a"))
+
+    result = await server.call_tool("find_asset_by_filename", {"original_file_name": "dup.jpg"})
+
+    assert result.structured_content["status"] == "ambiguous"
+    assert [asset["id"] for asset in result.structured_content["assets"]] == ["x1", "x2"]
     await verifier.aclose()
     await client.aclose()
