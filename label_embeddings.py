@@ -6,8 +6,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import argparse
+from contextlib import closing
 
 from api.db.schema import ensure_app_schema
+from api.services.dimension_governance import dimension_review_guard, record_assessment
+from api.db.connection import connect_db
 from gpt_utils import (
     UNCLEAR_LABEL,
     build_dimension_prompt,
@@ -83,14 +86,16 @@ def _fetch_dimension_samples(dimension: int, top_n: int):
     )
 
 
-def label_single_dimension(
+def _label_single_dimension(
     dimension,
     top_n=10,
     generate_label=False,
     save_label=False,
     label_provider=None,
     label_model=None,
+    assessment_context=None,
 ):
+    context = assessment_context if assessment_context is not None else {}
     mode, positive_df, negative_df = _fetch_dimension_samples(dimension, top_n)
     prompt_bundle = build_dimension_prompt(
         dimension,
@@ -99,10 +104,13 @@ def label_single_dimension(
         dimension_mode=mode,
     )
 
+    context['prompt'] = prompt_bundle
+
     print(f"📄 Prompt for label generation ({mode} dim {dimension}):")
     print(prompt_bundle["prompt_text"])
 
     if prompt_bundle["skipped_reason"]:
+        context.update(result={'validation_status': 'invalid', 'validation_notes': [prompt_bundle['skipped_reason']]}, outcome='insufficient_evidence')
         print(f"⚠️ {UNCLEAR_LABEL}: {prompt_bundle['skipped_reason']}")
         return
 
@@ -114,6 +122,7 @@ def label_single_dimension(
             model=model_name,
             dimension_mode=mode,
         )
+        context.update(result=result,provider=provider_name,model=model_name,outcome='candidate_not_saved')
         print(f"🧠 Suggested label for dim {dimension} via {provider_name}:{model_name}: {result['label']}")
         result_metadata = _format_result_metadata(result)
         if result_metadata:
@@ -132,6 +141,31 @@ def label_single_dimension(
             and _should_persist_label(result["label"])
         ):
             insert_label(dimension, result["label"])
+            context.update(saved=True,outcome="legacy_single_label_saved")
+
+
+def label_single_dimension(dimension, top_n=10, generate_label=False, save_label=False,
+                           label_provider=None, label_model=None):
+    with closing(connect_db()) as conn, conn:
+        with conn.cursor() as cur:
+            with dimension_review_guard(cur, dimension) as allowed:
+                if not allowed:
+                    print(f"Dimension {dimension}: paused or already running; skipped")
+                    return
+                cur.execute('SELECT row_to_json(el) FROM embedding_labels el WHERE dimension=%s LIMIT 1',(dimension,))
+                existing = cur.fetchone()
+                context = {}
+                value = _label_single_dimension(dimension,top_n=top_n,generate_label=generate_label,
+                    save_label=save_label,label_provider=label_provider,label_model=label_model,assessment_context=context)
+                if generate_label and save_label:
+                    cur.execute('SELECT row_to_json(el) FROM embedding_labels el WHERE dimension=%s LIMIT 1',(dimension,))
+                    current = cur.fetchone()
+                    record_assessment(cur,dimension,source='single-cli',provider=context.get('provider'),
+                        model=context.get('model'),prompt=context.get('prompt',{}),result=context.get('result',{}),
+                        saved=context.get('saved',False),outcome=context.get('outcome','no_label_saved'),
+                        before=existing[0] if existing else None,after=current[0] if current else None)
+                    conn.commit()
+                return value
 
 
 def main():

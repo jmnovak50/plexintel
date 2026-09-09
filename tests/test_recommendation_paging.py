@@ -26,14 +26,11 @@ class RecommendationExplanationThemeSqlTests(unittest.TestCase):
                 self.assertIn("AS title_traits", sql)
                 self.assertIn("AS taste_match", sql)
                 self.assertIn("recs.semantic_themes", sql)
-                self.assertIn("si.dimension >= 0 AND si.dimension < 768", sql)
-                self.assertIn("si.dimension >= 768 AND si.dimension < 1536", sql)
-                self.assertIn("ARRAY_AGG(top_labels.display_label ORDER BY top_labels.max_shap DESC)", sql)
-                self.assertIn("GROUP BY el.display_label", sql)
-                self.assertIn("si.shap_value > 0", sql)
-                self.assertIn("el.explainable IS TRUE", sql)
-                self.assertIn("COALESCE(el.needs_review, false) IS NOT TRUE", sql)
-                self.assertIn("LIMIT 3", sql)
+                self.assertIn("public.selected_embedding_labels(", sql)
+                self.assertIn("recs.username, recs.rating_key, 0, 768, 3", sql)
+                self.assertIn("recs.username, recs.rating_key, 768, 1536, 3", sql)
+                self.assertIn("ARRAY_AGG(display_label ORDER BY max_shap DESC)", sql)
+
 
     def test_show_rollups_return_empty_theme_arrays(self):
         sql, _params = self._build("shows")

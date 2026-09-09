@@ -48,8 +48,8 @@ class RecsRouteSqlTests(unittest.TestCase):
         self.assertIn("AS title_traits", sql)
         self.assertIn("AS taste_match", sql)
         self.assertIn("recs.semantic_themes", sql)
-        self.assertIn("si.dimension >= 0 AND si.dimension < 768", sql)
-        self.assertIn("si.dimension >= 768 AND si.dimension < 1536", sql)
+        self.assertIn("recs.username, recs.rating_key, 0, 768, 3", sql)
+        self.assertIn("recs.username, recs.rating_key, 768, 1536, 3", sql)
 
 
 if __name__ == "__main__":

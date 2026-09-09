@@ -50,28 +50,15 @@ def _positive_label_array_sql(
     user-side taste matches. Missing labels collapse to an empty array rather
     than NULL so downstream consumers always receive an array.
     """
-    return f"""(
-                SELECT COALESCE(
-                    ARRAY_AGG(top_labels.display_label ORDER BY top_labels.max_shap DESC),
-                    ARRAY[]::text[]
-                )
-                FROM (
-                    SELECT el.display_label, MAX(si.shap_value) AS max_shap
-                    FROM public.shap_impact si
-                    JOIN public.embedding_labels el ON si.dimension = el.dimension
-                    WHERE si.rating_key = {rating_key_column}
-                      AND si.user_id = {username_column}
-                      AND si.shap_value > 0
-                      AND el.explainable IS TRUE
-                      AND COALESCE(el.needs_review, false) IS NOT TRUE
-                      AND el.display_label IS NOT NULL
-                      AND BTRIM(el.display_label) <> ''
-                      AND {dimension_predicate}
-                    GROUP BY el.display_label
-                    ORDER BY MAX(si.shap_value) DESC
-                    LIMIT {int(limit)}
-                ) top_labels
-            )"""
+    bounds = {
+        TITLE_TRAIT_DIMENSION_PREDICATE: (0, 768),
+        TASTE_MATCH_DIMENSION_PREDICATE: (768, 1536),
+    }
+    lower, upper = bounds[dimension_predicate]
+    return f"""(SELECT COALESCE(ARRAY_AGG(display_label ORDER BY max_shap DESC), ARRAY[]::text[])
+        FROM public.selected_embedding_labels(
+            {username_column}, {rating_key_column}, {lower}, {upper}, {int(limit)}))"""
+
 
 
 def _normalize_sort(sort: Optional[list[str]]) -> list[tuple[str, str]]:

@@ -644,7 +644,11 @@ def score_and_store(
 ):
     import shap
     print("📥 Loading model...")
-    model = joblib.load("xgb_model.pkl")
+    # Read one artifact snapshot so prospective provenance identifies the model actually loaded.
+    import io
+    from pathlib import Path
+    model_bytes = Path("xgb_model.pkl").read_bytes()
+    model = joblib.load(io.BytesIO(model_bytes))
     booster = model.get_booster()
 
     print(f"📊 Fetching unwatched media for {username}...")
@@ -833,6 +837,10 @@ def score_and_store(
             stats["usage_count"] += 1
             stats["sum_abs_shap"] += float(abs_val)
 
+    from api.services.dimension_scoring_context import persist_scoring_context
+    persist_scoring_context(cur, model, model_bytes,
+        len(df['media_embedding'].iloc[0]), len(df['user_embedding'].iloc[0]), username,
+        [(row.rating_key, row.scored_at) for row in df_shap.itertuples()])
     _upsert_shap_dimension_stats_current(cur, user_dim_agg)
     conn.commit()
     print(f"📊 Upserted {len(user_dim_agg)} aggregate SHAP dimension rows for {username}")

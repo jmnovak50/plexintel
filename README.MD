@@ -137,3 +137,5 @@ npm run dev
 🧠 Credits
 
 Built by Jason Novak to bring smarter discovery to Plex libraries. 🧩
+
+Administrative dimension oversight is available at `/admin/dimensions`. See [Dimension Explorer setup, data limits, and walkthrough](docs/dimension-explorer.md) for the additive migration and model-metadata registration commands.

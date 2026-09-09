@@ -12,6 +12,9 @@ from pgvector.psycopg2 import register_vector
 
 from api.db.connection import connect_db as connect_bootstrap_db
 from api.db.schema import ensure_app_schema
+from api.services.dimension_governance import (
+    dimension_review_guard, record_assessment, automatic_review_allowed_sql,
+)
 from gpt_utils import (
     COMBINED_EMBEDDING_DIMENSIONS,
     DEFAULT_FETCH_ITEMS,
@@ -494,10 +497,13 @@ def get_top_dimensions(cur, limit=25, dim_type="media", include_labeled=False):
     dim_min, dim_max = _get_dimension_range(dim_type)
 
     ranked_stats = get_ranked_dimension_stats(cur)
+    cur.execute("SELECT a.dimension FROM embedding_dimension_admin a JOIN embedding_feature_config c USING(config_id) WHERE c.active AND a.paused")
+    paused = {row[0] for row in cur.fetchall()}
     filtered = [
         stat for stat in ranked_stats
         if (include_labeled or stat["dimension"] not in labeled)
         and dim_min <= stat["dimension"] < dim_max
+        and stat["dimension"] not in paused
     ]
     return filtered[:limit]
 
@@ -599,7 +605,7 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
         ORDER BY si.dimension ASC, r.username ASC, r.rating_key ASC
     """.format(usable_existing_label_sql=usable_existing_label_sql)
     try:
-        cur.execute(query, (dim_min, dim_max))
+        cur.execute(query.replace('WHERE si.shap_value > 0', 'WHERE si.shap_value > 0 AND ' + automatic_review_allowed_sql('si.dimension')), (dim_min, dim_max))
         return cur.fetchall()
     except Exception as exc:
         if hasattr(cur, "connection"):
@@ -670,7 +676,7 @@ def get_coverage_dimension_candidates(cur, dim_type="all"):
           )
         ORDER BY si.dimension ASC, r.username ASC, r.rating_key ASC
     """.format(usable_existing_label_sql=usable_existing_label_sql)
-    cur.execute(fallback_query, (dim_min, dim_max))
+    cur.execute(fallback_query.replace('WHERE si.shap_value > 0', 'WHERE si.shap_value > 0 AND ' + automatic_review_allowed_sql('si.dimension')), (dim_min, dim_max))
     return cur.fetchall()
 
 
@@ -899,7 +905,7 @@ def get_review_dimension_candidates(cur, limit=25, dim_type="all") -> list[dict]
             el.dimension ASC
         LIMIT %s
     """
-    cur.execute(query, (dim_min, dim_max, limit))
+    cur.execute(query.replace('WHERE el.needs_review IS TRUE', 'WHERE el.needs_review IS TRUE AND ' + automatic_review_allowed_sql('el.dimension')), (dim_min, dim_max, limit))
     return [_review_row_to_dict(row) for row in cur.fetchall()]
 
 
@@ -1037,7 +1043,7 @@ def get_eligible_dimension_candidates(cur, limit=25, dim_type="all") -> list[dic
             dimension ASC
         LIMIT %s
     """.format(candidate_reason_sql=ELIGIBLE_CANDIDATE_REASON_SQL)
-    cur.execute(query, (dim_min, dim_max, limit))
+    cur.execute(query.replace('WHERE si.dimension >= %s', 'WHERE si.dimension >= %s AND ' + automatic_review_allowed_sql('si.dimension')), (dim_min, dim_max, limit))
     return [_eligible_row_to_dict(row) for row in cur.fetchall()]
 
 
@@ -2103,6 +2109,15 @@ def main():
             include_labeled=args.refresh_existing,
         )
 
+    cur.execute("SELECT dimension FROM embedding_dimension_admin a JOIN embedding_feature_config c USING(config_id) WHERE c.active AND a.paused")
+    paused_dimensions = {row[0] for row in cur.fetchall()}
+    top_dims = [stat for stat in top_dims if stat['dimension'] not in paused_dimensions]
+    if requested_dimensions and args.selection_mode == 'review':
+        for stat in top_dims:
+            current = get_existing_label_row(cur, stat['dimension']) or {}
+            stat.update(selection_mode='review', existing_label=current.get('label'),
+                        existing_display_label=current.get('display_label'), existing_label_type=current.get('label_type'))
+
     print_selection_summary(
         args.selection_mode,
         top_dims,
@@ -2122,177 +2137,188 @@ def main():
     review_cooldown_events = []
     for dim_stats in top_dims:
         dimension = dim_stats["dimension"]
-        mode, positive_df, negative_df = _fetch_dimension_samples(dimension)
-        prompt_bundle = build_dimension_prompt(
-            dimension,
-            positive_df,
-            negative_df,
-            dimension_mode=mode,
-            existing_label=dim_stats.get("existing_label") if dim_stats.get("selection_mode") == "review" else None,
-            existing_display_label=(
-                dim_stats.get("existing_display_label") if dim_stats.get("selection_mode") == "review" else None
-            ),
-            existing_label_type=(
-                dim_stats.get("existing_label_type") if dim_stats.get("selection_mode") == "review" else None
-            ),
-        )
-        skipped_reason = prompt_bundle["skipped_reason"]
-        label_result = _default_label_result(skipped_reason)
-
-        print(f"📄 Prepared contrast prompt for {mode} dim {dimension}", flush=True)
-        if args.dry_run:
-            print(prompt_bundle["prompt_text"], flush=True)
-
-        if skipped_reason:
-            print(f"⚠️ Skipping LLM for dim {dimension}: {skipped_reason}", flush=True)
-        elif should_call_model:
-            try:
-                label_result = call_llm_for_label_result(
-                    prompt_bundle["prompt_text"],
-                    provider=provider_name,
-                    model=model_name,
-                    dimension_mode=mode,
-                )
-                print(
-                    f"🧠 {mode.title()} dim {dimension} labeled via "
-                    f"{provider_name}:{model_name} as: {label_result['label']}",
-                    flush=True,
-                )
-                validation_message = _format_result_validation(label_result)
-                if validation_message:
-                    print(f"   validation={validation_message}", flush=True)
-            except Exception as exc:
-                skipped_reason = f"LLM error: {str(exc).strip()}"
-                label_result = _default_label_result(skipped_reason)
-                print(f"⚠️ Skipping dim {dimension} due to LLM error: {exc}", flush=True)
-
-        label_result = validate_label_perspective(label_result, dimension_mode=mode)
-        generated_label = label_result["label"]
-        evidence = label_result.get("evidence", ["", "", ""])
-        final_governance = _csv_governance_for_label(label_result, dim_type=mode)
-        final_saved_label = ""
-        save_status = ""
-        review_cooldown_until = ""
-
-        if args.save_label and not args.dry_run:
-            saved, save_status = save_label_result(
-                cur,
+        with dimension_review_guard(cur, dimension) as allowed:
+            if not allowed:
+                print(f"Dimension {dimension}: paused or already running; skipped", flush=True)
+                continue
+            mode, positive_df, negative_df = _fetch_dimension_samples(dimension)
+            prompt_bundle = build_dimension_prompt(
                 dimension,
-                label_result,
-                label_repair_status=dim_stats.get("label_repair_status", ""),
-                selection_reason=dim_stats.get("selection_reason", ""),
-                repair_cooldown_days=args.repair_cooldown_days,
-                review_mode=dim_stats.get("selection_mode") == "review",
-                dim_type=mode,
+                positive_df,
+                negative_df,
+                dimension_mode=mode,
+                existing_label=dim_stats.get("existing_label") if dim_stats.get("selection_mode") == "review" else None,
+                existing_display_label=(
+                    dim_stats.get("existing_display_label") if dim_stats.get("selection_mode") == "review" else None
+                ),
+                existing_label_type=(
+                    dim_stats.get("existing_label_type") if dim_stats.get("selection_mode") == "review" else None
+                ),
             )
-            if saved:
-                final_saved_label = generated_label
-                print(f"✅ Saved label for dim {dimension}: {save_status}", flush=True)
-            elif save_status in {
-                "repair_cooldown_scheduled",
-                "non_semantic_repair_not_saved",
-                "invalid_review_replacement_not_saved",
-            }:
-                print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
-            if dim_stats.get("selection_mode") == "review" and save_status in {
-                "updated_review_label_cooldown_scheduled",
-                "repair_cooldown_scheduled",
-                "invalid_review_replacement_not_saved",
-            }:
-                review_cooldown_until = _format_review_cooldown_until(args.repair_cooldown_days)
-                review_cooldown_events.append(
+            skipped_reason = prompt_bundle["skipped_reason"]
+            label_result = _default_label_result(skipped_reason)
+
+            print(f"📄 Prepared contrast prompt for {mode} dim {dimension}", flush=True)
+            if args.dry_run:
+                print(prompt_bundle["prompt_text"], flush=True)
+
+            if skipped_reason:
+                print(f"⚠️ Skipping LLM for dim {dimension}: {skipped_reason}", flush=True)
+            elif should_call_model:
+                try:
+                    label_result = call_llm_for_label_result(
+                        prompt_bundle["prompt_text"],
+                        provider=provider_name,
+                        model=model_name,
+                        dimension_mode=mode,
+                    )
+                    print(
+                        f"🧠 {mode.title()} dim {dimension} labeled via "
+                        f"{provider_name}:{model_name} as: {label_result['label']}",
+                        flush=True,
+                    )
+                    validation_message = _format_result_validation(label_result)
+                    if validation_message:
+                        print(f"   validation={validation_message}", flush=True)
+                except Exception as exc:
+                    skipped_reason = f"LLM error: {str(exc).strip()}"
+                    label_result = _default_label_result(skipped_reason)
+                    print(f"⚠️ Skipping dim {dimension} due to LLM error: {exc}", flush=True)
+
+            if skipped_reason.startswith('LLM error:'):
+                label_result['processing_error'] = True
+            label_result = validate_label_perspective(label_result, dimension_mode=mode)
+            generated_label = label_result["label"]
+            evidence = label_result.get("evidence", ["", "", ""])
+            final_governance = _csv_governance_for_label(label_result, dim_type=mode)
+            final_saved_label = ""
+            save_status = ""
+            review_cooldown_until = ""
+
+            if args.save_label and not args.dry_run:
+                before_assessment = get_existing_label_row(cur, dimension)
+                saved, save_status = save_label_result(
+                    cur,
+                    dimension,
+                    label_result,
+                    label_repair_status=dim_stats.get("label_repair_status", ""),
+                    selection_reason=dim_stats.get("selection_reason", ""),
+                    repair_cooldown_days=args.repair_cooldown_days,
+                    review_mode=dim_stats.get("selection_mode") == "review",
+                    dim_type=mode,
+                )
+                record_assessment(cur, dimension, source=dim_stats.get('selection_mode', args.selection_mode),
+                    provider=provider_name, model=model_name, prompt=prompt_bundle, result=label_result,
+                    saved=saved, outcome=save_status, before=before_assessment,
+                    after=get_existing_label_row(cur, dimension))
+                if saved:
+                    final_saved_label = generated_label
+                    print(f"✅ Saved label for dim {dimension}: {save_status}", flush=True)
+                elif save_status in {
+                    "repair_cooldown_scheduled",
+                    "non_semantic_repair_not_saved",
+                    "invalid_review_replacement_not_saved",
+                }:
+                    print(f"ℹ️ Dim {dimension} not overwritten: {save_status}", flush=True)
+                if dim_stats.get("selection_mode") == "review" and save_status in {
+                    "updated_review_label_cooldown_scheduled",
+                    "repair_cooldown_scheduled",
+                    "invalid_review_replacement_not_saved",
+                }:
+                    review_cooldown_until = _format_review_cooldown_until(args.repair_cooldown_days)
+                    review_cooldown_events.append(
+                        {
+                            "dimension": dimension,
+                            "status": save_status,
+                            "cooldown_until": review_cooldown_until,
+                        }
+                    )
+                    print(
+                        f"ℹ️ Review dim {dimension} remains unresolved; "
+                        f"cooldown expiration date: {review_cooldown_until}",
+                        flush=True,
+                    )
+
+            if args.export_csv:
+                csv_rows.append(
                     {
                         "dimension": dimension,
-                        "status": save_status,
-                        "cooldown_until": review_cooldown_until,
+                        "dim_type": mode,
+                        "selection_mode": dim_stats.get("selection_mode", args.selection_mode),
+                        "label_repair_status": dim_stats.get("label_repair_status", ""),
+                        "selection_reason": dim_stats.get("selection_reason", ""),
+                        "existing_label": dim_stats.get("existing_label", ""),
+                        "existing_display_label": dim_stats.get("existing_display_label", ""),
+                        "existing_label_type": dim_stats.get("existing_label_type", ""),
+                        "existing_explainable": dim_stats.get("existing_explainable", ""),
+                        "existing_needs_review": dim_stats.get("existing_needs_review", dim_stats.get("needs_review", "")),
+                        "last_reviewed_at": dim_stats.get("last_reviewed_at", ""),
+                        "review_attempt_count": dim_stats.get("review_attempt_count", ""),
+                        "next_review_at": dim_stats.get("next_review_at", ""),
+                        "unlock_count_total": dim_stats.get("unlock_count_total", ""),
+                        "marginal_unlock_count": dim_stats.get("marginal_unlock_count", ""),
+                        "marginal_weighted_unlock_score": dim_stats.get("marginal_weighted_unlock_score", ""),
+                        "cumulative_unlocked_recommendations": dim_stats.get(
+                            "cumulative_unlocked_recommendations",
+                            "",
+                        ),
+                        "positive_shap_sum_on_unlabeled": dim_stats.get(
+                            "positive_shap_sum_on_unlabeled",
+                            "",
+                        ),
+                        "positive_shap_avg_on_unlabeled": dim_stats.get(
+                            "positive_shap_avg_on_unlabeled",
+                            "",
+                        ),
+                        "mode": mode,
+                        "summary": prompt_bundle["summary"],
+                        "prompt_text": prompt_bundle["prompt_text"],
+                        "label_provider": provider_name or "",
+                        "label_model": model_name or "",
+                        "proposed_label": generated_label,
+                        "proposed_label_confidence": label_result.get("label_confidence", ""),
+                        "proposed_label_type": label_result.get(
+                            "proposed_label_type",
+                            label_result.get("label_type", ""),
+                        ),
+                        "gpt_label": generated_label,
+                        "final_saved_label": final_saved_label,
+                        "final_label_type": final_governance["label_type"],
+                        "final_explainable": final_governance["explainable"],
+                        "final_needs_review": final_governance["needs_review"],
+                        "final_display_label": final_governance["display_label"],
+                        "review_cooldown_until": review_cooldown_until,
+                        "label": generated_label,
+                        "label_confidence": label_result.get("label_confidence", ""),
+                        "label_type": final_governance["label_type"],
+                        "explainable": final_governance["explainable"],
+                        "needs_review": final_governance["needs_review"],
+                        "display_label": final_governance["display_label"],
+                        "coverage_high_count": label_result.get("coverage_high_count"),
+                        "coverage_high_total": label_result.get("coverage_high_total"),
+                        "coverage_high_percent": label_result.get("coverage_high_percent"),
+                        "coverage_low_overlap_count": label_result.get("coverage_low_overlap_count"),
+                        "coverage_low_total": label_result.get("coverage_low_total"),
+                        "coverage_low_overlap_percent": label_result.get("coverage_low_overlap_percent"),
+                        "validation_status": label_result.get("validation_status", ""),
+                        "validation_notes": _format_validation_notes(label_result.get("validation_notes", [])),
+                        "label_explanation": label_result.get("explanation", ""),
+                        "label_evidence_1": evidence[0] if len(evidence) > 0 else "",
+                        "label_evidence_2": evidence[1] if len(evidence) > 1 else "",
+                        "label_evidence_3": evidence[2] if len(evidence) > 2 else "",
+                        "valid_positive_count": prompt_bundle["valid_positive_count"],
+                        "valid_negative_count": prompt_bundle["valid_negative_count"],
+                        "flagged_item_count": prompt_bundle["flagged_item_count"],
+                        "skipped_reason": skipped_reason,
+                        "usage_count": dim_stats["usage_count"],
+                        "sum_abs_shap": dim_stats.get("sum_abs_shap", 0.0),
+                        "avg_abs_shap": dim_stats.get("avg_abs_shap", 0.0),
+                        "combined_score": dim_stats.get("combined_score", 0.0),
+                        "user_count": dim_stats.get("user_count", 0),
+                        "stats_source": dim_stats.get("stats_source", "unknown"),
                     }
                 )
-                print(
-                    f"ℹ️ Review dim {dimension} remains unresolved; "
-                    f"cooldown expiration date: {review_cooldown_until}",
-                    flush=True,
-                )
-
-        if args.export_csv:
-            csv_rows.append(
-                {
-                    "dimension": dimension,
-                    "dim_type": mode,
-                    "selection_mode": dim_stats.get("selection_mode", args.selection_mode),
-                    "label_repair_status": dim_stats.get("label_repair_status", ""),
-                    "selection_reason": dim_stats.get("selection_reason", ""),
-                    "existing_label": dim_stats.get("existing_label", ""),
-                    "existing_display_label": dim_stats.get("existing_display_label", ""),
-                    "existing_label_type": dim_stats.get("existing_label_type", ""),
-                    "existing_explainable": dim_stats.get("existing_explainable", ""),
-                    "existing_needs_review": dim_stats.get("existing_needs_review", dim_stats.get("needs_review", "")),
-                    "last_reviewed_at": dim_stats.get("last_reviewed_at", ""),
-                    "review_attempt_count": dim_stats.get("review_attempt_count", ""),
-                    "next_review_at": dim_stats.get("next_review_at", ""),
-                    "unlock_count_total": dim_stats.get("unlock_count_total", ""),
-                    "marginal_unlock_count": dim_stats.get("marginal_unlock_count", ""),
-                    "marginal_weighted_unlock_score": dim_stats.get("marginal_weighted_unlock_score", ""),
-                    "cumulative_unlocked_recommendations": dim_stats.get(
-                        "cumulative_unlocked_recommendations",
-                        "",
-                    ),
-                    "positive_shap_sum_on_unlabeled": dim_stats.get(
-                        "positive_shap_sum_on_unlabeled",
-                        "",
-                    ),
-                    "positive_shap_avg_on_unlabeled": dim_stats.get(
-                        "positive_shap_avg_on_unlabeled",
-                        "",
-                    ),
-                    "mode": mode,
-                    "summary": prompt_bundle["summary"],
-                    "prompt_text": prompt_bundle["prompt_text"],
-                    "label_provider": provider_name or "",
-                    "label_model": model_name or "",
-                    "proposed_label": generated_label,
-                    "proposed_label_confidence": label_result.get("label_confidence", ""),
-                    "proposed_label_type": label_result.get(
-                        "proposed_label_type",
-                        label_result.get("label_type", ""),
-                    ),
-                    "gpt_label": generated_label,
-                    "final_saved_label": final_saved_label,
-                    "final_label_type": final_governance["label_type"],
-                    "final_explainable": final_governance["explainable"],
-                    "final_needs_review": final_governance["needs_review"],
-                    "final_display_label": final_governance["display_label"],
-                    "review_cooldown_until": review_cooldown_until,
-                    "label": generated_label,
-                    "label_confidence": label_result.get("label_confidence", ""),
-                    "label_type": final_governance["label_type"],
-                    "explainable": final_governance["explainable"],
-                    "needs_review": final_governance["needs_review"],
-                    "display_label": final_governance["display_label"],
-                    "coverage_high_count": label_result.get("coverage_high_count"),
-                    "coverage_high_total": label_result.get("coverage_high_total"),
-                    "coverage_high_percent": label_result.get("coverage_high_percent"),
-                    "coverage_low_overlap_count": label_result.get("coverage_low_overlap_count"),
-                    "coverage_low_total": label_result.get("coverage_low_total"),
-                    "coverage_low_overlap_percent": label_result.get("coverage_low_overlap_percent"),
-                    "validation_status": label_result.get("validation_status", ""),
-                    "validation_notes": _format_validation_notes(label_result.get("validation_notes", [])),
-                    "label_explanation": label_result.get("explanation", ""),
-                    "label_evidence_1": evidence[0] if len(evidence) > 0 else "",
-                    "label_evidence_2": evidence[1] if len(evidence) > 1 else "",
-                    "label_evidence_3": evidence[2] if len(evidence) > 2 else "",
-                    "valid_positive_count": prompt_bundle["valid_positive_count"],
-                    "valid_negative_count": prompt_bundle["valid_negative_count"],
-                    "flagged_item_count": prompt_bundle["flagged_item_count"],
-                    "skipped_reason": skipped_reason,
-                    "usage_count": dim_stats["usage_count"],
-                    "sum_abs_shap": dim_stats.get("sum_abs_shap", 0.0),
-                    "avg_abs_shap": dim_stats.get("avg_abs_shap", 0.0),
-                    "combined_score": dim_stats.get("combined_score", 0.0),
-                    "user_count": dim_stats.get("user_count", 0),
-                    "stats_source": dim_stats.get("stats_source", "unknown"),
-                }
-            )
-        conn.commit()
+            conn.commit()
 
     if review_cooldown_events:
         print(

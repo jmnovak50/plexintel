@@ -6,6 +6,7 @@ import PostLogin from "./pages/PostLogin";
 import Admin from "./pages/Admin";
 import AdminSettings from "./pages/AdminSettings";
 import AdminDigest from "./pages/AdminDigest";
+import AdminDimensions from "./pages/AdminDimensions";
 import AdminPipeline from "./pages/AdminPipeline";
 import DigestUnsubscribe from "./pages/DigestUnsubscribe";
 import Recommendations from "./components/Recommendations";
@@ -22,6 +23,7 @@ function App() {
           <Route path="/admin" element={<Admin />} />
           <Route path="/admin/settings" element={<AdminSettings />} />
           <Route path="/admin/digest" element={<AdminDigest />} />
+          <Route path="/admin/dimensions" element={<AdminDimensions />} />
           <Route path="/admin/pipeline" element={<AdminPipeline />} />
           <Route path="/digest/unsubscribe/:token" element={<DigestUnsubscribe />} />
         </Routes>

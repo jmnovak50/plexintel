@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import psycopg2
 
@@ -596,6 +597,7 @@ def apply_schema_updates(conn) -> None:
             ON public.pipeline_run_stages (run_id)
             """
         )
+    apply_dimension_schema(conn)
     conn.commit()
     bootstrap_settings_from_env(conn)
 
@@ -610,3 +612,11 @@ def ensure_app_schema(db_url: str | None = None) -> None:
         apply_schema_updates(conn)
     finally:
         conn.close()
+
+
+def apply_dimension_schema(conn):
+    """Idempotent additive migration; never execute model or labeling work."""
+    with conn.cursor() as cur:
+        cur.execute('SELECT pg_advisory_xact_lock(184725, 0)')
+        for path in sorted((Path(__file__).parent / 'migrations').glob('*.sql')):
+            cur.execute(path.read_text())

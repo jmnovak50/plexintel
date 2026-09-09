@@ -1864,6 +1864,8 @@ class ReviewCsvExportTests(unittest.TestCase):
             self.executed.append((sql, params))
 
         def fetchone(self):
+            if 'pg_' in self.executed[-1][0] or 'SELECT NOT EXISTS' in self.executed[-1][0]:
+                return (True,)
             return None
 
         def fetchall(self):
@@ -2010,7 +2012,7 @@ class ReviewCsvExportTests(unittest.TestCase):
         self.assertEqual(build_prompt.call_args.kwargs["existing_label_type"], "soft_structural")
         save_label.assert_not_called()
         call_llm.assert_not_called()
-        self.assertEqual(fake_conn.cursor_obj.executed, [])
+        self.assertTrue(all(sql.lstrip().startswith("SELECT") for sql, _ in fake_conn.cursor_obj.executed))
 
     def test_csv_exposes_llm_proposed_type_separately_from_final_governance(self):
         selected = [
