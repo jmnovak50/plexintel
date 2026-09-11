@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     http_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     http_max_retries: int = Field(default=2, ge=0, le=5)
     max_image_bytes: int = Field(default=10_000_000, ge=1024, le=50_000_000)
+    image_max_concurrency: int = Field(default=6, ge=1, le=32)
+    image_per_credential_concurrency: int = Field(default=2, ge=1, le=8)
+    image_queue_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    image_total_timeout_seconds: float = Field(default=45.0, gt=0, le=180)
+    image_highlight_count: int = Field(default=3, ge=1, le=6)
+    image_candidate_limit: int = Field(default=6, ge=1, le=12)
     gallery_inline_image_limit: int = Field(default=6, ge=0, le=12)
     gallery_max_items: int = Field(default=50, ge=1, le=200)
     allowed_hosts: str = "localhost:*,127.0.0.1:*"
@@ -66,6 +72,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def default_audience(self) -> "Settings":
+        if self.image_highlight_count > self.image_candidate_limit:
+            raise ValueError("IMAGE_HIGHLIGHT_COUNT must not exceed IMAGE_CANDIDATE_LIMIT")
         if not self.identity_namespace.strip():
             raise ValueError("IDENTITY_NAMESPACE must not be empty")
         if self.oidc_audience is None:

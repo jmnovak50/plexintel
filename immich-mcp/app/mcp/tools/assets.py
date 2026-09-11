@@ -1,5 +1,5 @@
 import base64
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ImageContent
@@ -28,13 +28,20 @@ def register_asset_tools(
 
     @server.tool(structured_output=False, annotations=READ_ONLY)
     async def get_asset_thumbnail(
-        asset_id: str, size: str = "preview", edited: bool | None = None
+        asset_id: str,
+        size: Literal["thumbnail", "preview", "fullsize"] = "preview",
+        edited: bool | None = None,
     ) -> list[ImageContent]:
         """Return a broadly compatible image preview for viewing, vision analysis, and display.
 
         Use this tool whenever the model needs to inspect, describe, analyze, or show
         an Immich image. Prefer this over get_asset_image for normal visual use because
         the original asset may be HEIC or another format unsupported by some vision models.
+        Fetch only one image for a one-photo request. Explicitly use size='thumbnail'
+        for initial browsing/highlight candidates, and size='preview' only for more detail.
+        The preview default is retained for existing callers. Reuse successful image results;
+        follow server batch limits and do not automatically retry failures. Native image
+        content is returned once; visible attachment rendering is the client's responsibility.
         """
         credential = await private_credential(provider, settings)
         try:

@@ -1,0 +1,18 @@
+{
+  "name": "immich-photo-workflow",
+  "version": "0.1.0",
+  "description": "Bounded Immich photo retrieval and capability-aware display guidance for an existing MCP connection.",
+  "author": {
+    "name": "jmnovak50"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Immich Photo Workflow",
+    "shortDescription": "Find and display Immich photos.",
+    "longDescription": "Bounded Immich photo retrieval and capability-aware display guidance for an existing MCP connection.",
+    "developerName": "jmnovak50",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Show three highlights from an Immich album."
+  }
+}

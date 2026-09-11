@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
 from collections.abc import Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
+from time import monotonic
 from typing import Any
 from urllib.parse import quote
 
@@ -59,6 +62,10 @@ class ImmichTimeout(ImmichError):
     pass
 
 
+class ImmichImageBusy(ImmichError):
+    pass
+
+
 class MalformedImmichResponse(ImmichError):
     pass
 
@@ -75,6 +82,9 @@ class ImmichClient:
             connect=settings.http_connect_timeout_seconds,
         )
         self._owns_client = client is None
+        self._image_slots = asyncio.Semaphore(settings.image_max_concurrency)
+        # Only active/waiting credentials are retained, as digests, never image data.
+        self._credential_image_slots: dict[bytes, tuple[asyncio.Semaphore, int]] = {}
         self._client = client or httpx.AsyncClient(
             base_url=str(settings.immich_base_url).rstrip("/") + "/api/",
             timeout=timeout,
@@ -120,12 +130,96 @@ class ImmichClient:
         send_credential: bool = True,
         params: Mapping[str, Any] | None = None,
     ) -> ImagePayload:
-        """Fetch an image without ever buffering more than the configured byte limit."""
+        """Bound image work separately from metadata and emit body-free diagnostics."""
+        started = monotonic()
+        diagnostic: dict[str, Any] = {
+            "tool": (
+                "get_shared_asset_image"
+                if credential.kind == "share"
+                else "get_asset_image"
+                if path.endswith("/original")
+                else "get_asset_thumbnail"
+            ),
+            "size": (params or {}).get("size", "original" if path.endswith("/original") else "default"),
+            "status": None,
+            "attempts": 0,
+            "bytes": 0,
+            "error_category": None,
+        }
+        try:
+            async with self._image_admission(credential):
+                try:
+                    async with asyncio.timeout(self.settings.image_total_timeout_seconds):
+                        return await self._download_image(
+                            path,
+                            credential=credential,
+                            send_credential=send_credential,
+                            params=params,
+                            diagnostic=diagnostic,
+                        )
+                except TimeoutError as exc:
+                    raise ImmichTimeout("Immich image exceeded the total retrieval deadline") from exc
+        except asyncio.CancelledError:
+            diagnostic["error_category"] = "cancelled"
+            raise
+        except Exception as exc:
+            diagnostic["error_category"] = (
+                type(exc).__name__ if isinstance(exc, ImmichError) else "unexpected"
+            )
+            raise
+        finally:
+            log.info(
+                "immich_image_retrieval", **diagnostic, duration_ms=round((monotonic() - started) * 1000)
+            )
+
+    @asynccontextmanager
+    async def _image_admission(self, credential: ImmichCredential):
+        key = hashlib.sha256(f"{credential.kind}:{credential.token}".encode()).digest()
+        semaphore, users = self._credential_image_slots.get(
+            key, (asyncio.Semaphore(self.settings.image_per_credential_concurrency), 0)
+        )
+        self._credential_image_slots[key] = (semaphore, users + 1)
+        try:
+            async with AsyncExitStack() as stack:
+                try:
+                    async with asyncio.timeout(self.settings.image_queue_timeout_seconds):
+                        # Acquire the per-credential slot first so one account's waiters
+                        # cannot reserve every global slot and block unrelated accounts.
+                        await stack.enter_async_context(semaphore)
+                        await stack.enter_async_context(self._image_slots)
+                except TimeoutError as exc:
+                    raise ImmichImageBusy(
+                        "Image capacity is busy; finish the current batch before continuing"
+                    ) from exc
+                yield
+        finally:
+            _, users = self._credential_image_slots[key]
+            if users == 1:
+                del self._credential_image_slots[key]
+            else:
+                self._credential_image_slots[key] = (semaphore, users - 1)
+
+    async def _download_image(
+        self,
+        path: str,
+        *,
+        credential: ImmichCredential,
+        send_credential: bool,
+        params: Mapping[str, Any] | None,
+        diagnostic: dict[str, Any],
+    ) -> ImagePayload:
+        """Reject oversized streams; keep the existing retry budget inside admission."""
         headers = self._credential_headers(credential) if send_credential else None
         retries = self.settings.http_max_retries
         for attempt in range(retries + 1):
+            diagnostic.update(attempts=attempt + 1, status=None, bytes=0)
             try:
-                async with self._client.stream("GET", path, headers=headers, params=params) as response:
+                async with self._client.stream(
+                    "GET", path, headers=headers, params=params, follow_redirects=False
+                ) as response:
+                    diagnostic["status"] = response.status_code
+                    if 300 <= response.status_code < 400:
+                        raise ImmichError("Immich image redirect was not followed; use thumbnail or preview")
                     if response.status_code in {429, 500, 502, 503, 504} and attempt < retries:
                         await asyncio.sleep(0.05 * (2**attempt))
                         continue
@@ -145,6 +239,7 @@ class ImmichClient:
                     received = 0
                     async for chunk in response.aiter_bytes():
                         received += len(chunk)
+                        diagnostic["bytes"] = received
                         if received > self.settings.max_image_bytes:
                             raise PayloadTooLarge("Immich image exceeds the configured response limit")
                         chunks.append(chunk)

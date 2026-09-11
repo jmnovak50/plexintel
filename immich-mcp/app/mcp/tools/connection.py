@@ -7,7 +7,7 @@ from mcp.types import ToolAnnotations
 from app.auth.dependencies import current_user
 from app.config import Settings
 from app.credentials.sqlite import SQLiteCredentialProvider
-from app.immich.client import ImmichForbidden, InvalidImmichCredential
+from app.immich.client import ImmichError, ImmichForbidden, InvalidImmichCredential
 from app.immich.models import PrivateImmichCredential
 
 READ_ONLY = ToolAnnotations(
@@ -69,6 +69,9 @@ def private_error(exc: Exception, operation: str, settings: Settings) -> Excepti
         )
     if isinstance(exc, ImmichForbidden):
         return ToolError(
-            f"Immich denied {operation}; the user's API key lacks the required permission."
+            f"Immich denied {operation}; check API-key permissions and access to this asset or album."
         )
+    if isinstance(exc, ImmichError):
+        # The SDK masks ordinary exceptions as crashes. ImmichError messages are sanitized.
+        return ToolError(f"{type(exc).__name__}: {exc}. Do not automatically retry this call.")
     return exc

@@ -187,6 +187,11 @@ Each user authorizes the connector, opens `/account`, signs in with the same Aut
 
 ### ChatGPT implications
 
+For image retrieval/display diagnosis, configurable browsing limits, the optional ChatGPT
+workflow draft, validation commands, and manual deployment/rollback instructions, see
+[Image workflow validation](docs/image-workflow.md). Native MCP images remain the shared
+contract for ChatGPT and OpenWebUI; client attachment rendering is a separate step.
+
 A ChatGPT-authenticated `IDENTITY_NAMESPACE + sub` resolves the same record as the account application even when their validated issuers differ. The user links `/account` separately; there is no ChatGPT-specific identity logic. Current official OpenAI guidance places developer mode under **Settings → Security and login**, then adds the `/mcp` endpoint from ChatGPT Plugins; availability can depend on workspace policy. Public deployment needs a stable HTTPS Streamable HTTP endpoint, while Secure MCP Tunnel is appropriate for developer-mode testing. See [OpenAI's MCP server guide](https://developers.openai.com/plugins/build/mcp-server) and [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
 ## MCP tools

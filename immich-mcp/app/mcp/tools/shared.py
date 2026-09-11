@@ -1,12 +1,13 @@
 import base64
 import json
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from app.config import Settings
-from app.immich.client import ImmichClient, InvalidShareLink
+from app.immich.client import ImmichClient, ImmichError, InvalidShareLink
 from app.immich.models import SharedAlbumResult
 from app.immich.shares import resolve_share_input, validate_share_key
 
@@ -58,13 +59,21 @@ def register_shared_tools(server: MCPServer, client: ImmichClient, settings: Set
     async def get_shared_asset_image(
         share_key: str,
         asset_id: str,
-        size: str | None = None,
+        size: Literal["thumbnail", "preview", "fullsize"] | None = None,
         edited: bool | None = None,
     ) -> list[ImageContent]:
-        """Fetch a shared asset thumbnail and return native MCP image content with its real MIME type."""
-        image = await client.get_shared_asset_thumbnail(
-            validate_share_key(share_key), asset_id, size=size, edited=edited
-        )
+        """Return a native MCP image under shared-link permissions.
+
+        Explicitly use size='thumbnail' for initial browsing and preview for more detail.
+        Fetch one image for a one-photo request, follow server batch limits, and reuse
+        successful results. Do not automatically repeat failed calls.
+        """
+        try:
+            image = await client.get_shared_asset_thumbnail(
+                validate_share_key(share_key), asset_id, size=size, edited=edited
+            )
+        except ImmichError as exc:
+            raise ToolError(f"{type(exc).__name__}: {exc}. Do not automatically retry this call.") from exc
         return [
             ImageContent(
                 type="image",
