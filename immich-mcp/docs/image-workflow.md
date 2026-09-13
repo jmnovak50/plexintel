@@ -287,3 +287,10 @@ added for this change. No database/credential rollback or secret rotation is nee
 After explicit authorization, restart the MCP unit and refresh the ChatGPT metadata
 again, then repeat one-photo and connection checks. Disable/uninstall the optional
 skills-only plugin if installed. OpenWebUI requires no rollback change.
+
+## Discovery follow-on
+
+The additive people/combined-search and bounded photo-selection workflow is documented in
+[photo-discovery.md](photo-discovery.md). It uses the same authorized image tools and limits.
+Metadata sampling downloads no images. Native retrieval, model vision and visible attachments
+remain separate checks; no OpenWebUI deployment or rendering behavior is inferred from fixtures.

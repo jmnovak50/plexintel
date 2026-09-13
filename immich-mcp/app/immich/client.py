@@ -40,6 +40,10 @@ class ImmichBadRequest(ImmichError):
     pass
 
 
+class ImmichUnsupportedFeature(ImmichError):
+    pass
+
+
 class ImmichNetworkError(ImmichError):
     pass
 
@@ -156,6 +160,8 @@ class ImmichClient:
             "tool": (
                 "get_shared_asset_image"
                 if credential.kind == "share"
+                else "get_person_thumbnail"
+                if path.startswith("people/")
                 else "get_asset_image"
                 if path.endswith("/original")
                 else "get_asset_thumbnail"
@@ -335,6 +341,8 @@ class ImmichClient:
             "search/metadata",
             "search/smart",
             "search/suggestions",
+            "search/person",
+            "people",
             "server/version",
             "server/ping",
             "users/me",
@@ -344,6 +352,8 @@ class ImmichClient:
             "timeline/bucket",
         }:
             return path
+        if path.startswith("people/"):
+            return "people/thumbnail" if path.endswith("/thumbnail") else "people/read"
         if path.startswith("assets/"):
             return (
                 "assets/thumbnail"
@@ -695,7 +705,19 @@ class ImmichClient:
         body: dict[str, Any],
         mode: str,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        response = await self._post("search/metadata", credential=credential, json_body=body)
+        return await self.discovery_search_page(credential, body, mode)
+
+    async def discovery_search_page(
+        self,
+        credential: PrivateImmichCredential,
+        body: dict[str, Any],
+        mode: str,
+        *,
+        smart: bool = False,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        response = await self._post(
+            "search/smart" if smart else "search/metadata", credential=credential, json_body=body
+        )
         try:
             payload = self._json(response)
             if not isinstance(payload, dict) or not isinstance(payload.get("assets", payload), dict):
@@ -704,11 +726,145 @@ class ImmichClient:
             items = self._search_items(page)
             if len(items) > body["size"]:
                 raise MalformedImmichResponse("Immich returned more assets than the requested page size")
+            if smart and mode == "structured":
+                # v3.2 smart search is one ranking with no continuation contract.
+                if page.get("nextPage") is not None or page.get("nextCursor") is not None:
+                    raise MalformedImmichResponse("Immich returned unexpected smart-search pagination")
+                return items, None
             return items, self._search_continuation(page, mode)
         except ImmichError as exc:
             if not hasattr(exc, "diagnostic"):
                 raise exc.with_diagnostic(response.extensions["immich_diagnostic"]) from None
             raise
+
+    @staticmethod
+    def metadata_search_body(
+        filters: dict[str, Any],
+        size: int,
+        mode: str,
+        *,
+        people: dict[str, list[str]] | None = None,
+        query: str | None = None,
+        query_asset_id: str | None = None,
+        with_people: bool = False,
+    ) -> dict[str, Any]:
+        """The location/discovery adapter: never mix deprecated and structured fields."""
+        people = people or {}
+        smart = query is not None or query_asset_id is not None
+        body: dict[str, Any] = {"size": size, "withExif": True}
+        if mode == "legacy":
+            if (
+                people.get("none")
+                or len(people.get("any", [])) > 1
+                or (people.get("any") and people.get("all"))
+            ):
+                raise ImmichUnsupportedFeature(
+                    "This people combination requires the validated v3.2 structured API mode; "
+                    "legacy supports all-people or a single any-person only. No filters were dropped"
+                )
+            body.update(filters)
+            ids = people.get("all") or people.get("any")
+            if ids:
+                body["personIds"] = ids
+            if not smart:
+                body.update(order="desc", page=1)
+        else:
+            predicates = {
+                key: {"matches" if key == "ocr" else "eq": value}
+                for key, value in filters.items()
+                if key not in {"takenAfter", "takenBefore"}
+            }
+            dates = {
+                op: filters[key]
+                for key, op in [("takenAfter", "gte"), ("takenBefore", "lte")]
+                if key in filters
+            }
+            if dates:
+                predicates["takenAt"] = dates
+            if people:
+                predicates["personIds"] = people
+            body["filter"] = predicates
+            if not smart:
+                body["orderBy"] = {"field": "fileCreatedAt", "direction": "desc"}
+        if query is not None:
+            body["query"] = query
+        if query_asset_id is not None:
+            body["queryAssetId"] = query_asset_id
+        if with_people and not smart:
+            body["withPeople"] = True
+        return body
+
+    async def find_people(
+        self, credential: PrivateImmichCredential, name: str, *, include_hidden: bool
+    ) -> list[dict[str, Any]]:
+        response = await self._get(
+            "search/person",
+            credential=credential,
+            params={"name": name, "withHidden": str(include_hidden).lower()},
+        )
+        return self._people_items(response, self._json(response))
+
+    async def list_people_page(
+        self, credential: PrivateImmichCredential, *, page: int, size: int, include_hidden: bool
+    ) -> tuple[list[dict[str, Any]], bool]:
+        response = await self._get(
+            "people",
+            credential=credential,
+            params={"page": page, "size": size, "withHidden": str(include_hidden).lower()},
+        )
+        payload = self._json(response)
+        if not isinstance(payload, dict) or type(payload.get("hasNextPage")) is not bool:
+            raise MalformedImmichResponse("Immich returned invalid people pagination").with_diagnostic(
+                response.extensions["immich_diagnostic"]
+            )
+        items = self._people_items(response, payload.get("people"))
+        if len(items) > size or (not items and payload["hasNextPage"]):
+            raise MalformedImmichResponse("Immich returned an invalid people page").with_diagnostic(
+                response.extensions["immich_diagnostic"]
+            )
+        return items, payload["hasNextPage"]
+
+    @staticmethod
+    def _people_items(response: httpx.Response, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, list) or any(
+            not isinstance(p, dict)
+            or not isinstance(p.get("id"), str)
+            or not p["id"]
+            or not isinstance(p.get("name"), str)
+            or type(p.get("isHidden")) is not bool
+            for p in payload
+        ):
+            raise MalformedImmichResponse("Immich returned malformed people records").with_diagnostic(
+                response.extensions["immich_diagnostic"]
+            )
+        return payload
+
+    async def get_person(self, credential: PrivateImmichCredential, person_id: str) -> dict[str, Any]:
+        response = await self._get(f"people/{quote(person_id, safe='')}", credential=credential)
+        person = self._people_items(response, [self._json(response)])[0]
+        if person["id"] != person_id:
+            raise MalformedImmichResponse("Immich returned a different person record").with_diagnostic(
+                response.extensions["immich_diagnostic"]
+            )
+        return person
+
+    async def get_person_thumbnail(self, credential: PrivateImmichCredential, person_id: str) -> ImagePayload:
+        return await self._get_image(f"people/{quote(person_id, safe='')}/thumbnail", credential=credential)
+
+    async def authorize_discovery_context(
+        self, credential: PrivateImmichCredential, context: dict[str, Any], *, reference_checked: bool = False
+    ) -> None:
+        # Revalidate on every page: never cache person ownership or a reference authorization.
+        for person_id in context.get("personIds", []):
+            person = await self.get_person(credential, person_id)
+            if person["isHidden"] and not context.get("includeHiddenPeople", False):
+                raise ImmichForbidden(
+                    "A requested person is hidden; explicit include_hidden_people is required"
+                )
+        if context.get("referenceAssetId") and not reference_checked:
+            asset = await self.get_asset_metadata(credential, context["referenceAssetId"])
+            if asset.get("id") != context["referenceAssetId"]:
+                raise MalformedImmichResponse("Immich returned a different reference asset")
 
     async def location_suggestions(
         self,

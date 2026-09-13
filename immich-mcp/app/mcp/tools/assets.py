@@ -11,6 +11,7 @@ from app.immich.location import LocationSearch, location_value
 from app.mcp.tools import connection
 from app.mcp.tools.albums import _compact_asset
 from app.mcp.tools.connection import READ_ONLY, private_credential, private_error
+from app.mcp.tools.discovery import register_discovery_tools
 
 
 def register_asset_tools(
@@ -20,6 +21,7 @@ def register_asset_tools(
     settings: Settings,
 ) -> None:
     locations = LocationSearch(client)
+    register_discovery_tools(server, client, provider, settings, locations)
 
     @server.tool(annotations=READ_ONLY)
     async def get_location_suggestions(

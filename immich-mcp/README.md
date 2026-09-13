@@ -218,6 +218,11 @@ Authenticated private library:
 - `search_assets`
 - `get_location_suggestions`
 - `search_location_assets`
+- `find_people`
+- `list_people`
+- `get_person_thumbnail`
+- `search_library`
+- `sample_photo_candidates`
 - `find_asset_by_filename`
 - `get_recent_assets`
 
@@ -249,12 +254,53 @@ semantic query plus resolved location filters, e.g. `query="beaches", state="Haw
 Never drop the location constraint after an error. Location aliases and geographic ambiguity
 require evidence or clarification; no hardcoded Hawaii/Hawaiʻi/HI mapping exists.
 
-`IMMICH_SEARCH_API_MODE=legacy` is the default for location pages and is compatible with the
+`IMMICH_SEARCH_API_MODE=legacy` is the default for location and new discovery searches and is compatible with the
 validated v3.1/v3.2 contracts. Optional `structured` uses v3.2 filter/orderBy/cursor fields.
 This explicit setting does not change the legacy contract of older tools, perform discovery,
 or trigger fallback on errors. No production configuration change is needed for the default.
 Location traversals default to 100 pages/10,000 unique items, 128 retained handles per process,
 and a 900-second lifetime. See `.env.example` and [the operational checklist](docs/location-search.md).
+
+### People, combined search and photo discovery
+
+Use `find_people(name="Brigid")` to resolve authorized Immich person records. Duplicate or similar
+names need confirmation; account IDs, family roles and pet names are not face identities.
+`list_people(unnamed_only=true)` supports paginated browsing of unnamed records. These tools and
+`get_person_thumbnail` require **person.read**, separately from asset.read; no permissions are
+changed automatically. Hidden people are excluded by default. Name search is capped upstream
+at 100 candidates, with explicit truncation; exact mode applies casefold equality to those candidates.
+
+After confirming two person IDs and stored location values, call `search_library`:
+
+```json
+{
+  "filters": {
+    "people_all": ["<confirmed person ID>", "<confirmed other person ID>"],
+    "state": "Hawaii",
+    "media_type": "IMAGE"
+  },
+  "visual_preference": "sunsets",
+  "limit": 12
+}
+```
+
+All fields in `filters` are mandatory. `people_all` means together; `people_any` means either;
+`people_none` excludes available labels, without proving nobody else is visible. Multi-person
+`any` and `none` require the validated v3.2 **structured** API mode; legacy rejects unsupported
+combinations without weakening them. Optional `visual_preference` does not invoke smart search.
+Required `query` uses one bounded semantic ranking; `ocr` is separate full-text evidence.
+Only metadata searches offer enumeration using the shared account-bound continuation contract.
+Smart-search failure remains an independent limitation; no unrestricted fallback occurs.
+
+Reference follow-ups pass `reference_asset_id` plus `reference_mode`: `similar`, `near_time`,
+`afternoon`, or `same_place`. Access is checked again; local afternoons need a known IANA time
+zone. Administrative place matches are not radius searches. For a varied selection over a
+capture-date interval, use `sample_photo_candidates`: bounded metadata from several time bins,
+then a date/spacing shortlist for assistant visual review. It downloads no images and returns
+fewer candidates when needed. Inspect a small subset with existing thumbnails, reuse successful
+images, explain selection judgment, and verify visible attachments separately.
+
+See [photo discovery contracts, examples, tests and rollout checklist](docs/photo-discovery.md).
 
 ## Public shares
 

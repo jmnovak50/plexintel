@@ -4,6 +4,7 @@ import hashlib
 import json
 import secrets
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from time import monotonic
@@ -22,6 +23,8 @@ class Traversal:
     seen_ids: set[str] = field(default_factory=set)
     seen_continuations: set[str] = field(default_factory=set)
     pages: int = 0
+    kind: str = "location"
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 def location_value(value: str | None) -> str | None:
@@ -63,22 +66,41 @@ class LocationSearch:
         end_date: str | None = None,
         limit: int | None = None,
         continuation: str | None = None,
+        _body: dict[str, Any] | None = None,
+        _context: dict[str, Any] | None = None,
+        _kind: str = "location",
+        _context_checked: bool = False,
     ) -> dict[str, Any]:
         owner = hashlib.sha256(json.dumps([*identity, credential.kind, credential.token]).encode()).digest()
         now = monotonic()
         self._sessions = OrderedDict((k, v) for k, v in self._sessions.items() if v.expires > now)
         if continuation is not None:
-            if any(v is not None for v in [city, state, country, media_type, start_date, end_date, limit]):
+            if any(
+                v is not None
+                for v in [city, state, country, media_type, start_date, end_date, limit, _body, _context]
+            ):
                 raise ImmichValidationError(
                     "Send only continuation; its original filters, ordering and size are fixed"
                 )
             session = self._sessions.get(continuation)
-            if session is None or not secrets.compare_digest(session.owner, owner):
+            if session is None or session.kind != _kind or not secrets.compare_digest(session.owner, owner):
                 raise ImmichValidationError(
                     "Continuation is invalid, expired, consumed or unavailable for this account; enumeration is incomplete"
                 )
             # Consume before awaiting: concurrent/replayed calls cannot advance the same traversal twice.
             del self._sessions[continuation]
+        elif _body is not None:
+            # Prepared by the same validated adapter; no MCP tool accepts an arbitrary upstream body.
+            session = Traversal(
+                owner,
+                self.settings.immich_search_api_mode,
+                deepcopy(_body),
+                now + self.settings.location_search_ttl_seconds,
+                kind=_kind,
+                context=deepcopy(_context or {}),
+            )
+            if session.mode == "legacy":
+                session.seen_continuations.add("1")
         else:
             filters = {
                 k: v
@@ -106,26 +128,17 @@ class LocationSearch:
             if start and end and datetime.fromisoformat(start) > datetime.fromisoformat(end):
                 raise ImmichValidationError("start_date must be on or before end_date")
             mode = self.settings.immich_search_api_mode
-            body: dict[str, Any] = {"size": size, "withExif": True}
-            if mode == "structured":
-                structured = {k: {"eq": v} for k, v in filters.items()}
-                if start or end:
-                    structured["takenAt"] = {}
-                    if start:
-                        structured["takenAt"]["gte"] = start
-                    if end:
-                        structured["takenAt"]["lte"] = end
-                body.update(filter=structured, orderBy={"field": "fileCreatedAt", "direction": "desc"})
-            else:
-                body.update(filters, order="desc", page=1)
-                if start:
-                    body["takenAfter"] = start
-                if end:
-                    body["takenBefore"] = end
+            if start:
+                filters["takenAfter"] = start
+            if end:
+                filters["takenBefore"] = end
+            body = self.client.metadata_search_body(filters, size, mode)
             session = Traversal(owner, mode, body, now + self.settings.location_search_ttl_seconds)
             if mode == "legacy":
                 session.seen_continuations.add("1")
         try:
+            if session.context and (not _context_checked or continuation is not None):
+                await self.client.authorize_discovery_context(credential, session.context)
             items, next_value = await self.client.location_search_page(credential, session.body, session.mode)
             if next_value is not None:
                 if not items or next_value in session.seen_continuations:
@@ -173,7 +186,7 @@ class LocationSearch:
             token = secrets.token_urlsafe(32)
             self._sessions[token] = session
         complete = next_value is None and not truncated
-        return {
+        result = {
             "assets": unique,
             "returned": len(unique),
             "returnedSoFar": len(session.seen_ids),
@@ -188,3 +201,11 @@ class LocationSearch:
             "completenessScope": "matching accessible capture-location metadata; not a transactional snapshot",
             "metadataCaveat": "Missing or incorrect GPS/reverse-geocoded metadata can exclude real trip photos and videos",
         }
+        if session.kind != "location":
+            result["completenessScope"] = "matching accessible search metadata; not a transactional snapshot"
+            result["searchContext"] = session.context
+        return result
+
+    def discard(self, continuation: str | None) -> None:
+        """Discard a sampling branch that intentionally will not enumerate further pages."""
+        self._sessions.pop(continuation, None)

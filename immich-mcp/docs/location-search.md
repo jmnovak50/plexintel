@@ -1,5 +1,9 @@
 # Capture-location search investigation — 2026-09-13
 
+The subsequent [people/discovery follow-on](photo-discovery.md) builds on committed `2c1e06b`.
+Its deployment/rollback checklist preserves this location/API change; do not reverse this earlier
+patch when rolling back only discovery. The evidence and results below describe the preceding task.
+
 ## Diagnosis and evidence
 
 Started from clean `main` / `origin/main`, `07512b2a68ce3a126cd0f35ee172116986afd8e0`.
