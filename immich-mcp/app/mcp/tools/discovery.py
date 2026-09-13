@@ -13,6 +13,7 @@ from app.immich.discovery import DiscoveryFilters, PhotoDiscovery, checked_id, t
 from app.immich.location import LocationSearch
 from app.mcp.tools import connection
 from app.mcp.tools.connection import READ_ONLY, private_credential, private_error
+from app.mcp.tools.events import register_event_tools
 
 
 def compact_person(person: dict[str, Any]) -> dict[str, Any]:
@@ -32,6 +33,7 @@ def register_discovery_tools(
     pages: LocationSearch,
 ) -> None:
     discovery = PhotoDiscovery(client, pages)
+    register_event_tools(server, discovery, provider, settings)
 
     @server.tool(annotations=READ_ONLY)
     async def find_people(

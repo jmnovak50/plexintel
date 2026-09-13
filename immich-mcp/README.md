@@ -223,6 +223,10 @@ Authenticated private library:
 - `get_person_thumbnail`
 - `search_library`
 - `sample_photo_candidates`
+- `explore_events`
+- `get_event_assets`
+- `refine_event`
+- `prepare_event_story`
 - `find_asset_by_filename`
 - `get_recent_assets`
 
@@ -301,6 +305,28 @@ fewer candidates when needed. Inspect a small subset with existing thumbnails, r
 images, explain selection judgment, and verify visible attachments separately.
 
 See [photo discovery contracts, examples, tests and rollout checklist](docs/photo-discovery.md).
+
+### Temporary trips, events and photo stories
+
+`explore_events(scope={"filters":{"state":"Hawaii"}})` groups bounded capture metadata into
+candidate visits. Resolve stored locations and people first; use `scope.album_id` for an explicitly
+resolved accessible album. Omit filters only for an intended accessible-timeline overview. Defaults
+use 72-hour gaps for visits and three-hour gaps for smaller moments. Place changes alone do not
+split trips. Years/months are calendar clues in an explicit zone, not holiday recognition.
+
+Follow only the overview's continuation. It **re-reads a larger bounded prefix** and returns a
+replacement overview, grouping across API pages. Do not add counts from successive revisions.
+At hard limits narrow the dates while retaining required filters; errors and capped boundaries
+remain provisional. References store expiring, account-bound query plans, not cached photo access.
+
+Use `get_event_assets(event_ref=...)` for fresh scoped pages; `refine_event` supports explicit
+splits, adjacent combinations and narrower people/location constraints. `prepare_event_story`
+reuses bounded photo sampling to return a chronological shortlist and caption evidence. It
+downloads no images. Inspect only a few chosen thumbnails, narrate from evidence, and verify
+actual visible attachments separately. Event labels/spans do not prove routes, arrival/departure,
+attendance or pet identity. These tools create no albums and accept no public-share credentials.
+
+See [event heuristics, examples, coverage, tests and phase-preserving rollout](docs/event-exploration.md).
 
 ## Public shares
 

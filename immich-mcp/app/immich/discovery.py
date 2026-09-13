@@ -232,7 +232,7 @@ class PhotoDiscovery:
                 )
         return f, context
 
-    def body(self, f: DiscoveryFilters, size: int) -> dict[str, Any]:
+    def body(self, f: DiscoveryFilters, size: int, *, album_id: str | None = None) -> dict[str, Any]:
         filters = {
             k: v
             for k, v in {
@@ -259,6 +259,7 @@ class PhotoDiscovery:
             query=f.query,
             query_asset_id=f.reference_asset_id if f.reference_mode == "similar" else None,
             with_people=True,
+            album_id=album_id,
         )
 
     async def search(
@@ -337,6 +338,8 @@ class PhotoDiscovery:
         time_bins: int,
         time_zone: str,
         min_gap_minutes: int,
+        album_id: str | None = None,
+        authorization_failure_is_fatal: bool = False,
     ) -> dict[str, Any]:
         if not 1 <= selection_count <= candidate_limit <= min(48, self.settings.private_tool_max_items):
             raise ImmichValidationError(
@@ -348,6 +351,8 @@ class PhotoDiscovery:
             )
         tz = zone(time_zone)
         f, context = await self.prepare(credential, filters, visual_preference)
+        if album_id:
+            context["albumId"] = checked_id(album_id)
         if f.query is not None or f.reference_mode == "similar":
             raise ImmichValidationError(
                 "Temporal sampling supports metadata constraints; use visual_preference for optional visual ranking"
@@ -363,7 +368,7 @@ class PhotoDiscovery:
         if span < timedelta(milliseconds=time_bins):
             raise ImmichValidationError("Sampling interval is too short for the requested time bins")
         # Validate contract before requests, then authorize once for this bounded operation.
-        self.body(f, 1)
+        self.body(f, 1, album_id=album_id)
         await self.client.authorize_discovery_context(credential, context, reference_checked=True)
         pool, intervals = {}, []
         failure = None
@@ -377,12 +382,18 @@ class PhotoDiscovery:
                 page = await self.pages.page(
                     credential,
                     identity=identity,
-                    _body=self.body(branch, size),
+                    _body=self.body(branch, size, album_id=album_id),
                     _context=context,
                     _kind="discovery",
                     _context_checked=True,
                 )
             except ImmichError as exc:
+                if authorization_failure_is_fatal and getattr(exc, "diagnostic", {}).get("status") in {
+                    401,
+                    403,
+                    404,
+                }:
+                    raise
                 if not pool:
                     raise
                 failure = f"{type(exc).__name__}: {exc}. Do not automatically retry this call."

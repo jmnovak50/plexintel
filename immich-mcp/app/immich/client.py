@@ -354,6 +354,8 @@ class ImmichClient:
             return path
         if path.startswith("people/"):
             return "people/thumbnail" if path.endswith("/thumbnail") else "people/read"
+        if path.startswith("albums/"):
+            return "albums/read"
         if path.startswith("assets/"):
             return (
                 "assets/thumbnail"
@@ -747,6 +749,7 @@ class ImmichClient:
         query: str | None = None,
         query_asset_id: str | None = None,
         with_people: bool = False,
+        album_id: str | None = None,
     ) -> dict[str, Any]:
         """The location/discovery adapter: never mix deprecated and structured fields."""
         people = people or {}
@@ -763,6 +766,8 @@ class ImmichClient:
                     "legacy supports all-people or a single any-person only. No filters were dropped"
                 )
             body.update(filters)
+            if album_id:
+                body["albumIds"] = [album_id]
             ids = people.get("all") or people.get("any")
             if ids:
                 body["personIds"] = ids
@@ -783,6 +788,8 @@ class ImmichClient:
                 predicates["takenAt"] = dates
             if people:
                 predicates["personIds"] = people
+            if album_id:
+                predicates["albumIds"] = {"all": [album_id]}
             body["filter"] = predicates
             if not smart:
                 body["orderBy"] = {"field": "fileCreatedAt", "direction": "desc"}
@@ -855,6 +862,10 @@ class ImmichClient:
         self, credential: PrivateImmichCredential, context: dict[str, Any], *, reference_checked: bool = False
     ) -> None:
         # Revalidate on every page: never cache person ownership or a reference authorization.
+        if context.get("albumId"):
+            album = await self.get_album(credential, context["albumId"])
+            if album.get("id") != context["albumId"]:
+                raise MalformedImmichResponse("Immich returned a different album")
         for person_id in context.get("personIds", []):
             person = await self.get_person(credential, person_id)
             if person["isHidden"] and not context.get("includeHiddenPeople", False):

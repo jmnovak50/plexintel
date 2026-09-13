@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     location_search_max_items: int = Field(default=10_000, ge=1, le=100_000)
     location_search_session_limit: int = Field(default=128, ge=1, le=1024)
     location_search_ttl_seconds: int = Field(default=900, ge=30, le=3600)
+    # Event overviews re-read a bounded prefix; no cached asset metadata grants access.
+    event_initial_pages: int = Field(default=2, ge=1, le=10)
+    event_max_pages: int = Field(default=6, ge=1, le=10)
+    event_max_groups: int = Field(default=24, ge=1, le=50)
+    event_reference_limit: int = Field(default=128, ge=8, le=1024)
 
     tls_verify: bool = True
     http_timeout_seconds: float = Field(default=15.0, gt=0, le=120)

@@ -1,5 +1,9 @@
 # People, combined search and photo discovery — 2026-09-13
 
+The subsequent [phase-3 event exploration](event-exploration.md) builds on committed `487ece8`.
+Use its separate rollback checklist for event-only rollback, preserving phases 1 and 2. The
+evidence and test counts below describe the completed phase-2 task.
+
 ## Starting state and live limitations
 
 This follow-on starts from clean `main` / `origin/main` **2c1e06b**, containing the completed
