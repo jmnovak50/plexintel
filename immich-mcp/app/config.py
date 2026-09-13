@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
@@ -33,6 +34,13 @@ class Settings(BaseSettings):
     account_oauth_state_ttl_seconds: int = Field(default=600, ge=60, le=1800)
     account_oidc_scopes: str = "openid profile email"
     private_tool_max_items: int = Field(default=100, ge=1, le=1000)
+    # Both contracts validated against v3.2.0; legacy also supports v3.1.0.
+    # Explicit configuration, never downgrade or discard filters on an HTTP error.
+    immich_search_api_mode: Literal["legacy", "structured"] = "legacy"
+    location_search_max_pages: int = Field(default=100, ge=1, le=1000)
+    location_search_max_items: int = Field(default=10_000, ge=1, le=100_000)
+    location_search_session_limit: int = Field(default=128, ge=1, le=1024)
+    location_search_ttl_seconds: int = Field(default=900, ge=30, le=3600)
 
     tls_verify: bool = True
     http_timeout_seconds: float = Field(default=15.0, gt=0, le=120)

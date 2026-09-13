@@ -7,7 +7,6 @@ from app.credentials.sqlite import SQLiteCredentialProvider
 from app.immich.client import ImmichClient, ImmichError
 from app.mcp.tools.connection import READ_ONLY, private_credential, private_error
 
-
 ALBUM_COMPACT_FIELDS = (
     "id", "albumName", "assetCount", "createdAt", "updatedAt", "startDate", "endDate"
 )
@@ -75,6 +74,7 @@ def _compact_asset(asset: dict[str, Any]) -> dict[str, Any]:
     exif = asset.get("exifInfo")
     if isinstance(exif, dict):
         result["city"] = exif.get("city")
+        result["state"] = exif.get("state")
         result["country"] = exif.get("country")
     return result
 

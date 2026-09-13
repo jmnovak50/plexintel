@@ -261,3 +261,68 @@ async def test_semantic_search_still_uses_smart_with_flat_filters(settings):
         "isFavorite": True,
     }
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mixed_visual_location_intent_keeps_state_country_and_dates_on_failure(settings):
+    import json
+
+    smart = respx.post("https://photo.example.com/api/search/smart").mock(return_value=httpx.Response(503))
+    client = ImmichClient(settings)
+    try:
+        with pytest.raises(ImmichUnavailable):
+            await client.search_assets(
+                credential(),
+                query="beaches",
+                state="Hawaiʻi",
+                country="US",
+                start_date="2026-01-01T00:00:00Z",
+                end_date="2026-03-01T00:00:00Z",
+                media_type="IMAGE",
+                limit=2,
+            )
+        assert json.loads(smart.calls[0].request.content) == {
+            "query": "beaches",
+            "state": "Hawaiʻi",
+            "country": "US",
+            "type": "IMAGE",
+            "size": 2,
+            "takenAfter": "2026-01-01T00:00:00Z",
+            "takenBefore": "2026-03-01T00:00:00Z",
+            "withExif": True,
+        }
+        assert len(respx.calls) == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("operation", ["album", "filename", "recent", "search", "smart"])
+@pytest.mark.asyncio
+@respx.mock
+async def test_legacy_consumers_reject_opaque_cursor_instead_of_parsing_or_silently_finishing(
+    settings, operation
+):
+    from app.immich.client import MalformedImmichResponse
+
+    route = respx.post(
+        "https://photo.example.com/api/search/" + ("smart" if operation == "smart" else "metadata")
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"assets": {"items": [{"id": "one"}], "nextPage": None, "nextCursor": "002"}}
+        )
+    )
+    client = ImmichClient(settings)
+    try:
+        with pytest.raises(MalformedImmichResponse, match="different search contract"):
+            if operation == "album":
+                await client.list_album_assets(credential(), "a", limit=2, offset=0)
+            elif operation == "filename":
+                await client.find_assets_by_filename(credential(), "one.jpg")
+            elif operation == "recent":
+                await client.get_recent_assets(credential(), limit=2)
+            else:
+                await client.search_assets(credential(), query="beach" if operation == "smart" else None)
+        assert route.call_count == 1
+    finally:
+        await client.aclose()

@@ -6,7 +6,9 @@ from mcp.types import ImageContent
 
 from app.config import Settings
 from app.credentials.sqlite import SQLiteCredentialProvider
-from app.immich.client import ImmichClient, ImmichError
+from app.immich.client import ImmichClient, ImmichError, ImmichValidationError
+from app.immich.location import LocationSearch, location_value
+from app.mcp.tools import connection
 from app.mcp.tools.albums import _compact_asset
 from app.mcp.tools.connection import READ_ONLY, private_credential, private_error
 
@@ -17,6 +19,99 @@ def register_asset_tools(
     provider: SQLiteCredentialProvider,
     settings: Settings,
 ) -> None:
+    locations = LocationSearch(client)
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_location_suggestions(
+        field: Literal["country", "state", "city"],
+        country: str | None = None,
+        state: str | None = None,
+        contains: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Discover stored capture-location spellings from this user's searchable assets.
+
+        Use for 'taken in [place]' before search_location_assets when spelling or geography
+        is uncertain. Country may scope state/city suggestions; state may scope cities.
+        Values retain Unicode/accents; contains is a local case-insensitive substring filter,
+        not alias resolution. Nulls are omitted. An empty list is not proof a trip never occurred.
+        Resolve meaningful ambiguity (e.g. Georgia country/state, Hawaii state/island) with
+        the user. Do not substitute a city, album name, or global place lookup for a region.
+        Returned suggestions are bounded; follow nextOffset with identical arguments if needed.
+        """
+        credential = await private_credential(provider, settings)
+        try:
+            if limit < 1 or offset < 0 or offset > 100_000:
+                raise ImmichValidationError("limit must be positive and offset between 0 and 100000")
+            location_value(contains)
+            values = await client.location_suggestions(
+                credential, field=field, country=location_value(country), state=location_value(state)
+            )
+            if contains is not None:
+                values = [v for v in values if contains.casefold() in v.casefold()]
+            limit = min(limit, settings.private_tool_max_items)
+            selected = values[offset : offset + limit]
+            more = offset + len(selected) < len(values)
+            return {
+                "field": field,
+                "values": selected,
+                "returned": len(selected),
+                "hasMore": more,
+                "nextOffset": offset + len(selected) if more else None,
+                "source": "authenticated searchable asset metadata; null values omitted",
+            }
+        except ImmichError as exc:
+            raise private_error(exc, "location suggestions (requires asset.read)", settings) from None
+
+    @server.tool(annotations=READ_ONLY)
+    async def search_location_assets(
+        city: str | None = None,
+        state: str | None = None,
+        country: str | None = None,
+        media_type: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int | None = None,
+        continuation: str | None = None,
+    ) -> dict[str, Any]:
+        """Search one page of capture-location metadata, without downloading any images.
+
+        Use for 'taken in Hawaii' or any city/state/province/country, not visual descriptions.
+        Supply at least one exact stored location value (discover via get_location_suggestions).
+        Location fields combine with AND. Omit media_type to enumerate photos AND videos;
+        use IMAGE and limit=2 for a two-photo sample. Capture dates are inclusive ISO bounds;
+        date-only values mean midnight UTC. Default page size is 50, capped by server limits.
+        To enumerate all matching accessible metadata, pass ONLY the returned continuation
+        on subsequent calls. The account, filters, order and size are fixed; handles are single
+        use, expire after a bounded interval, and are lost on process restart/worker change.
+        Only complete=true establishes traversal completion; errors or stopReason mean partial.
+        No authoritative total or transactional snapshot is promised. Missing/incorrect GPS or
+        reverse-geocoding can exclude real trip items; zero matches does not disprove a trip.
+        Metadata enumeration and photo selection are separate: fetch only a few matching
+        get_asset_thumbnail candidates, reuse successes, display the requested two photos,
+        and call them a sample. Native image retrieval and visible rendering are separate checks.
+        """
+        credential = await private_credential(provider, settings)
+        user = connection.current_user()
+        try:
+            result = await locations.page(
+                credential,
+                identity=(user.identity_namespace, user.sub),
+                city=city,
+                state=state,
+                country=country,
+                media_type=media_type,
+                start_date=start_date,
+                end_date=end_date,
+                limit=limit,
+                continuation=continuation,
+            )
+        except ImmichError as exc:
+            raise private_error(exc, "location search (requires asset.read)", settings) from None
+        result["assets"] = [_compact_asset(asset) for asset in result["assets"]]
+        return result
+
     @server.tool(annotations=READ_ONLY)
     async def get_asset_metadata(asset_id: str) -> dict[str, Any]:
         """Read metadata for an asset visible to the authenticated user's Immich account."""
@@ -76,8 +171,17 @@ def register_asset_tools(
         media_type: str | None = None,
         favorite: bool | None = None,
         limit: int = 50,
+        state: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search visible assets using current Immich smart/metadata search filters."""
+        """Return a bounded list of visible assets; this list does not establish completeness.
+
+        query uses semantic visual search ('tropical beach'), requiring Immich smart search.
+        For 'taken in [place]' use search_location_assets and get_location_suggestions.
+        For mixed intent ('beaches photographed in Hawaii'), resolve location metadata first,
+        then use query='beaches' WITH state/country/city constraints if semantic search works.
+        Never remove location constraints after a failure or call unrestricted visual matches
+        verified location photos. Omit query for a bounded metadata sample. No images download.
+        """
         if limit < 1:
             raise ValueError("limit must be positive")
         limit = min(limit, settings.private_tool_max_items)
@@ -87,6 +191,7 @@ def register_asset_tools(
                 credential,
                 query=query,
                 city=city,
+                state=state,
                 country=country,
                 person_id=person_id,
                 start_date=start_date,

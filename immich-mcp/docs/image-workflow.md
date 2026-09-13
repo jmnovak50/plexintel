@@ -1,5 +1,10 @@
 # Image workflow investigation and validation
 
+The 2026-09-13 [location-search investigation](location-search.md) records a newer service
+start, current server/library versions, error-boundary tests, and the manual checklist for
+the capture-location changes. The observations below remain historical. Successful native
+image retrieval still does not establish visible rendering in either live client.
+
 ## Evidence and boundaries (2026-09-11)
 
 Both checkouts started clean. Plexintel: `main`, `845c007`; last Immich change

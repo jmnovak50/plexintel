@@ -7,6 +7,7 @@ from app.config import Settings
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(
+        _env_file=None,
         immich_base_url="https://photo.example.com",
         oidc_issuer="https://auth.example.com/application/o/immich-mcp/",
         oidc_client_id="immich-mcp",

@@ -65,11 +65,12 @@ def private_error(exc: Exception, operation: str, settings: Settings) -> Excepti
     if isinstance(exc, InvalidImmichCredential):
         return ToolError(
             f"The stored Immich credential is no longer valid. Reconnect Immich at "
-            f"{settings.account_public_url}."
+            f"{settings.account_public_url}. {type(exc).__name__}: {exc}. Do not automatically retry this call."
         )
     if isinstance(exc, ImmichForbidden):
         return ToolError(
-            f"Immich denied {operation}; check API-key permissions and access to this asset or album."
+            f"Immich denied {operation}; check API-key permissions and access to this asset or album. "
+            f"{type(exc).__name__}: {exc}. Do not automatically retry this call."
         )
     if isinstance(exc, ImmichError):
         # The SDK masks ordinary exceptions as crashes. ImmichError messages are sanitized.

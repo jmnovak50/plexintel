@@ -33,8 +33,9 @@ Authentik answers “who is this MCP user?” The selected Immich API key answer
 
 ## Current Immich API and permissions
 
-The implementation was checked against the current stable Immich `v3.1.0` API and source on
-2026-09-02. API keys use `x-api-key`.
+The original integration was checked against Immich `v3.1.0`. On 2026-09-13 the configured
+server reported `v3.2.0`; location search was checked against that version's pinned contract.
+API keys use `x-api-key`. See [location-search evidence and compatibility](docs/location-search.md).
 
 | Operation | Immich endpoint | Required permission |
 | --- | --- | --- |
@@ -43,6 +44,7 @@ The implementation was checked against the current stable Immich `v3.1.0` API an
 | List album assets | `POST /api/search/metadata`, flat `albumIds` filter | `asset.read` |
 | Exact filename lookup | `POST /api/search/metadata`, flat `originalFileName` and optional `albumIds` | `asset.read` |
 | Metadata/search/recent | `GET /api/assets/{id}`, `POST /api/search/metadata`, `POST /api/search/smart` | `asset.read` |
+| Location suggestions/pages | `GET /api/search/suggestions`, `POST /api/search/metadata` | `asset.read` |
 | Thumbnail/preview | `GET /api/assets/{id}/thumbnail` | `asset.view` |
 | Original image | `GET /api/assets/{id}/original` | `asset.download` |
 
@@ -214,9 +216,45 @@ Authenticated private library:
 - `get_asset_thumbnail`
 - `get_asset_image`
 - `search_assets`
+- `get_location_suggestions`
+- `search_location_assets`
+- `find_asset_by_filename`
 - `get_recent_assets`
 
-Image tools return native MCP `ImageContent` with Immich's MIME type. Image bodies are streamed: an oversized `Content-Length` is rejected before reading, and responses without a length are stopped as soon as accumulated decoded bytes exceed `MAX_IMAGE_BYTES`. Search supports current smart text search plus city, country, person ID, capture-date range, media type, favorite status, and a bounded limit. List/search/recent tools return compact metadata and never inline images.
+Image tools return native MCP `ImageContent` with Immich's MIME type. Image bodies are streamed: an oversized `Content-Length` is rejected before reading, and responses without a length are stopped as soon as accumulated decoded bytes exceed `MAX_IMAGE_BYTES`. Search supports smart text search plus city, state/province, country, person ID, capture-date range, media type, favorite status, and a bounded limit. Existing list/search/recent response shapes and preview defaults remain unchanged; these tools never inline images or establish exhaustive enumeration.
+
+### Capture-location search
+
+For “taken in [place]”, discover stored spellings with `get_location_suggestions`, then
+use `search_location_assets`. For example, after confirming the intended state and its stored value:
+
+```json
+{"state":"Hawaii","limit":100}
+```
+
+Omitting `media_type` includes photos and videos. Continue that tool with only
+`{"continuation":"<returned handle>"}` until `complete=true`. Each call retrieves one
+metadata page, deduplicates IDs across the traversal, and reports `returnedSoFar`.
+An error, expiry, or safety limit means incomplete enumeration. Missing/incorrect location
+metadata can exclude real trip items, and library changes can affect pagination.
+
+For a separate two-photo sample, use `{"state":"Hawaii","media_type":"IMAGE","limit":2}`.
+Fetch only those matching IDs with existing `get_asset_thumbnail` calls, initially using
+`size="thumbnail"`; reuse successful images for display. A representative selection may use
+a few additional candidates within the existing limits. Describe the displayed photos as a
+sample. Check visible attachments separately from image retrieval and vision.
+
+Use `search_assets(query="tropical beach")` for visual semantics. A mixed request uses a
+semantic query plus resolved location filters, e.g. `query="beaches", state="Hawaii"`.
+Never drop the location constraint after an error. Location aliases and geographic ambiguity
+require evidence or clarification; no hardcoded Hawaii/Hawaiʻi/HI mapping exists.
+
+`IMMICH_SEARCH_API_MODE=legacy` is the default for location pages and is compatible with the
+validated v3.1/v3.2 contracts. Optional `structured` uses v3.2 filter/orderBy/cursor fields.
+This explicit setting does not change the legacy contract of older tools, perform discovery,
+or trigger fallback on errors. No production configuration change is needed for the default.
+Location traversals default to 100 pages/10,000 unique items, 128 retained handles per process,
+and a 900-second lifetime. See `.env.example` and [the operational checklist](docs/location-search.md).
 
 ## Public shares
 

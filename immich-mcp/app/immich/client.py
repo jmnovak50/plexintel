@@ -5,6 +5,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from time import monotonic
 from typing import Any
 from urllib.parse import quote
+from uuid import uuid4
 
 import httpx
 import structlog
@@ -24,6 +25,23 @@ log = structlog.get_logger(__name__)
 
 class ImmichError(Exception):
     """A sanitized error safe to return across the tool boundary."""
+
+    def with_diagnostic(self, diagnostic: dict[str, Any]) -> "ImmichError":
+        self.diagnostic = dict(diagnostic)
+        self.args = (f"{self.args[0]} [{', '.join(f'{k}={v}' for k, v in diagnostic.items())}]",)
+        return self
+
+
+class ImmichValidationError(ImmichError):
+    pass
+
+
+class ImmichBadRequest(ImmichError):
+    pass
+
+
+class ImmichNetworkError(ImmichError):
+    pass
 
 
 class InvalidShareLink(ImmichError):
@@ -133,6 +151,8 @@ class ImmichClient:
         """Bound image work separately from metadata and emit body-free diagnostics."""
         started = monotonic()
         diagnostic: dict[str, Any] = {
+            "operation": self._operation(path),
+            "correlation_id": uuid4().hex,
             "tool": (
                 "get_shared_asset_image"
                 if credential.kind == "share"
@@ -166,6 +186,17 @@ class ImmichClient:
             diagnostic["error_category"] = (
                 type(exc).__name__ if isinstance(exc, ImmichError) else "unexpected"
             )
+            if isinstance(exc, ImmichError):
+                raise exc.with_diagnostic(
+                    {
+                        "operation": diagnostic["operation"],
+                        "correlation_id": diagnostic["correlation_id"],
+                        "status": diagnostic["status"],
+                        "attempts": diagnostic["attempts"],
+                        "duration_ms": round((monotonic() - started) * 1000),
+                        "error_category": type(exc).__name__,
+                    }
+                ) from None
             raise
         finally:
             log.info(
@@ -249,11 +280,11 @@ class ImmichClient:
                     await asyncio.sleep(0.05 * (2**attempt))
                     continue
                 raise ImmichTimeout("Immich request timed out") from exc
-            except httpx.RequestError as exc:
+            except httpx.RequestError:
                 if attempt < retries:
                     await asyncio.sleep(0.05 * (2**attempt))
                     continue
-                raise ImmichUnavailable("Immich could not be reached") from exc
+                raise ImmichNetworkError("Immich could not be reached") from None
         raise ImmichUnavailable("Immich request failed")  # pragma: no cover
 
     async def _request(
@@ -266,24 +297,96 @@ class ImmichClient:
         params: Mapping[str, Any] | None = None,
         json_body: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
+        diagnostic = {
+            "operation": self._operation(path),
+            "correlation_id": uuid4().hex,
+            "api_mode": ("structured" if "filter" in (json_body or {}) else "legacy")
+            if path in {"search/metadata", "search/smart"}
+            else "n/a",
+            "configured_api_mode": self.settings.immich_search_api_mode,
+            "status": None,
+            "attempts": 0,
+        }
+        started = monotonic()
+        try:
+            response = await self._request_attempts(
+                method,
+                path,
+                credential=credential,
+                send_credential=send_credential,
+                params=params,
+                json_body=json_body,
+                diagnostic=diagnostic,
+            )
+            diagnostic["duration_ms"] = round((monotonic() - started) * 1000)
+            response.extensions["immich_diagnostic"] = dict(diagnostic)
+            return response
+        except ImmichError as exc:
+            diagnostic["duration_ms"] = round((monotonic() - started) * 1000)
+            diagnostic["error_category"] = type(exc).__name__
+            raise exc.with_diagnostic(diagnostic) from None
+        finally:
+            log.info("immich_request", **diagnostic)
+
+    @staticmethod
+    def _operation(path: str) -> str:
+        # Never log IDs, paths containing filenames, queries, or caller-supplied URLs.
+        if path in {
+            "search/metadata",
+            "search/smart",
+            "search/suggestions",
+            "server/version",
+            "server/ping",
+            "users/me",
+            "albums",
+            "shared-links/me",
+            "timeline/buckets",
+            "timeline/bucket",
+        }:
+            return path
+        if path.startswith("assets/"):
+            return (
+                "assets/thumbnail"
+                if path.endswith("/thumbnail")
+                else "assets/original"
+                if path.endswith("/original")
+                else "assets/metadata"
+            )
+        return "immich/read"
+
+    async def _request_attempts(
+        self,
+        method: str,
+        path: str,
+        *,
+        credential: ImmichCredential | None,
+        send_credential: bool,
+        params: Mapping[str, Any] | None,
+        json_body: Mapping[str, Any] | None,
+        diagnostic: dict[str, Any],
+    ) -> httpx.Response:
         headers = self._credential_headers(credential) if send_credential else None
         retries = self.settings.http_max_retries if method == "GET" else 0
         for attempt in range(retries + 1):
+            diagnostic.update(attempts=attempt + 1, status=None)
             try:
                 response = await self._client.request(
-                    method, path, headers=headers, params=params, json=json_body
+                    method, path, headers=headers, params=params, json=json_body, follow_redirects=False
                 )
             except httpx.TimeoutException as exc:
                 if attempt < retries:
                     await asyncio.sleep(0.05 * (2**attempt))
                     continue
                 raise ImmichTimeout("Immich request timed out") from exc
-            except httpx.RequestError as exc:
+            except httpx.RequestError:
                 if attempt < retries:
                     await asyncio.sleep(0.05 * (2**attempt))
                     continue
-                raise ImmichUnavailable("Immich could not be reached") from exc
+                raise ImmichNetworkError("Immich could not be reached") from None
 
+            diagnostic["status"] = response.status_code
+            if 300 <= response.status_code < 400:
+                raise ImmichError("Immich redirect was not followed")
             if response.status_code in {429, 500, 502, 503, 504} and attempt < retries:
                 await asyncio.sleep(0.05 * (2**attempt))
                 continue
@@ -306,28 +409,39 @@ class ImmichClient:
         status = response.status_code
         if status < 400:
             return
+        # Fixed messages only: upstream bodies and request details are never reflected.
+        if status == 400:
+            # Smart search can also use 400 for an unmet operation precondition (e.g. disabled ML).
+            # Status alone cannot establish that the caller's arguments were malformed.
+            raise ImmichBadRequest("Immich rejected the request or operation precondition (HTTP 400)")
+        if status == 422:
+            raise ImmichValidationError("Immich rejected request validation (HTTP 422)")
         if status == 401:
             if credential and credential.kind == "share":
-                raise InvalidShareLink("Invalid or expired Immich share credential")
+                raise InvalidShareLink("Invalid or expired Immich share credential (HTTP 401)")
             if credential and credential.kind in {"api_key", "session"}:
-                raise InvalidImmichCredential("The stored Immich credential is no longer valid")
-            raise ImmichUnauthorized("Immich authentication is required")
+                raise InvalidImmichCredential("The stored Immich credential is no longer valid (HTTP 401)")
+            raise ImmichUnauthorized("Immich authentication is required (HTTP 401)")
         if status == 403:
-            raise ImmichForbidden("Immich denied this operation")
+            raise ImmichForbidden("Immich denied this operation (HTTP 403)")
         if status == 404:
-            raise ImmichNotFound("Immich resource was not found")
+            raise ImmichNotFound("Immich resource was not found (HTTP 404)")
         if status == 429:
-            raise ImmichRateLimited("Immich rate limit exceeded")
+            raise ImmichRateLimited("Immich rate limit exceeded (HTTP 429)")
         if status >= 500:
-            raise ImmichUnavailable("Immich upstream service failed")
+            raise ImmichUnavailable(f"Immich upstream service failed (HTTP {status})")
         raise ImmichError(f"Immich request failed with status {status}")
 
     @staticmethod
     def _json(response: httpx.Response) -> Any:
         try:
             return response.json()
-        except ValueError as exc:
-            raise MalformedImmichResponse("Immich returned invalid JSON") from exc
+        except ValueError:
+            diagnostic = response.extensions.get("immich_diagnostic", {"status": response.status_code})
+            log.info("immich_invalid_json", **diagnostic, error_category="MalformedImmichResponse")
+            raise MalformedImmichResponse("Immich returned invalid JSON").with_diagnostic(
+                diagnostic
+            ) from None
 
     async def get_shared_link(self, share_key: str) -> SharedLink:
         response = await self._get("shared-links/me", share_key=share_key)
@@ -435,7 +549,7 @@ class ImmichClient:
             collected.extend(items)
             if len(collected) >= offset + limit or not next_page:
                 return collected[offset : offset + limit], next_page
-            if next_page in seen_pages:
+            if next_page in seen_pages or int(next_page) <= body["page"]:
                 raise MalformedImmichResponse("Immich search pagination repeated a page")
             seen_pages.add(next_page)
             try:
@@ -479,6 +593,7 @@ class ImmichClient:
         *,
         query: str | None = None,
         city: str | None = None,
+        state: str | None = None,
         country: str | None = None,
         person_id: str | None = None,
         start_date: str | None = None,
@@ -489,6 +604,7 @@ class ImmichClient:
     ) -> list[dict[str, Any]]:
         filters = self._search_filters(
             city=city,
+            state=state,
             country=country,
             person_id=person_id,
             start_date=start_date,
@@ -546,7 +662,7 @@ class ImmichClient:
                         return self._sort_filename_matches(matches)[:limit], True
             if not next_page:
                 return self._sort_filename_matches(matches), False
-            if next_page in seen_pages:
+            if next_page in seen_pages or int(next_page) <= body["page"]:
                 raise MalformedImmichResponse("Immich search pagination repeated a page")
             seen_pages.add(next_page)
             try:
@@ -573,6 +689,56 @@ class ImmichClient:
         payload = self._json(await self._post("search/metadata", credential=credential, json_body=body))
         return self._search_asset_page(payload)
 
+    async def location_search_page(
+        self,
+        credential: PrivateImmichCredential,
+        body: dict[str, Any],
+        mode: str,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        response = await self._post("search/metadata", credential=credential, json_body=body)
+        try:
+            payload = self._json(response)
+            if not isinstance(payload, dict) or not isinstance(payload.get("assets", payload), dict):
+                raise MalformedImmichResponse("Immich returned malformed search results")
+            page = payload.get("assets", payload)
+            items = self._search_items(page)
+            if len(items) > body["size"]:
+                raise MalformedImmichResponse("Immich returned more assets than the requested page size")
+            return items, self._search_continuation(page, mode)
+        except ImmichError as exc:
+            if not hasattr(exc, "diagnostic"):
+                raise exc.with_diagnostic(response.extensions["immich_diagnostic"]) from None
+            raise
+
+    async def location_suggestions(
+        self,
+        credential: PrivateImmichCredential,
+        *,
+        field: str,
+        country: str | None = None,
+        state: str | None = None,
+    ) -> list[str]:
+        if field not in {"city", "state", "country"}:
+            raise ImmichValidationError("field must be city, state, or country")
+        # Immich only applies country to states/cities and state to cities.
+        if (country is not None and field == "country") or (state is not None and field != "city"):
+            raise ImmichValidationError(
+                "Suggestion scope: country filters states/cities; state filters cities"
+            )
+        params = {"type": field}
+        if country is not None:
+            params["country"] = country
+        if state is not None:
+            params["state"] = state
+        response = await self._get("search/suggestions", credential=credential, params=params)
+        payload = self._json(response)
+        if not isinstance(payload, list) or any(v is not None and not isinstance(v, str) for v in payload):
+            raise MalformedImmichResponse("Immich returned malformed location suggestions").with_diagnostic(
+                response.extensions["immich_diagnostic"]
+            )
+        # Null is not evidence of an actual place or even of missing GPS. Do not normalize accents.
+        return sorted({v for v in payload if isinstance(v, str) and v.strip()}, key=str.casefold)
+
     @classmethod
     def _search_asset_page(cls, payload: Any) -> tuple[list[dict[str, Any]], str | None]:
         if not isinstance(payload, dict):
@@ -582,8 +748,31 @@ class ImmichClient:
         page = payload.get("assets", payload)
         if not isinstance(page, dict):
             raise MalformedImmichResponse("Immich returned malformed asset search results")
-        next_page = page.get("nextPage", page.get("nextCursor"))
-        return cls._search_items(page), None if next_page in (None, "") else str(next_page)
+        # Existing semantic, filename, album and recent callers use legacy numeric pages.
+        # Do not reinterpret an opaque (even numeric-looking) cursor as a page.
+        next_page = cls._search_continuation(page, "legacy")
+        return cls._search_items(page), next_page
+
+    @staticmethod
+    def _search_continuation(page: dict[str, Any], mode: str) -> str | None:
+        field, other = ("nextCursor", "nextPage") if mode == "structured" else ("nextPage", "nextCursor")
+        value = page.get(field)
+        if page.get(other) is not None:
+            raise MalformedImmichResponse("Immich returned continuation for a different search contract")
+        if value is None:
+            return None
+        if mode == "structured":
+            if not isinstance(value, str) or not value or len(value) > 8192:
+                raise MalformedImmichResponse("Immich returned an invalid search cursor")
+        elif (
+            type(value) not in {str, int}
+            or not str(value).isascii()
+            or not str(value).isdigit()
+            or len(str(value)) > 9
+            or int(value) < 2
+        ):
+            raise MalformedImmichResponse("Immich returned an invalid search page")
+        return str(value)
 
     @staticmethod
     def _search_items(payload: Any) -> list[dict[str, Any]]:
@@ -599,6 +788,8 @@ class ImmichClient:
         filters: dict[str, Any] = {}
         if values.get("city") is not None:
             filters["city"] = values["city"]
+        if values.get("state") is not None:
+            filters["state"] = values["state"]
         if values.get("country") is not None:
             filters["country"] = values["country"]
         if values.get("person_id") is not None:

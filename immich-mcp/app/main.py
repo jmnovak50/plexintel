@@ -1,7 +1,7 @@
 import html
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 from urllib.parse import quote
 
 import httpx
@@ -222,6 +222,6 @@ def _public_http_error(exc: ImmichError) -> HTTPException:
         return HTTPException(status_code=404, detail=str(exc))
     if name == "ImmichRateLimited":
         return HTTPException(status_code=429, detail=str(exc))
-    if name in {"ImmichUnavailable", "ImmichTimeout"}:
+    if name in {"ImmichUnavailable", "ImmichTimeout", "ImmichNetworkError"}:
         return HTTPException(status_code=503, detail=str(exc))
     return HTTPException(status_code=502, detail=str(exc))
