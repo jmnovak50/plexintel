@@ -9,8 +9,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 
-from app.auth.authentik import AuthentikIdentityProvider
 from app.auth.dependencies import current_mcp_principal
+from app.auth.provider import IdentityProvider
 from app.config import Settings
 from app.mealie.errors import MealieError
 from app.services.mealplans import MealPlanService
@@ -22,7 +22,7 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotent
 
 def create_mcp_server(
     settings: Settings,
-    identity: AuthentikIdentityProvider,
+    identity: IdentityProvider,
     recipes: RecipeService,
     mealplans: MealPlanService,
     shopping: ShoppingService,

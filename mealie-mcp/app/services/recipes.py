@@ -26,7 +26,7 @@ class RecipeService:
             query={
                 "search": search,
                 "page": max(1, page),
-                "perPage": min(max(1, per_page), 50),
+                "page_size": min(max(1, per_page), 50),
                 "categories": categories,
                 "tags": tags,
             },

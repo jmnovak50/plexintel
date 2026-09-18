@@ -2,24 +2,33 @@
   "openapi": "3.1.0",
   "info": {"title": "Mealie fixture B", "version": "3.26.0"},
   "paths": {
-    "/api/users/self": {"get": {"operationId": "renamed_current_user", "responses": {"200": {"description": "ok"}}}},
+    "/api/users/self": {"get": {"operationId": "renamed_current_user", "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/User"}}}}}}},
     "/api/recipes": {"get": {"operationId": "renamed_recipe_index", "parameters": [
       {"name": "search", "in": "query", "schema": {"type": "string"}},
       {"name": "page", "in": "query", "schema": {"type": "integer"}},
       {"name": "perPage", "in": "query", "schema": {"type": "integer"}}
-    ], "responses": {"200": {"description": "ok"}}}},
+    ], "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Page"}}}}}}},
     "/api/recipes/{slug}": {"get": {"operationId": "renamed_recipe_detail", "parameters": [
       {"name": "slug", "in": "path", "required": true, "schema": {"type": "string"}}
-    ], "responses": {"200": {"description": "ok"}}}},
+    ], "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Recipe"}}}}}}},
     "/api/households/mealplans": {"get": {"operationId": "renamed_mealplans", "parameters": [
       {"name": "start_date", "in": "query", "schema": {"type": "string"}},
-      {"name": "end_date", "in": "query", "schema": {"type": "string"}}
-    ], "responses": {"200": {"description": "ok"}}}},
-    "/api/households/shopping/lists": {"get": {"operationId": "renamed_shopping_lists", "responses": {"200": {"description": "ok"}}}},
+      {"name": "end_date", "in": "query", "schema": {"type": "string"}},
+      {"name": "perPage", "in": "query", "schema": {"type": "integer"}}
+    ], "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}}},
+    "/api/households/shopping/lists": {"get": {"operationId": "renamed_shopping_lists", "parameters": [
+      {"name": "page", "in": "query", "schema": {"type": "integer"}},
+      {"name": "perPage", "in": "query", "schema": {"type": "integer"}}
+    ], "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Page"}}}}}}},
     "/api/households/shopping/lists/{item_id}": {"get": {"operationId": "renamed_shopping_detail", "parameters": [
       {"name": "item_id", "in": "path", "required": true, "schema": {"type": "string"}}
-    ], "responses": {"200": {"description": "ok"}}}},
+    ], "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ShoppingList"}}}}}}},
     "/api/admin/surprise": {"delete": {"operationId": "new_dangerous_operation", "responses": {"204": {"description": "deleted"}}}}
-  }
+  },
+  "components": {"schemas": {
+    "User": {"type": "object", "properties": {"id": {"type": "string"}}},
+    "Page": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object"}}}},
+    "Recipe": {"type": "object", "properties": {"id": {"type": "string"}, "slug": {"type": "string"}}},
+    "ShoppingList": {"type": "object", "properties": {"id": {"type": "string"}}}
+  }}
 }
-

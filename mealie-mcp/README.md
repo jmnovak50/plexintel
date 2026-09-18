@@ -25,6 +25,11 @@ algorithm allowlist, exact issuer, audience, expiry, and required scopes. The
 validated `sub` is mapped to stable internal tenant/user UUIDs. Email is display
 metadata and is not an authorization key.
 
+The current deployment provides strict isolation among multiple users inside
+one configured logical tenant. The connection schema is one-to-many and keeps
+tenant predicates explicit, but commercial tenant provisioning, membership,
+invitation, subscription, and billing workflows are intentionally deferred.
+
 Connection lookup always applies `tenant_id` and `user_id`. The selected row
 contains an encrypted Mealie token and a validated origin. The token is
 decrypted just before one downstream request and is never returned by the REST
@@ -35,6 +40,10 @@ Supplied Mealie origins are checked at registration and before every request.
 Redirects are rejected, responses are bounded, and only safe reads receive a
 bounded retry. SaaS mode rejects private and special-use networks. Self-hosted
 mode permits private networks only through an operator CIDR/hostname allowlist.
+Cloud metadata hostnames and addresses are unconditional denials in both modes;
+an operator allowlist cannot override them. SaaS configuration rejects private
+CIDR, hostname, and cleartext HTTP exceptions at startup.
+
 Public SaaS deployment also needs network-level egress filtering to close the
 DNS resolution time-of-check/time-of-use gap.
 
@@ -121,8 +130,10 @@ old encrypted token is changed.
 
 For a LAN Mealie instance, use `DEPLOYMENT_MODE=self_hosted`, explicitly list
 its network in `MEALIE_PRIVATE_NETWORKS`, and enable `MEALIE_ALLOW_HTTP=true`
-only when TLS is genuinely unavailable. SaaS mode ignores this convenience and
-requires public HTTPS destinations.
+only when TLS is genuinely unavailable. SaaS mode rejects these settings at
+startup and requires public HTTPS destinations. Metadata targets remain blocked
+even when a self-hosted private-network rule would otherwise contain their
+address.
 
 ## ChatGPT and Claude
 
@@ -157,20 +168,32 @@ contract is MCP; `/api/v1` is the user connection control plane.
 ## OpenAPI capability discovery
 
 Connection validation fetches the same-origin `/openapi.json`, permits only
-local references, normalizes and hashes the document, and resolves curated
-capabilities by allowlisted HTTP method/path plus operation metadata. It then
-calls the resolved current-user operation using the submitted token.
+local references, normalizes and hashes the document, and scans all operations
+for conservative matches to curated capabilities. Exact known paths are strong
+evidence, while route movement requires matching path semantics plus a known
+operation ID or allowlisted tag. Parameters, required inputs, request bodies,
+and successful JSON response schemas must also be compatible. Tied or weak
+matches are withheld rather than guessed.
+
+Application services use stable semantic parameter names. The descriptor maps
+them to the selected Mealie schema, for example `page_size` to `perPage`,
+`pageSize`, or `page_size`, and `slug` to the route's actual placeholder. A
+declared parameter with an incompatible type makes that capability unavailable.
+External references, malformed or unresolved local JSON pointers, reference
+cycles, and excessive reference depth reject the schema safely.
 
 The compact descriptor and schema hash are cached in PostgreSQL. Revalidation
 reports added and removed curated capabilities. Cached metadata remains useful
 for health display during a failure but does not make a failed validation pass.
-No bundled upstream snapshot is trusted at runtime. Minimal schema A/B/C
-fixtures test compatible additions and required-operation loss.
+No bundled upstream snapshot is trusted at runtime. Schema A/B/C/D fixtures
+test compatible additions, route and parameter movement, ambiguity, schema
+incompatibility, unknown endpoints, and required-operation loss.
 
 ## Adding a Mealie capability
 
 1. Add a semantic capability specification in `app/mealie/capabilities.py`.
-   Include only known-safe method/path candidates and required path parameters.
+   Include known-safe paths and operation IDs, semantic tags/path evidence,
+   parameter aliases and types, and the expected response shape.
 2. Add compatibility fixtures for supported Mealie schema shapes and a fixture
    where the operation disappears or becomes incompatible.
 3. Add request construction to an application service. Its public arguments

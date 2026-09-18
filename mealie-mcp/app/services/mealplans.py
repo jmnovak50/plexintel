@@ -17,5 +17,9 @@ class MealPlanService:
         return await self.executor.call(
             principal,
             "mealplan.read",
-            query={"start_date": start_date.isoformat(), "end_date": end_date.isoformat(), "perPage": 366},
+            query={
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "page_size": 366,
+            },
         )

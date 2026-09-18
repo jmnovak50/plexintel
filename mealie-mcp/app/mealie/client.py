@@ -9,6 +9,7 @@ import httpx
 
 from app.config import Settings
 from app.mealie.errors import (
+    CapabilityUnavailable,
     MealieForbidden,
     MealieInvalidResponse,
     MealieNotFound,
@@ -53,15 +54,31 @@ class MealieClient:
         query: dict[str, Any] | None = None,
     ) -> Any:
         path = operation.path
-        for name in operation.path_parameters:
-            if not path_values or name not in path_values:
-                raise ValueError(f"missing path value: {name}")
-            path = path.replace("{" + name + "}", quote(str(path_values[name]), safe=""))
-        safe_query = {
-            key: value
-            for key, value in (query or {}).items()
-            if key in operation.query_parameters and value is not None
-        }
+        supplied_path_parameters: set[str] = set()
+        for semantic_name, value in (path_values or {}).items():
+            actual_name = operation.parameter_map.get(semantic_name)
+            if actual_name is None or actual_name not in operation.path_parameters:
+                raise CapabilityUnavailable(
+                    f"Mealie capability '{operation.capability}' does not support parameter '{semantic_name}'"
+                )
+            path = path.replace("{" + actual_name + "}", quote(str(value), safe=""))
+            supplied_path_parameters.add(actual_name)
+        missing = operation.path_parameters - supplied_path_parameters
+        if missing:
+            raise CapabilityUnavailable(
+                f"Mealie capability '{operation.capability}' has incompatible path parameters"
+            )
+
+        safe_query: dict[str, Any] = {}
+        for semantic_name, value in (query or {}).items():
+            if value is None:
+                continue
+            actual_name = operation.parameter_map.get(semantic_name)
+            if actual_name is None or actual_name not in operation.query_parameters:
+                raise CapabilityUnavailable(
+                    f"Mealie capability '{operation.capability}' does not support parameter '{semantic_name}'"
+                )
+            safe_query[actual_name] = value
         return await self.request_json(
             base_url,
             token,

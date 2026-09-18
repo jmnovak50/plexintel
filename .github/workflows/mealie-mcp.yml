@@ -1,0 +1,32 @@
+name: Mealie MCP
+
+on:
+  push:
+    paths:
+      - "mealie-mcp/**"
+      - ".github/workflows/mealie-mcp.yml"
+  pull_request:
+    paths:
+      - "mealie-mcp/**"
+      - ".github/workflows/mealie-mcp.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mealie-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: mealie-mcp/pyproject.toml
+      - run: python -m pip install -e '.[test]'
+      - run: pytest -q
+      - run: ruff check app tests
+      - run: ruff format --check app tests

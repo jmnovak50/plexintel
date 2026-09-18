@@ -1,0 +1,44 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Mealie fixture D", "version": "4.1.0"},
+  "paths": {
+    "/api/users/self": {"get": {
+      "operationId": "get_logged_in_user_api_users_self_get",
+      "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+        "type": "object", "properties": {"id": {"type": "string"}}
+      }}}}}
+    }},
+    "/api/recipes": {"get": {
+      "operationId": "get_all_api_recipes_get",
+      "tags": ["Recipes"],
+      "parameters": [
+        {"name": "search", "in": "query", "schema": {"type": "string"}},
+        {"name": "page", "in": "query", "schema": {"type": "integer"}},
+        {"name": "pageSize", "in": "query", "schema": {"type": "integer"}}
+      ],
+      "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+        "type": "object", "properties": {"items": {"type": "array", "items": {"type": "object"}}}
+      }}}}}
+    }},
+    "/api/recipes/item/{recipeSlug}": {"get": {
+      "operationId": "get_one_api_recipes__slug__get",
+      "tags": ["Recipes"],
+      "parameters": [
+        {"name": "recipeSlug", "in": "path", "required": true, "schema": {"type": "string"}}
+      ],
+      "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+        "type": "object", "properties": {"id": {"type": "string"}, "slug": {"type": "string"}}
+      }}}}}
+    }},
+    "/api/experimental/widgets": {"get": {
+      "operationId": "get_all_api_recipes_get",
+      "parameters": [
+        {"name": "page", "in": "query", "schema": {"type": "integer"}},
+        {"name": "pageSize", "in": "query", "schema": {"type": "integer"}}
+      ],
+      "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+        "type": "object", "properties": {"items": {"type": "array"}}
+      }}}}}
+    }}
+  }
+}

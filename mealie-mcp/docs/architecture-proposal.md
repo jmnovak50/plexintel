@@ -138,9 +138,12 @@ whole result when any answer is forbidden.
 
 Self-hosted mode still rejects malformed and special-use destinations but may
 permit private addresses only when `MEALIE_PRIVATE_NETWORKS` explicitly lists
-matching CIDRs or hostnames. `localhost` and cloud metadata addresses remain
-blocked unless explicitly allowlisted by an operator. This is configuration,
-not caller input.
+matching CIDRs or `MEALIE_ALLOWED_HOSTS` explicitly lists hostnames. Cloud
+metadata hostnames, IPv4 link-local, IPv6 link-local, and documented AWS,
+Google Cloud, Azure, and Alibaba metadata/platform addresses are categorical
+denials that neither setting can override. SaaS mode rejects all destination
+exceptions during configuration validation and still enforces public-address
+checks at request time.
 
 Validation runs when a connection is submitted and immediately before each
 downstream request. Redirects are disabled. Timeouts, pool limits, JSON body
@@ -169,8 +172,10 @@ Validation performs this sequence:
 5. Parse JSON, reject external `$ref` values, and resolve local JSON pointers
    with cycle and depth limits.
 6. Normalize the schema deterministically and calculate SHA-256.
-7. Match only curated capability specifications against operation ID,
-   HTTP method, path template, parameters, and required response/body shape.
+7. Scan all operations and score only curated capability candidates using HTTP
+   method, exact known paths, known operation IDs, allowlisted tags, path
+   semantics, typed semantic parameters, request bodies, and successful JSON
+   response shape. Refuse weak, tied, or incompatible candidates.
 8. Persist the compact capability map and hash in the same transaction as the
    validation result.
 
@@ -186,11 +191,19 @@ Initial mappings are:
 | `identity.self` | `GET /api/users/self` | validation only |
 
 Operation IDs are hints rather than the sole compatibility key because Mealie's
-FastAPI-generated IDs can change when Python function names change. A candidate
-must also satisfy its allowlisted method/path and semantic parameter checks.
+FastAPI-generated IDs can change when Python function names change. Exact known
+paths carry strong weight. A moved route must retain matching path semantics and
+either a known operation ID or an allowlisted tag, then pass parameter and
+response checks and the minimum confidence threshold. A close second candidate
+makes the capability unavailable.
+Unknown new endpoints cannot enter the curated facade merely by appearing in
+OpenAPI.
+
 Request construction uses the resolved operation descriptor, percent-encodes
-path values, and accepts only declared semantic inputs. The model cannot pass a
-path, method, arbitrary headers, or arbitrary OpenAPI operation.
+path values, and accepts only declared semantic inputs. Stable names such as
+`page_size`, `slug`, and `shopping_list_id` map explicitly to supported schema
+aliases such as `perPage`, `pageSize`, `recipeSlug`, or `item_id`. The model
+cannot pass a path, method, arbitrary headers, or arbitrary OpenAPI operation.
 
 The previous hash and compact capability map are retained. On change, the
 validator records added/lost/changed curated capabilities and marks a
@@ -409,7 +422,7 @@ provider-neutral principal and Authentik verifier, request isolation,
 connection CRUD/validation, secret provider, destination policy, bounded
 Mealie client, OpenAPI capability resolver, mounted MCP server, and five
 read-only tools. Tests prove JWT behavior, key rotation, tenant isolation under
-concurrency, schema A/B/C behavior, secret redaction, SSRF policy, redirect
+concurrency, schema A/B/C/D behavior, recursive log redaction, SSRF policy, redirect
 refusal, and representative calls through MCP.
 
 Phase 3 adds write capabilities only after each operation's idempotency and

@@ -72,8 +72,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def saas_invariants(self) -> Settings:
-        if self.deployment_mode == "saas" and self.mealie_allow_http:
-            raise ValueError("MEALIE_ALLOW_HTTP cannot be enabled in SaaS mode")
+        if self.deployment_mode == "saas":
+            if self.mealie_allow_http:
+                raise ValueError("MEALIE_ALLOW_HTTP cannot be enabled in SaaS mode")
+            if self.mealie_private_networks:
+                raise ValueError("MEALIE_PRIVATE_NETWORKS cannot be configured in SaaS mode")
+            if self.mealie_allowed_hosts:
+                raise ValueError("MEALIE_ALLOWED_HOSTS cannot be configured in SaaS mode")
         return self
 
 

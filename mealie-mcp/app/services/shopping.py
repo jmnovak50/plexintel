@@ -14,12 +14,12 @@ class ShoppingService:
         return await self.executor.call(
             principal,
             "shopping.list",
-            query={"page": max(1, page), "perPage": min(max(1, per_page), 50)},
+            query={"page": max(1, page), "page_size": min(max(1, per_page), 50)},
         )
 
     async def get(self, principal: Principal, shopping_list_id: str) -> Any:
         return await self.executor.call(
             principal,
             "shopping.get",
-            path_values={"item_id": shopping_list_id},
+            path_values={"shopping_list_id": shopping_list_id},
         )

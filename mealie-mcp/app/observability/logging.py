@@ -7,6 +7,8 @@ import uuid
 import structlog
 from fastapi import Request
 
+from app.security.redaction import redact_processor
+
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(level=level.upper(), format="%(message)s")
@@ -17,6 +19,7 @@ def configure_logging(level: str) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            redact_processor,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper(), logging.INFO)),

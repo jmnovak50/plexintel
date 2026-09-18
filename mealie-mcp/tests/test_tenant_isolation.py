@@ -43,6 +43,7 @@ async def test_concurrent_users_cannot_cross_credentials_or_destinations(setting
         method="GET",
         path="/api/recipes",
         query_parameters=frozenset({"search", "page", "perPage"}),
+        parameter_map={"search": "search", "page": "page", "page_size": "perPage"},
     )
     capabilities = CapabilityMap(operations={"recipe.search": descriptor}).model_dump(mode="json")
     user_a, user_b = principal("a"), principal("b")
