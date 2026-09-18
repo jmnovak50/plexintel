@@ -186,8 +186,10 @@ Validation performs this sequence:
 3. Call `GET /api/app/about` where supported to obtain the version.
 4. Fetch same-origin `GET /openapi.json` with redirects disabled and a bounded
    response.
-5. Parse JSON, reject external `$ref` values, and resolve local JSON pointers
-   with cycle and depth limits.
+5. Parse JSON, reject external, malformed, and unresolved `$ref` values by
+   walking the literal document without expanding referenced targets. Recursive
+   component graphs remain valid. Dereference only schemas needed for curated
+   matching, with cycle and depth limits on those semantic root chains.
 6. Normalize the schema deterministically and calculate SHA-256.
 7. Scan all operations and score only curated capability candidates using HTTP
    method, exact known paths, known operation IDs, allowlisted tags, path

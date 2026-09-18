@@ -214,8 +214,11 @@ Application services use stable semantic parameter names. The descriptor maps
 them to the selected Mealie schema, for example `page_size` to `perPage`,
 `pageSize`, or `page_size`, and `slug` to the route's actual placeholder. A
 declared parameter with an incompatible type makes that capability unavailable.
-External references, malformed or unresolved local JSON pointers, reference
-cycles, and excessive reference depth reject the schema safely.
+External references and malformed or unresolved local JSON pointers reject the
+document. Recursive component graphs are valid and remain unexpanded during
+that whole-document check. When curated capability matching actually follows a
+root reference chain, cycle detection and a depth limit still prevent unsafe or
+unbounded semantic dereferencing.
 
 The compact descriptor and schema hash are cached in PostgreSQL. Revalidation
 reports added and removed curated capabilities. Cached metadata remains useful

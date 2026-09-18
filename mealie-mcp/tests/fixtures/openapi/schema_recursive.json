@@ -1,0 +1,94 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Recursive recipe fixture", "version": "1.0.0"},
+  "paths": {
+    "/api/users/self": {
+      "get": {
+        "operationId": "get_logged_in_user_api_users_self_get",
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/User"}}
+            }
+          }
+        }
+      }
+    },
+    "/api/recipes": {
+      "get": {
+        "operationId": "get_all_api_recipes_get",
+        "parameters": [
+          {"name": "page", "in": "query", "schema": {"type": "integer"}},
+          {"name": "perPage", "in": "query", "schema": {"type": "integer"}},
+          {"name": "search", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Recipe page",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/RecipePage"}}
+            }
+          }
+        }
+      }
+    },
+    "/api/recipes/{slug}": {
+      "get": {
+        "operationId": "get_one_api_recipes__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recipe",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/Recipe"}}
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"]
+      },
+      "RecipePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/Recipe"}
+          }
+        },
+        "required": ["items"]
+      },
+      "Recipe": {
+        "type": "object",
+        "properties": {
+          "slug": {"type": "string"},
+          "ingredients": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/RecipeIngredient"}
+          }
+        }
+      },
+      "RecipeIngredient": {
+        "type": "object",
+        "properties": {
+          "note": {"type": "string"},
+          "recipe": {"$ref": "#/components/schemas/Recipe"}
+        }
+      }
+    }
+  }
+}

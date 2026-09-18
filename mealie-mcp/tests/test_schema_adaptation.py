@@ -96,27 +96,70 @@ def test_incompatible_schema_is_refused(mutation, capability):
     assert capability not in OperationResolver().build(document).names
 
 
-def test_local_reference_cycle_is_rejected():
+def test_whole_document_validation_allows_unrelated_recursive_reference_graph():
     document = load("schema_a.json")
     document["components"]["schemas"]["CycleA"] = {"$ref": "#/components/schemas/CycleB"}
     document["components"]["schemas"]["CycleB"] = {"$ref": "#/components/schemas/CycleA"}
+    capabilities = OperationResolver().build(document)
+    assert "recipe.get" in capabilities.names
+
+
+def test_recursive_recipe_models_are_accepted_and_curated_capabilities_still_resolve():
+    capabilities = OperationResolver().build(load("schema_recursive.json"))
+    assert capabilities.names == {"identity.self", "recipe.search", "recipe.get"}
+    assert capabilities.require("recipe.get").path == "/api/recipes/{slug}"
+
+
+def test_semantic_root_reference_cycle_fails_safely():
+    document = load("schema_a.json")
+    document["components"]["schemas"]["CycleA"] = {"$ref": "#/components/schemas/CycleB"}
+    document["components"]["schemas"]["CycleB"] = {"$ref": "#/components/schemas/CycleA"}
+    document["paths"]["/api/recipes/{slug}"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ] = {"$ref": "#/components/schemas/CycleA"}
     with pytest.raises(MealieInvalidResponse, match="cycle"):
         OperationResolver().build(document)
 
 
-def test_local_reference_depth_limit_is_enforced():
+def test_semantic_composition_expansion_cycle_fails_safely():
+    document = load("schema_a.json")
+    document["components"]["schemas"]["LoopA"] = {
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/LoopB"}],
+    }
+    document["components"]["schemas"]["LoopB"] = {
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/LoopA"}],
+    }
+    document["paths"]["/api/recipes/{slug}"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ] = {"$ref": "#/components/schemas/LoopA"}
+    with pytest.raises(MealieInvalidResponse, match="cycle"):
+        OperationResolver().build(document)
+
+
+def test_semantic_reference_depth_limit_is_enforced():
     document = load("schema_a.json")
     schemas = document["components"]["schemas"]
     for index in range(22):
         schemas[f"Depth{index}"] = {"$ref": f"#/components/schemas/Depth{index + 1}"}
-    schemas["Depth22"] = {"type": "object"}
+    schemas["Depth22"] = {"type": "object", "properties": {"id": {"type": "string"}}}
+    document["paths"]["/api/users/self"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ] = {"$ref": "#/components/schemas/Depth0"}
     with pytest.raises(MealieInvalidResponse, match="depth"):
         OperationResolver().build(document)
 
 
 @pytest.mark.parametrize(
     "reference",
-    ["#/components/schemas/DoesNotExist", "#/components/schemas/Bad~2Pointer"],
+    [
+        "#/components/schemas/DoesNotExist",
+        "#/components/schemas/Bad~2Pointer",
+        "#/components/schemas/Bad%ZZPointer",
+        123,
+        None,
+    ],
 )
 def test_invalid_local_reference_is_rejected(reference):
     document = load("schema_a.json")

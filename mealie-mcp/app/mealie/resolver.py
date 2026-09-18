@@ -12,6 +12,7 @@ from app.mealie.errors import CapabilityUnavailable, MealieInvalidResponse
 
 _HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 _PATH_PARAMETER = re.compile(r"\{([^{}]+)\}")
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _MAX_REF_DEPTH = 20
 _MINIMUM_SCORE = 100
 _AMBIGUITY_MARGIN = 15
@@ -260,8 +261,14 @@ def _response_is_compatible(
     return True
 
 
-def _schema_types(schema: dict[str, Any], document: dict[str, Any]) -> set[str]:
-    schema = _dereference(schema, document)
+def _schema_types(
+    schema: dict[str, Any],
+    document: dict[str, Any],
+    *,
+    depth: int = 0,
+    seen: frozenset[str] = frozenset(),
+) -> set[str]:
+    schema, seen = _semantic_schema(schema, document, depth=depth, seen=seen)
     if not isinstance(schema, dict):
         return set()
     value = schema.get("type")
@@ -276,16 +283,14 @@ def _schema_types(schema: dict[str, Any], document: dict[str, Any]) -> set[str]:
         branches = schema.get(keyword)
         if isinstance(branches, list):
             for branch in branches:
-                resolved = _dereference(branch, document)
-                if isinstance(resolved, dict):
-                    result.update(_schema_types(resolved, document))
+                if isinstance(branch, dict):
+                    result.update(_schema_types(branch, document, depth=depth + 1, seen=seen))
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         branch_types = []
         for branch in all_of:
-            resolved = _dereference(branch, document)
-            if isinstance(resolved, dict):
-                types = _schema_types(resolved, document)
+            if isinstance(branch, dict):
+                types = _schema_types(branch, document, depth=depth + 1, seen=seen)
                 if types:
                     branch_types.append(types)
         if branch_types:
@@ -294,8 +299,14 @@ def _schema_types(schema: dict[str, Any], document: dict[str, Any]) -> set[str]:
     return result - {"null"}
 
 
-def _schema_properties(schema: dict[str, Any], document: dict[str, Any]) -> set[str]:
-    schema = _dereference(schema, document)
+def _schema_properties(
+    schema: dict[str, Any],
+    document: dict[str, Any],
+    *,
+    depth: int = 0,
+    seen: frozenset[str] = frozenset(),
+) -> set[str]:
+    schema, seen = _semantic_schema(schema, document, depth=depth, seen=seen)
     if not isinstance(schema, dict):
         return set()
     result: set[str] = set()
@@ -306,10 +317,31 @@ def _schema_properties(schema: dict[str, Any], document: dict[str, Any]) -> set[
         branches = schema.get(keyword)
         if isinstance(branches, list):
             for branch in branches:
-                resolved = _dereference(branch, document)
-                if isinstance(resolved, dict):
-                    result.update(_schema_properties(resolved, document))
+                if isinstance(branch, dict):
+                    result.update(_schema_properties(branch, document, depth=depth + 1, seen=seen))
     return result
+
+
+def _semantic_schema(
+    schema: dict[str, Any],
+    document: dict[str, Any],
+    *,
+    depth: int,
+    seen: frozenset[str],
+) -> tuple[Any, frozenset[str]]:
+    if depth >= _MAX_REF_DEPTH:
+        raise MealieInvalidResponse("OpenAPI reference depth limit exceeded")
+    if "$ref" not in schema:
+        return schema, seen
+    reference = schema["$ref"]
+    if not isinstance(reference, str):
+        raise MealieInvalidResponse("OpenAPI document contains a malformed reference")
+    if reference in seen:
+        raise MealieInvalidResponse("OpenAPI document contains a reference cycle")
+    return (
+        _dereference(schema, document, depth=depth, seen=seen),
+        seen | {reference},
+    )
 
 
 def _normalize(value: str) -> str:
@@ -319,8 +351,6 @@ def _normalize(value: str) -> str:
 def _validate_refs(
     node: Any,
     document: dict[str, Any] | None = None,
-    *,
-    reference_stack: tuple[str, ...] = (),
 ) -> None:
     if document is None:
         if not isinstance(node, dict):
@@ -328,25 +358,21 @@ def _validate_refs(
         document = node
     if isinstance(node, list):
         for item in node:
-            _validate_refs(item, document, reference_stack=reference_stack)
+            _validate_refs(item, document)
     elif isinstance(node, dict):
-        reference = node.get("$ref")
-        if reference is not None:
-            if not isinstance(reference, str) or not reference.startswith("#/"):
+        if "$ref" in node:
+            reference = node["$ref"]
+            if not isinstance(reference, str):
+                raise MealieInvalidResponse("OpenAPI document contains a malformed reference")
+            if not reference.startswith("#/"):
                 raise MealieInvalidResponse("OpenAPI document contains an external reference")
-            if reference in reference_stack:
-                raise MealieInvalidResponse("OpenAPI document contains a reference cycle")
-            if len(reference_stack) >= _MAX_REF_DEPTH:
-                raise MealieInvalidResponse("OpenAPI reference depth limit exceeded")
-            target = _resolve_pointer(reference, document)
-            _validate_refs(
-                target,
-                document,
-                reference_stack=(*reference_stack, reference),
-            )
+            # Validate the literal reference without expanding its target. Recursive
+            # component graphs are legal OpenAPI and every target is inspected in
+            # its ordinary location during this whole-document walk.
+            _resolve_pointer(reference, document)
         for key, child in node.items():
             if key != "$ref":
-                _validate_refs(child, document, reference_stack=reference_stack)
+                _validate_refs(child, document)
 
 
 def _dereference(
@@ -358,10 +384,12 @@ def _dereference(
 ) -> Any:
     if not isinstance(value, dict):
         return value
-    reference = value.get("$ref")
-    if reference is None:
+    if "$ref" not in value:
         return value
-    if not isinstance(reference, str) or not reference.startswith("#/"):
+    reference = value["$ref"]
+    if not isinstance(reference, str):
+        raise MealieInvalidResponse("OpenAPI document contains a malformed reference")
+    if not reference.startswith("#/"):
         raise MealieInvalidResponse("OpenAPI document contains an external reference")
     if depth >= _MAX_REF_DEPTH:
         raise MealieInvalidResponse("OpenAPI reference depth limit exceeded")
@@ -381,6 +409,8 @@ def _parse_pointer(reference: str) -> list[str]:
         raise MealieInvalidResponse("OpenAPI document contains a malformed reference")
     parts: list[str] = []
     for raw_part in reference[2:].split("/"):
+        if _INVALID_PERCENT_ESCAPE.search(raw_part):
+            raise MealieInvalidResponse("OpenAPI document contains a malformed JSON pointer")
         decoded = unquote(raw_part)
         index = 0
         while index < len(decoded):
