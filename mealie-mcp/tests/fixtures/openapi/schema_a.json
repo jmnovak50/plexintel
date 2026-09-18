@@ -1,0 +1,33 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Mealie fixture A", "version": "3.20.0"},
+  "paths": {
+    "/api/users/self": {"get": {"operationId": "get_logged_in_user_api_users_self_get", "responses": {"200": {"description": "ok"}}}},
+    "/api/recipes": {"get": {"operationId": "get_all_api_recipes_get", "parameters": [
+      {"name": "search", "in": "query", "schema": {"type": "string"}},
+      {"name": "page", "in": "query", "schema": {"type": "integer"}},
+      {"name": "perPage", "in": "query", "schema": {"type": "integer"}},
+      {"name": "categories", "in": "query", "schema": {"type": "array", "items": {"type": "string"}}},
+      {"name": "tags", "in": "query", "schema": {"type": "array", "items": {"type": "string"}}}
+    ], "responses": {"200": {"description": "ok"}}}},
+    "/api/recipes/{slug}": {"get": {"operationId": "get_one_api_recipes__slug__get", "parameters": [
+      {"$ref": "#/components/parameters/RecipeSlug"}
+    ], "responses": {"200": {"description": "ok"}}}},
+    "/api/households/mealplans": {"get": {"operationId": "get_all_api_households_mealplans_get", "parameters": [
+      {"name": "start_date", "in": "query", "schema": {"type": "string", "format": "date"}},
+      {"name": "end_date", "in": "query", "schema": {"type": "string", "format": "date"}},
+      {"name": "perPage", "in": "query", "schema": {"type": "integer"}}
+    ], "responses": {"200": {"description": "ok"}}}},
+    "/api/households/shopping/lists": {"get": {"operationId": "get_all_api_households_shopping_lists_get", "parameters": [
+      {"name": "page", "in": "query", "schema": {"type": "integer"}},
+      {"name": "perPage", "in": "query", "schema": {"type": "integer"}}
+    ], "responses": {"200": {"description": "ok"}}}},
+    "/api/households/shopping/lists/{item_id}": {"get": {"operationId": "get_one_api_households_shopping_lists__item_id__get", "parameters": [
+      {"name": "item_id", "in": "path", "required": true, "schema": {"type": "string"}}
+    ], "responses": {"200": {"description": "ok"}}}}
+  },
+  "components": {"parameters": {
+    "RecipeSlug": {"name": "slug", "in": "path", "required": true, "schema": {"type": "string"}}
+  }}
+}
+

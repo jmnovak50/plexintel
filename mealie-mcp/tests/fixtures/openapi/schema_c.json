@@ -1,0 +1,14 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Mealie fixture C", "version": "4.0.0"},
+  "paths": {
+    "/api/users/self": {"get": {"operationId": "get_logged_in_user_api_users_self_get", "responses": {"200": {"description": "ok"}}}},
+    "/api/recipes": {"get": {"operationId": "get_all_api_recipes_get", "responses": {"200": {"description": "ok"}}}},
+    "/api/households/mealplans": {"get": {"operationId": "get_all_api_households_mealplans_get", "responses": {"200": {"description": "ok"}}}},
+    "/api/households/shopping/lists": {"get": {"operationId": "get_all_api_households_shopping_lists_get", "responses": {"200": {"description": "ok"}}}},
+    "/api/households/shopping/lists/{item_id}": {"get": {"operationId": "get_one_api_households_shopping_lists__item_id__get", "parameters": [
+      {"name": "wrong_id", "in": "path", "required": true, "schema": {"type": "string"}}
+    ], "responses": {"200": {"description": "ok"}}}}
+  }
+}
+

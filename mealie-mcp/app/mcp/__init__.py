@@ -1,0 +1,1 @@
+"""Curated MCP presentation layer."""
