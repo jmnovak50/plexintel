@@ -96,7 +96,7 @@ class AuthentikIdentityProvider:
         if not token.subject:
             raise PermissionError("authenticated subject is unavailable")
         namespace = self.settings.identity_namespace
-        user_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:user:{self.issuer}:{token.subject}")
+        user_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:user:{token.subject}")
         tenant_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:tenant:{self.settings.default_tenant_id}")
         claims = token.claims or {}
         return Principal(

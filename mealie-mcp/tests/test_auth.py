@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -59,6 +60,18 @@ def _client(settings, jwks_values):
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), calls
 
 
+async def _verified_principal(settings, subject: str):
+    private, public = _key("identity-key")
+    client, _ = _client(settings, [[public]])
+    provider = AuthentikIdentityProvider(settings, client)
+    try:
+        access = await provider.verify_token(_token(private, settings, kid="identity-key", sub=subject))
+        assert access is not None
+        return provider.principal_from_access_token(access)
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_valid_jwt_and_provider_neutral_principal(settings):
     private, public = _key("key-a")
@@ -79,9 +92,10 @@ async def test_valid_jwt_and_provider_neutral_principal(settings):
         {"iss": "https://auth.example.com/application/o/wrong/"},
         {"aud": "other-client"},
         {"exp": datetime.now(UTC) - timedelta(minutes=1)},
+        {"scope": "openid"},
     ],
 )
-async def test_wrong_issuer_audience_and_expiry_are_rejected(settings, overrides):
+async def test_invalid_issuer_audience_expiry_and_scope_are_rejected(settings, overrides):
     private, public = _key("key-a")
     client, _ = _client(settings, [[public]])
     provider = AuthentikIdentityProvider(settings, client)
@@ -110,3 +124,52 @@ async def test_unknown_kid_refreshes_jwks_for_key_rotation(settings):
     assert await provider.verify_token(_token(new_private, settings, kid="new")) is not None
     assert calls["jwks"] == 2
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_namespace_and_subject_reconcile_across_valid_issuers(settings):
+    mcp_settings = settings.model_copy(
+        update={"oidc_issuer": "https://auth.kabolly.com/application/o/mealie-mcp/"}
+    )
+    account_settings = settings.model_copy(
+        update={
+            "oidc_issuer": "https://auth.kabolly.com/application/o/mealie-mcp-account/",
+            "oidc_audience": "mealie-mcp-account-client",
+        }
+    )
+
+    mcp_principal = await _verified_principal(mcp_settings, "authentik-user-uuid")
+    account_principal = await _verified_principal(account_settings, "authentik-user-uuid")
+
+    expected_user_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{settings.identity_namespace}:user:authentik-user-uuid",
+    )
+    expected_tenant_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{settings.identity_namespace}:tenant:{settings.default_tenant_id}",
+    )
+    assert mcp_principal.user_id == account_principal.user_id == expected_user_id
+    assert mcp_principal.tenant_id == account_principal.tenant_id == expected_tenant_id
+    assert mcp_principal.issuer == "https://auth.kabolly.com/application/o/mealie-mcp/"
+    assert account_principal.issuer == "https://auth.kabolly.com/application/o/mealie-mcp-account/"
+
+
+@pytest.mark.asyncio
+async def test_different_subjects_have_different_internal_user_ids(settings):
+    first = await _verified_principal(settings, "authentik-user-a")
+    second = await _verified_principal(settings, "authentik-user-b")
+    assert first.user_id != second.user_id
+
+
+@pytest.mark.asyncio
+async def test_different_identity_namespaces_have_different_internal_user_ids(settings):
+    first = await _verified_principal(
+        settings.model_copy(update={"identity_namespace": "authentik-primary"}),
+        "authentik-user-uuid",
+    )
+    second = await _verified_principal(
+        settings.model_copy(update={"identity_namespace": "future-saas"}),
+        "authentik-user-uuid",
+    )
+    assert first.user_id != second.user_id

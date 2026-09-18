@@ -70,11 +70,14 @@ required scopes. An unknown `kid` causes one rate-limited JWKS refresh to
 support key rotation. Discovery metadata and JWKS are bounded, cached, and
 fetched without caller credentials.
 
-The initial tenant resolver derives a stable opaque UUID from a configured
-identity namespace plus trusted issuer/subject and a configured default tenant
-identifier. This avoids using mutable email as identity. A future SaaS
-provider can replace resolution with provisioned tenant and membership rows
-without changing service APIs.
+The initial identity resolver derives a stable opaque user UUID from the
+configured identity namespace plus the validated subject. This allows separate
+OIDC applications to reconcile the same Authentik user when they use the same
+stable subject mode; the validating issuer remains on `Principal` for audit.
+The tenant UUID continues to use the namespace plus configured default tenant
+identifier. This avoids using mutable email as identity. A future SaaS provider
+can replace resolution with provisioned tenant and membership rows without
+changing service APIs.
 
 The official MCP SDK's `AccessToken` carries the validated subject and safe
 claims into tool request context. FastAPI dependencies invoke the same
