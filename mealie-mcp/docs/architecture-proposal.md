@@ -85,6 +85,13 @@ provider for REST. Python context variables are used only for logging fields,
 never as the authoritative credential selector; every repository call receives
 an explicit `Principal`.
 
+Browser onboarding uses a separate confidential OIDC application and verifier.
+It independently validates the account issuer, client-ID audience, signature,
+expiry, and nonce after Authorization Code + PKCE S256. It requires only
+`openid profile email`; the MCP-only `mealie.read` scope is not reused. Both
+Authentik applications must emit the same UUID-based subject so the shared
+principal factory resolves the same persistent user ID.
+
 ### Persistence
 
 SQLAlchemy 2 async sessions are request scoped. Alembic owns schema changes.
@@ -115,6 +122,13 @@ A unique partial index enforces at most one default connection for each
 predicates, even when IDs are globally unique. This is defense in depth and
 makes isolation visible in code review. Deletion removes the encrypted value
 and metadata; credential replacement is write-only.
+
+`account_oauth_states` stores a keyed hash of each random OAuth state plus its
+nonce, PKCE verifier, and expiry. Atomic deletion consumes a state once.
+`account_sessions` stores a keyed hash of the opaque session token, validated
+subject and issuer, optional display claims, and expiry. CSRF tokens are derived
+from the opaque session with the server secret. Neither table stores OAuth
+access tokens, ID tokens, Mealie tokens, or encrypted Mealie credentials.
 
 ### Secrets
 
@@ -284,6 +298,22 @@ On credential replacement, validation must succeed before the new ciphertext
 replaces the old value. A failure leaves the current credential intact and
 returns a sanitized error.
 
+### Browser account linking
+
+`/account/login` creates server-side one-time state, nonce, and PKCE material,
+then redirects to the dedicated account issuer. `/account/callback` validates
+the state cookie, atomically consumes the state, exchanges the code as a
+confidential client, validates the signed ID token, and creates an opaque
+server-side session. Secure, HttpOnly, SameSite=Lax cookies contain only random
+state or session values. Account responses disable caching and referrers and
+apply a restrictive content security policy.
+
+Authenticated `/account/connect`, `/account/validate`, and
+`/account/disconnect` requests require session-bound CSRF. They construct the
+shared `Principal` and call `ConnectionService`; tenant/user predicates,
+destination validation, schema discovery, encryption, and owner scoping remain
+authoritative in the existing service layer.
+
 ## Control-plane API
 
 The proposed routes retain the requested shape:
@@ -298,11 +328,18 @@ DELETE /api/v1/mealie-connections/{connection_id}
 GET    /api/v1/mealie-connections/{connection_id}/capabilities
 GET    /health
 GET    /ready
+GET    /account
+GET    /account/login
+GET    /account/callback
+POST   /account/connect
+POST   /account/validate
+POST   /account/disconnect
 ```
 
 All connection routes require the same OIDC bearer validation as MCP. `/health`
-is process liveness. `/ready` checks database connectivity and application
-configuration; it does not call every user's Mealie or require a connection.
+is process liveness. `/ready` checks database connectivity plus both MCP and
+account OIDC discovery/JWKS configuration; it does not call any user's Mealie
+or require a connection.
 
 ## Observability
 
@@ -395,8 +432,9 @@ release automation.
 ```text
 mealie-mcp/
 ├── app/
+│   ├── account/{routes,store}.py
 │   ├── api/{connections,health}.py
-│   ├── auth/{provider,authentik,principal,dependencies}.py
+│   ├── auth/{provider,authentik,account_oidc,principal,dependencies}.py
 │   ├── db/{base,models,repository,session}.py
 │   ├── mealie/{client,openapi,resolver,capabilities,errors}.py
 │   ├── mcp/{server,context,tools/{recipes,mealplans,shopping}}.py

@@ -30,6 +30,12 @@ one configured logical tenant. The connection schema is one-to-many and keeps
 tenant predicates explicit, but commercial tenant provisioning, membership,
 invitation, subscription, and billing workflows are intentionally deferred.
 
+MCP clients and the browser account page use separate Authentik applications.
+Both applications must use the same stable subject mode, specifically Authentik
+user UUIDs. After each issuer independently validates its own token, the service
+reconciles identity from `IDENTITY_NAMESPACE + sub`. The validated issuer stays
+on the principal for audit and never becomes part of the persistent user ID.
+
 Connection lookup always applies `tenant_id` and `user_id`. The selected row
 contains an encrypted Mealie token and a validated origin. The token is
 decrypted just before one downstream request and is never returned by the REST
@@ -70,8 +76,9 @@ Run checks with:
 .venv/bin/ruff format --check app tests
 ```
 
-The management API is documented at `/api/docs`; MCP is at `/mcp`; liveness
-and readiness are `/health` and `/ready`.
+The supported end-user onboarding page is `/account`. The management API is
+documented at `/api/docs`; MCP is at `/mcp`; liveness and readiness are
+`/health` and `/ready`.
 
 ## Docker deployment
 
@@ -89,7 +96,9 @@ PostgreSQL publicly.
 
 ## Authentik configuration
 
-Create an OAuth2/OpenID Provider and application for this service:
+Create two OAuth2/OpenID providers and applications for this service.
+
+For the MCP resource-server application:
 
 1. Use Authorization Code flow with PKCE support and an asymmetric signing key.
 2. Set the provider/client ID as `OIDC_AUDIENCE`.
@@ -99,6 +108,18 @@ Create an OAuth2/OpenID Provider and application for this service:
    including the application/provider path.
 6. Add the MCP client's exact callback URI to Authentik. Keep client secrets in
    Authentik/client configuration, not this service.
+
+For the browser account application:
+
+1. Use a separate confidential Authorization Code provider with PKCE support.
+2. Use an asymmetric signing key and scopes `openid profile email`; it does not
+   need `mealie.read`.
+3. Configure its exact issuer, client ID, client secret, and `/account/callback`
+   URI through the `ACCOUNT_*` settings.
+4. Select the same **Based on user UUID** Subject mode as the MCP provider.
+
+Changing either provider to a different subject mode breaks account-to-MCP
+identity reconciliation even when both logins belong to the same person.
 
 The service is an OAuth resource server. It does not mint tokens or proxy an
 authorization flow. The official MCP SDK publishes protected-resource metadata
@@ -112,6 +133,20 @@ curl -fsS https://mealie-mcp.example.com/.well-known/oauth-protected-resource/mc
 ```
 
 ## Connecting a Mealie account
+
+Users should visit `https://mealie-mcp.example.com/account`. The service sends
+the browser through the separate Authentik account application using
+Authorization Code, PKCE S256, state, and nonce. The resulting browser session
+is an opaque cookie whose keyed hash and identity are stored in PostgreSQL.
+OAuth access and ID tokens are not retained.
+
+The account page submits the Mealie origin and API token directly to the
+existing `ConnectionService`. The browser never receives the stored plaintext
+or encrypted credential. It can display only safe connection metadata,
+revalidate owned connections, or disconnect them. Every POST action requires a
+session-bound CSRF token.
+
+The bearer-authenticated API remains available for administrative clients.
 
 Obtain a long-lived API token from the user's own Mealie profile. Submit it once
 over TLS to the management API:

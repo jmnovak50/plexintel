@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-import uuid
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -11,7 +10,7 @@ import jwt
 from jwt import PyJWK
 from mcp.server.auth.provider import AccessToken
 
-from app.auth.principal import Principal
+from app.auth.principal import Principal, principal_from_validated_identity
 from app.config import Settings
 
 
@@ -93,16 +92,11 @@ class AuthentikIdentityProvider:
             return None
 
     def principal_from_access_token(self, token: AccessToken) -> Principal:
-        if not token.subject:
-            raise PermissionError("authenticated subject is unavailable")
-        namespace = self.settings.identity_namespace
-        user_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:user:{token.subject}")
-        tenant_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:tenant:{self.settings.default_tenant_id}")
         claims = token.claims or {}
-        return Principal(
+        return principal_from_validated_identity(
+            namespace=self.settings.identity_namespace,
+            default_tenant_id=self.settings.default_tenant_id,
             subject=token.subject,
-            user_id=user_id,
-            tenant_id=tenant_id,
             email=claims.get("email") if isinstance(claims.get("email"), str) else None,
             scopes=frozenset(token.scopes),
             issuer=self.issuer,

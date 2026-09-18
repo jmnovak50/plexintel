@@ -63,3 +63,27 @@ class MealieConnection(Base):
             f"MealieConnection(id={self.id!r}, tenant_id={self.tenant_id!r}, "
             f"user_id={self.user_id!r}, name={self.name!r}, status={self.status!r})"
         )
+
+
+class AccountOAuthState(Base):
+    __tablename__ = "account_oauth_states"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    nonce: Mapped[str] = mapped_column(String(256))
+    code_verifier: Mapped[str] = mapped_column(String(256))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountSession(Base):
+    __tablename__ = "account_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    subject: Mapped[str] = mapped_column(String(255))
+    issuer: Mapped[str] = mapped_column(String(2048))
+    email: Mapped[str | None] = mapped_column(String(320))
+    preferred_username: Mapped[str | None] = mapped_column(String(255))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

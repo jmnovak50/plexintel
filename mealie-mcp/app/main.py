@@ -7,8 +7,11 @@ import httpx
 from fastapi import FastAPI
 from mcp.server.transport_security import TransportSecuritySettings
 
+from app.account.routes import account_router
+from app.account.store import AccountStore
 from app.api.connections import router as connections_router
 from app.api.health import router as health_router
+from app.auth.account_oidc import AccountOIDC
 from app.auth.authentik import AuthentikIdentityProvider
 from app.config import Settings, get_settings
 from app.db.repository import ConnectionRepository
@@ -30,6 +33,8 @@ def create_app(
     *,
     database: Database | None = None,
     identity_client: httpx.AsyncClient | None = None,
+    account_oidc_client: httpx.AsyncClient | None = None,
+    account_oidc: AccountOIDC | None = None,
     mealie_http_client: httpx.AsyncClient | None = None,
     destination_policy: DestinationPolicy | None = None,
 ) -> FastAPI:
@@ -37,12 +42,15 @@ def create_app(
     configure_logging(settings.log_level)
     db = database or Database(settings.database_url)
     identity = AuthentikIdentityProvider(settings, identity_client)
+    browser_oidc = account_oidc or AccountOIDC(settings, account_oidc_client)
+    owns_browser_oidc = account_oidc is None
     destinations = destination_policy or DestinationPolicy(settings)
     secrets = LocalEncryptedSecretProvider(settings.credential_encryption_key)
     mealie = MealieClient(settings, destinations, mealie_http_client)
     repository = ConnectionRepository(db.sessions)
     openapi = OpenAPILoader(mealie)
     connection_service = ConnectionService(repository, secrets, destinations, mealie, openapi)
+    account_store = AccountStore(db.sessions, settings.account_session_secret)
     executor = ConnectionExecutor(repository, secrets, mealie)
     recipes = RecipeService(executor)
     mealplans = MealPlanService(executor)
@@ -67,6 +75,8 @@ def create_app(
             async with mcp.session_manager.run():
                 yield
         finally:
+            if owns_browser_oidc:
+                await browser_oidc.aclose()
             await identity.aclose()
             await mealie.aclose()
             await db.aclose()
@@ -82,12 +92,15 @@ def create_app(
     app.state.settings = settings
     app.state.database = db
     app.state.identity = identity
+    app.state.account_oidc = browser_oidc
+    app.state.account_store = account_store
     app.state.mealie = mealie
     app.state.connections = repository
     app.state.connection_service = connection_service
     app.state.mcp = mcp
     app.include_router(health_router)
     app.include_router(connections_router)
+    app.include_router(account_router(settings, account_store, browser_oidc, connection_service))
     # The MCP SDK app publishes protected-resource metadata and is the final catch-all mount.
     app.mount("/", mcp_app)
     return app
