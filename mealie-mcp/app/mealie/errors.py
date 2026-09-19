@@ -14,6 +14,10 @@ class MealieNotFound(MealieError):
     pass
 
 
+class MealieConnectionNotConfigured(MealieNotFound):
+    """The authenticated principal has no default Mealie connection."""
+
+
 class MealieUnavailable(MealieError):
     pass
 

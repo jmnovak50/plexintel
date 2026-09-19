@@ -55,7 +55,7 @@ def create_app(
     recipes = RecipeService(executor)
     mealplans = MealPlanService(executor)
     shopping = ShoppingService(executor)
-    mcp = create_mcp_server(settings, identity, recipes, mealplans, shopping)
+    mcp = create_mcp_server(settings, identity, connection_service, recipes, mealplans, shopping)
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=settings.mcp_allowed_hosts,

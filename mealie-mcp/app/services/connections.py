@@ -11,7 +11,12 @@ from app.db.models import ConnectionStatus, MealieConnection, SchemaSource
 from app.db.repository import ConnectionRepository
 from app.mealie.capabilities import CAPABILITY_SPECS
 from app.mealie.client import MealieClient
-from app.mealie.errors import MealieError, MealieInvalidResponse, MealieNotFound
+from app.mealie.errors import (
+    MealieConnectionNotConfigured,
+    MealieError,
+    MealieInvalidResponse,
+    MealieNotFound,
+)
 from app.mealie.openapi import OpenAPILoader
 from app.mealie.resolver import CapabilityMap
 from app.security.destinations import DestinationPolicy
@@ -51,6 +56,15 @@ class ValidationResult(BaseModel):
     added_capabilities: list[str] = Field(default_factory=list)
     removed_capabilities: list[str] = Field(default_factory=list)
     schema_changed: bool = False
+
+
+class DefaultConnectionStatus(BaseModel):
+    name: str
+    server: str
+    status: ConnectionStatus
+    version: str | None
+    last_validated_at: datetime | None
+    capabilities: list[str]
 
 
 class ConnectionService:
@@ -160,6 +174,19 @@ class ConnectionService:
         connection = await self.get(principal, connection_id)
         return sorted(CapabilityMap.model_validate(connection.capabilities).names)
 
+    async def default_status(self, principal: Principal) -> DefaultConnectionStatus | None:
+        connection = await self.repository.default_for(principal)
+        if connection is None:
+            return None
+        return DefaultConnectionStatus(
+            name=connection.name,
+            server=connection.base_url,
+            status=connection.status,
+            version=connection.mealie_version,
+            last_validated_at=connection.last_validated_at,
+            capabilities=sorted(CapabilityMap.model_validate(connection.capabilities).names),
+        )
+
     async def _validate(self, base_url: str, token: str) -> dict[str, Any]:
         loaded = await self.openapi.load(base_url, token)
         identity_operation = loaded.capabilities.require("identity.self")
@@ -211,7 +238,7 @@ class ConnectionExecutor:
     ) -> Any:
         connection = await self.repository.default_for(principal)
         if connection is None:
-            raise MealieNotFound("No default Mealie connection is configured for this user")
+            raise MealieConnectionNotConfigured("No default Mealie connection is configured for this user")
         if connection.status not in {ConnectionStatus.active, ConnectionStatus.degraded}:
             raise MealieError("The default Mealie connection is not active")
         operation = CapabilityMap.model_validate(connection.capabilities).require(capability)
