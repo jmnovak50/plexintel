@@ -10,7 +10,8 @@ This follow-on starts from clean `main` / `origin/main` **2c1e06b**, containing 
 [location/API investigation](location-search.md), its adapter, diagnostics, tests and operational
 checklist. There were no uncommitted dependency changes. No applicable AGENTS.md was found.
 The earlier `07512b2` snapshot is historical and is not the rollback target for this work.
-Changes are restricted to `immich-mcp/`; no dependencies or OpenWebUI files were changed.
+The phase-2 baseline changed no OpenWebUI files. The later compound-album orchestration update adds
+a source-controlled OpenWebUI system prompt without modifying the running client.
 
 Read-only runtime refresh: `immich-mcp.service` PID **997241**, active since **09:34:31 CDT**
 September 13. This differs from the preceding investigation's PID; no restart was performed
@@ -91,6 +92,8 @@ unrelated permitted location/album calls still work.
 `search_library(filters, visual_preference, limit, continuation)` accepts one typed object with
 no arbitrary filter branches, owner/account/key or URL. All supplied predicates are required:
 
+- `album_id`: one resolved accessible private/shared-with-me album UUID, never a public share key.
+  It is authorized before search and again on continuation, and is ANDed with every other predicate.
 - `people_all`: all resolved IDs together; `people_any`: at least one; `people_none`: none of
   those labels. Operators combine with AND. IDs are deduplicated, at most 12 distinct records,
   and each record is authorized before search and again on continuation. Contradictory all/none
@@ -102,7 +105,8 @@ no arbitrary filter branches, owner/account/key or URL. All supplied predicates 
   is text evidence, not proof of location. `visual_preference` is optional assistant judgment and
   is never silently promoted into a smart-search request or used to weaken mandatory predicates.
 
-Legacy requests keep flat personIds (ALL), location, dates, OCR and numeric metadata pages.
+Legacy requests keep flat albumIds, personIds (ALL), location, dates, OCR and numeric metadata pages.
+Structured requests keep albumIds and people/location/date predicates inside `filter`.
 Multi-any, none, or all+any fail clearly in legacy mode. The shared **explicit** setting
 `IMMICH_SEARCH_API_MODE=structured` enables the validated v3.2 combinations. It applies to the
 new location/discovery adapter; older semantic, filename and recent tools retain their successful
@@ -188,7 +192,8 @@ find_people(name="Brigid")
 find_people(name="Jason", match="exact")
 # Confirm which records and whether Jason is the user's intended "me".
 get_location_suggestions(field="state")
-search_library(filters={people_all:[BRIGID_ID,JASON_ID], state:STORED_STATE,
+search_library(filters={album_id:RESOLVED_ALBUM_ID,
+                        people_all:[BRIGID_ID,JASON_ID], state:STORED_STATE,
                         start_date:"2026-01-01T00:00:00-10:00",
                         end_date:"2026-02-01T00:00:00-10:00", ocr:"welcome"},
                visual_preference="sunset", limit=12)

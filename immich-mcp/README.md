@@ -230,7 +230,7 @@ Authenticated private library:
 - `find_asset_by_filename`
 - `get_recent_assets`
 
-Image tools return native MCP `ImageContent` with Immich's MIME type. Image bodies are streamed: an oversized `Content-Length` is rejected before reading, and responses without a length are stopped as soon as accumulated decoded bytes exceed `MAX_IMAGE_BYTES`. Search supports smart text search plus city, state/province, country, person ID, capture-date range, media type, favorite status, and a bounded limit. Existing list/search/recent response shapes and preview defaults remain unchanged; these tools never inline images or establish exhaustive enumeration.
+Image tools return native MCP `ImageContent` with Immich's MIME type. Image bodies are streamed: an oversized `Content-Length` is rejected before reading, and responses without a length are stopped as soon as accumulated decoded bytes exceed `MAX_IMAGE_BYTES`. Search supports smart text search plus authorized album, city, state/province, country, person ID, capture-date range, media type, favorite status, and a bounded limit. Existing list/search/recent response shapes and preview defaults remain unchanged; these tools never inline images or establish exhaustive enumeration. The source-controlled OpenWebUI decision rules and manual compound-search validation are documented in [OpenWebUI compound-search orchestration](docs/openwebui-orchestration.md).
 
 ### Capture-location search
 
@@ -274,11 +274,13 @@ names need confirmation; account IDs, family roles and pet names are not face id
 changed automatically. Hidden people are excluded by default. Name search is capped upstream
 at 100 candidates, with explicit truncation; exact mode applies casefold equality to those candidates.
 
-After confirming two person IDs and stored location values, call `search_library`:
+After resolving an album title, confirming person IDs, and confirming stored location values,
+call `search_library` for the server-enforced intersection:
 
 ```json
 {
   "filters": {
+    "album_id": "<resolved authorized album ID>",
     "people_all": ["<confirmed person ID>", "<confirmed other person ID>"],
     "state": "Hawaii",
     "media_type": "IMAGE"
@@ -288,13 +290,16 @@ After confirming two person IDs and stored location values, call `search_library
 }
 ```
 
-All fields in `filters` are mandatory. `people_all` means together; `people_any` means either;
-`people_none` excludes available labels, without proving nobody else is visible. Multi-person
+All fields in `filters` are mandatory and combine with logical AND. `album_id` is an accessible
+private/shared-with-me album UUID, never a public share key. `people_all` means together;
+`people_any` means either; `people_none` excludes available labels, without proving nobody else is visible. Multi-person
 `any` and `none` require the validated v3.2 **structured** API mode; legacy rejects unsupported
 combinations without weakening them. Optional `visual_preference` does not invoke smart search.
 Required `query` uses one bounded semantic ranking; `ocr` is separate full-text evidence.
 Only metadata searches offer enumeration using the shared account-bound continuation contract.
 Smart-search failure remains an independent limitation; no unrestricted fallback occurs.
+Use `search_location_assets` only when location/date/type are the complete request. If a person or
+album is required, location-only results are not valid candidates.
 
 Reference follow-ups pass `reference_asset_id` plus `reference_mode`: `similar`, `near_time`,
 `afternoon`, or `same_place`. Access is checked again; local afternoons need a known IANA time

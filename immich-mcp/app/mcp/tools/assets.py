@@ -79,7 +79,10 @@ def register_asset_tools(
     ) -> dict[str, Any]:
         """Search one page of capture-location metadata, without downloading any images.
 
-        Use for 'taken in Hawaii' or any city/state/province/country, not visual descriptions.
+        Use only for location/date/type requests such as 'three photos taken in New Orleans'.
+        If the request also names a person or album, use search_library so every mandatory
+        constraint is enforced in one composed search; never use location-only results as filler.
+        This tool searches city/state/province/country capture metadata, not visual descriptions.
         Supply at least one exact stored location value (discover via get_location_suggestions).
         Location fields combine with AND. Omit media_type to enumerate photos AND videos;
         use IMAGE and limit=2 for a two-photo sample. Capture dates are inclusive ISO bounds;

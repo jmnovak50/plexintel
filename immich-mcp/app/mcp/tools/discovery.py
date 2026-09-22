@@ -166,11 +166,15 @@ def register_discovery_tools(
         limit: int | None = None,
         continuation: str | None = None,
     ) -> dict[str, Any]:
-        """Search accessible metadata with mandatory people/location/capture-date/OCR filters.
+        """Search accessible metadata with mandatory album/people/location/date/type/OCR filters.
 
-        Resolve person names with find_people first; people_all means together, people_any means
-        either, people_none excludes only available labels, never proves 'only us'. All supplied
-        filters combine with AND. Multi-any/none require validated structured v3.2 API mode;
+        Use this composed path whenever a request combines an album or named person with location,
+        dates, media type, OCR, or other criteria (for example Lucy in New Orleans within an album).
+        Resolve album titles with list_albums/get_album and person names with find_people first.
+        album_id is an authorized private/shared-with-me album UUID, never a public share key.
+        people_all means together, people_any means either, and people_none excludes only available
+        labels, never proves 'only us'. All supplied filters combine with AND. Multi-any/none require
+        validated structured v3.2 API mode;
         unsupported combinations fail without dropping filters. People predicates require person.read
         as well as asset.read. OCR is sign/text evidence, not visual content or capture location.
         Optional visual_preference (e.g. sunsets) leaves metadata constraints intact for assistant
@@ -197,7 +201,9 @@ def register_discovery_tools(
             )
         except ImmichError as exc:
             raise private_error(
-                exc, "library search (asset.read; person predicates also require person.read)", settings
+                exc,
+                "library search (asset.read; album scope also requires album.read; person predicates also require person.read)",
+                settings,
             ) from None
 
     @server.tool(annotations=READ_ONLY)
@@ -212,7 +218,7 @@ def register_discovery_tools(
     ) -> dict[str, Any]:
         """Collect a bounded, varied metadata candidate pool; download no images.
 
-        Requires capture-date start/end (or a temporal reference), with all mandatory people/place/OCR
+        Requires capture-date start/end (or a temporal reference), with all mandatory album/people/place/OCR
         constraints preserved. Split the interval into at most 6 bins, fetch newest matches per bin,
         at most 48 metadata candidates overall. This is a disclosed stratified sample, not the whole
         trip or global best. Use visual_preference for sunsets, expressions, scenes; required semantic

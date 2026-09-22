@@ -21,7 +21,7 @@ def uid(n):
     return f"00000000-0000-4000-8000-{n:012d}"
 
 
-P, Q, R, S, REF = [uid(i) for i in range(1, 6)]
+P, Q, R, S, REF, ALBUM = [uid(i) for i in range(1, 7)]
 
 
 def person(identifier=P, name="Élodie", hidden=False):
@@ -67,6 +67,12 @@ def allow_people(*ids):
     return [
         respx.get(BASE + "people/" + p).mock(return_value=httpx.Response(200, json=person(p))) for p in ids
     ]
+
+
+def allow_album(identifier=ALBUM, name="Lucy's Big Adventure"):
+    return respx.get(BASE + "albums/" + identifier).mock(
+        return_value=httpx.Response(200, json={"id": identifier, "albumName": name})
+    )
 
 
 def test_discovery_import_is_checkout():
@@ -207,6 +213,80 @@ async def test_all_people_location_dates_ocr_and_preference_preserved(service, s
     assert empty["assets"] == [] and empty["complete"] and smart.call_count == 0
 
 
+@pytest.mark.parametrize("mode", ["legacy", "structured"])
+@respx.mock
+async def test_album_person_new_orleans_intersection_is_one_fail_closed_search(service, settings, mode):
+    settings.immich_search_api_mode = mode
+    album = allow_album()
+    person_read = allow_people(P)[0]
+    matched = photo(uid(21), people=(P,), state="Louisiana")
+    matched["exifInfo"]["city"] = "New Orleans"
+    metadata = respx.post(BASE + "search/metadata").mock(
+        side_effect=[response([matched], mode=mode), response([], mode=mode)]
+    )
+    smart = respx.post(BASE + "search/smart").mock(return_value=httpx.Response(503))
+    arguments = {
+        "filters": {
+            "album_id": ALBUM,
+            "people_all": [P],
+            "city": "New Orleans",
+            "state": "Louisiana",
+            "country": "United States",
+            "start_date": "2025-01-01",
+            "end_date": "2025-12-31T23:59:59Z",
+            "media_type": "IMAGE",
+        }
+    }
+    result = await call(service, "search_library", **arguments)
+    empty = await call(service, "search_library", **arguments)
+    bodies = [json.loads(call.request.content) for call in metadata.calls]
+    for body in bodies:
+        if mode == "legacy":
+            assert body["albumIds"] == [ALBUM]
+            assert body["personIds"] == [P]
+            assert body["city"] == "New Orleans"
+            assert body["state"] == "Louisiana"
+            assert body["country"] == "United States"
+            assert body["type"] == "IMAGE"
+            assert body["takenAfter"] == "2025-01-01T00:00:00+00:00"
+            assert body["takenBefore"] == "2025-12-31T23:59:59+00:00"
+            assert not {"filter", "cursor", "orderBy"} & body.keys()
+        else:
+            assert body["filter"] == {
+                "albumIds": {"all": [ALBUM]},
+                "personIds": {"all": [P]},
+                "city": {"eq": "New Orleans"},
+                "state": {"eq": "Louisiana"},
+                "country": {"eq": "United States"},
+                "type": {"eq": "IMAGE"},
+                "takenAt": {
+                    "gte": "2025-01-01T00:00:00+00:00",
+                    "lte": "2025-12-31T23:59:59+00:00",
+                },
+            }
+            assert not {"albumIds", "personIds", "city", "state", "type", "page"} & body.keys()
+    assert [asset["id"] for asset in result["assets"]] == [matched["id"]]
+    assert result["assets"][0]["detectedPeople"][0]["id"] == P
+    assert result["searchContext"]["albumId"] == ALBUM
+    assert empty["assets"] == [] and empty["complete"]
+    assert smart.call_count == 0
+    assert album.call_count == person_read.call_count == metadata.call_count == 2
+
+
+@respx.mock
+async def test_album_id_validation_and_authorization_fail_closed(service):
+    metadata = respx.post(BASE + "search/metadata").mock(return_value=response([]))
+    with pytest.raises(ToolError, match="valid Immich UUIDv4"):
+        await call(service, "search_library", filters={"album_id": "not-an-album"})
+    denied = respx.get(BASE + "albums/" + ALBUM).mock(
+        return_value=httpx.Response(403, text="private-body-canary")
+    )
+    with pytest.raises(ToolError, match="ImmichForbidden") as error:
+        await call(service, "search_library", filters={"album_id": ALBUM, "city": "New Orleans"})
+    assert "album.read" in str(error.value) and "private-body-canary" not in str(error.value)
+    assert denied.call_count == 1 and metadata.call_count == 0
+
+
 @pytest.mark.parametrize(
     "predicates",
     [
@@ -280,10 +360,19 @@ async def test_contradictions_fail_before_upstream(service, filters):
 @respx.mock
 async def test_required_semantic_query_preserves_filters_and_pet_uncertainty(service, settings, mode):
     settings.immich_search_api_mode = mode
+    allow_album()
     allow_people(P)
     smart = respx.post(BASE + "search/smart").mock(return_value=response([photo(uid(33))], mode=mode))
     metadata = respx.post(BASE + "search/metadata").mock(return_value=response([]))
-    args = {"filters": {"query": "dog in snow", "people_all": [P], "state": "Hawaiʻi", "ocr": "sign"}}
+    args = {
+        "filters": {
+            "album_id": ALBUM,
+            "query": "dog in snow",
+            "people_all": [P],
+            "state": "Hawaiʻi",
+            "ocr": "sign",
+        }
+    }
     result = await call(service, "search_library", **args)
     assert result["partial"] and not result["complete"] and result["stopReason"] == "ranked_sample"
     assert "pet" in result["searchContext"]["detectionCaveat"]
@@ -291,6 +380,9 @@ async def test_required_semantic_query_preserves_filters_and_pet_uncertainty(ser
     assert body["query"] == "dog in snow" and "withPeople" not in body
     assert "orderBy" not in body and "cursor" not in body and "page" not in body
     assert (body["filter"]["state"]["eq"] if mode == "structured" else body["state"]) == "Hawaiʻi"
+    assert (body["filter"]["albumIds"] if mode == "structured" else body["albumIds"]) == (
+        {"all": [ALBUM]} if mode == "structured" else [ALBUM]
+    )
     smart.mock(return_value=httpx.Response(503, text="body-canary"))
     with pytest.raises(ToolError, match="HTTP 503.*operation=search/smart"):
         await call(service, "search_library", **args)
@@ -303,6 +395,7 @@ async def test_continuation_scope_reauthorization_duplicates_and_partial_failure
     service, settings, monkeypatch, mode, first, second
 ):
     settings.immich_search_api_mode = mode
+    album_read = allow_album()
     person_read = allow_people(P)[0]
     route = respx.post(BASE + "search/metadata").mock(
         side_effect=[
@@ -311,7 +404,12 @@ async def test_continuation_scope_reauthorization_duplicates_and_partial_failure
             httpx.Response(500, text="body-canary"),
         ]
     )
-    page = await call(service, "search_library", filters={"people_all": [P], "state": "Hawaiʻi"}, limit=2)
+    page = await call(
+        service,
+        "search_library",
+        filters={"album_id": ALBUM, "people_all": [P], "state": "Hawaiʻi"},
+        limit=2,
+    )
     handle = page["continuation"]
     monkeypatch.setattr(connection, "current_user", lambda: mcp_user("user-b"))
     with pytest.raises(ToolError, match="unavailable for this account"):
@@ -325,9 +423,11 @@ async def test_continuation_scope_reauthorization_duplicates_and_partial_failure
     assert page["returned"] == 1 and page["returnedSoFar"] == 2 and page["partial"]
     with pytest.raises(ToolError, match="previously returned 2 unique assets"):
         await call(service, "search_library", continuation=page["continuation"])
-    assert route.call_count == 3 and person_read.call_count == 3
+    assert route.call_count == 3 and person_read.call_count == album_read.call_count == 3
     bodies = [json.loads(c.request.content) for c in route.calls]
     field = "cursor" if mode == "structured" else "page"
+    album_filter = bodies[0]["filter"]["albumIds"] if mode == "structured" else bodies[0]["albumIds"]
+    assert album_filter == ({"all": [ALBUM]} if mode == "structured" else [ALBUM])
     assert bodies[1][field] == (first if mode == "structured" else int(first))
     assert bodies[2][field] == (second if mode == "structured" else int(second))
     assert all(
@@ -643,7 +743,14 @@ async def test_new_tool_schemas_and_guidance_are_self_contained(service):
     schema = json.dumps(tools["search_library"].input_schema)
     assert all(
         key in schema
-        for key in ["people_all", "people_any", "people_none", "reference_asset_id", "time_zone"]
+        for key in [
+            "album_id",
+            "people_all",
+            "people_any",
+            "people_none",
+            "reference_asset_id",
+            "time_zone",
+        ]
     )
     assert '"additionalProperties": false' in schema
     assert (
@@ -807,6 +914,7 @@ async def test_raw_tool_list_exposes_nested_contract_and_rejects_invalid_values_
         schema = tools["search_library"]["inputSchema"]
         assert schema["additionalProperties"] is False
         assert schema["$defs"]["DiscoveryFilters"]["additionalProperties"] is False
+        assert "album_id" in schema["$defs"]["DiscoveryFilters"]["properties"]
         assert "visual_preference" in schema["properties"]
         with capture_logs() as logs:
             invalid = await tool_call(
@@ -815,6 +923,45 @@ async def test_raw_tool_list_exposes_nested_contract_and_rejects_invalid_values_
         assert invalid.json()["result"]["isError"]
         assert "private-name-canary" not in invalid.text + json.dumps(logs) + caplog.text
     assert not respx.calls
+
+
+@respx.mock
+async def test_raw_mcp_compound_album_person_location_result(settings, monkeypatch):
+    settings.immich_search_api_mode = "structured"
+    album = allow_album()
+    person_read = allow_people(P)[0]
+    matched = photo(uid(98), people=(P,), state="Louisiana")
+    matched["exifInfo"]["city"] = "New Orleans"
+    metadata = respx.post(BASE + "search/metadata").mock(return_value=response([matched], mode="structured"))
+    app = await authenticated_app(settings, monkeypatch)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://mcp.example.com") as http,
+    ):
+        result = await tool_call(
+            http,
+            "user-a",
+            "search_library",
+            {
+                "filters": {
+                    "album_id": ALBUM,
+                    "people_all": [P],
+                    "city": "New Orleans",
+                    "media_type": "IMAGE",
+                }
+            },
+        )
+    wire = result.json()["result"]
+    assert not wire.get("isError", False)
+    assert wire["structuredContent"]["assets"][0]["id"] == matched["id"]
+    assert wire["structuredContent"]["assets"][0]["detectedPeople"][0]["id"] == P
+    body = json.loads(metadata.calls[0].request.content)
+    assert body["filter"]["albumIds"] == {"all": [ALBUM]}
+    assert body["filter"]["personIds"] == {"all": [P]}
+    assert body["filter"]["city"] == {"eq": "New Orleans"}
+    assert body["filter"]["type"] == {"eq": "IMAGE"}
+    assert metadata.calls[0].request.headers["x-api-key"] == "api-key-a"
+    assert album.call_count == person_read.call_count == metadata.call_count == 1
 
 
 @respx.mock

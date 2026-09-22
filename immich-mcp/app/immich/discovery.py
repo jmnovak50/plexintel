@@ -23,6 +23,10 @@ class DiscoveryFilters(BaseModel):
     """All supplied fields are mandatory; visual preferences belong outside this object."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    album_id: str | None = Field(
+        default=None,
+        description="Resolved accessible private/shared-with-me album ID; combined with every other filter",
+    )
     people_all: list[str] | None = Field(
         default=None, description="All these resolved Immich person IDs together"
     )
@@ -130,6 +134,8 @@ class PhotoDiscovery:
             location_value(getattr(f, name))
         for name in ["query", "ocr"]:
             text_value(getattr(f, name))
+        if f.album_id is not None:
+            f.album_id = checked_id(f.album_id)
         for name in ["people_all", "people_any", "people_none"]:
             values = getattr(f, name)
             if values is not None:
@@ -224,6 +230,8 @@ class PhotoDiscovery:
             "referenceAssetId": f.reference_asset_id,
             "detectionCaveat": DETECTION_CAVEAT,
         }
+        if f.album_id is not None:
+            context["albumId"] = f.album_id
         if reference:
             context["reference"] = compact_candidate(reference, include_hidden=f.include_hidden_people)
             if f.reference_mode == "same_place":
@@ -233,6 +241,9 @@ class PhotoDiscovery:
         return f, context
 
     def body(self, f: DiscoveryFilters, size: int, *, album_id: str | None = None) -> dict[str, Any]:
+        if album_id is not None and f.album_id is not None and album_id != f.album_id:
+            raise ImmichValidationError("Album scopes conflict; no album constraint was dropped")
+        effective_album_id = album_id or f.album_id
         filters = {
             k: v
             for k, v in {
@@ -259,7 +270,7 @@ class PhotoDiscovery:
             query=f.query,
             query_asset_id=f.reference_asset_id if f.reference_mode == "similar" else None,
             with_people=True,
-            album_id=album_id,
+            album_id=effective_album_id,
         )
 
     async def search(

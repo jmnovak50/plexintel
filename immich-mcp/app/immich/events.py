@@ -261,6 +261,10 @@ class EventExplorer:
             )
         f, context = await self.discovery.prepare(credential, scope.filters, None)
         scope.filters = f
+        if f.album_id is not None:
+            if scope.album_id is not None and checked_id(scope.album_id) != f.album_id:
+                raise ImmichValidationError("Event album scopes conflict; no album constraint was dropped")
+            scope.album_id = f.album_id
         source = {
             "kind": "album"
             if scope.album_id
