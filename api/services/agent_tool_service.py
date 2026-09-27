@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
@@ -16,6 +16,9 @@ from api.services.recommendation_query_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+WATCH_HISTORY_DEFAULT_LIMIT = 50
+WATCH_HISTORY_MAX_LIMIT = 200
 
 
 class AgentRecommendation(BaseModel):
@@ -122,7 +125,7 @@ class AgentUsersResponse(BaseModel):
     next_offset: Optional[int] = None
 
 
-class WatchHistoryItem(BaseModel):
+class CompactWatchHistoryItem(BaseModel):
     watch_id: int
     username: str
     friendly_name: Optional[str]
@@ -135,9 +138,18 @@ class WatchHistoryItem(BaseModel):
     media_type: Optional[str]
     show_title: Optional[str]
     title: Optional[str]
-    summary: Optional[str]
     season_number: Optional[int]
     episode_number: Optional[int]
+
+    @field_validator("watched_at")
+    @classmethod
+    def use_utc_for_stored_timestamps(cls, value: Optional[datetime]) -> Optional[datetime]:
+        # Tautulli ingestion stores UTC in a timestamp-without-time-zone column.
+        return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
+
+
+class WatchHistoryItem(CompactWatchHistoryItem):
+    summary: Optional[str]
     rating: float | None = None
     year: Optional[int]
     genres: Optional[str]
@@ -149,7 +161,7 @@ class WatchHistoryResponse(BaseModel):
     user: Optional[str]
     engaged_only: bool
     count: int
-    results: list[WatchHistoryItem]
+    results: list[WatchHistoryItem | CompactWatchHistoryItem]
     next_offset: Optional[int] = None
 
 
@@ -526,13 +538,29 @@ def list_agent_users(
 def get_agent_watch_history(
     *,
     user: Optional[str] = None,
-    limit: int = 200,
+    limit: int = WATCH_HISTORY_DEFAULT_LIMIT,
     engaged_only: bool = False,
     offset: int = 0,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    include_metadata: bool = False,
 ) -> WatchHistoryResponse:
-    if not 1 <= limit <= 200 or offset < 0:
+    if not 1 <= limit <= WATCH_HISTORY_MAX_LIMIT or offset < 0:
         raise HTTPException(status_code=400, detail="Invalid watch-history pagination")
-    sql = """
+
+    def utc_bound(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    since, until = utc_bound(since), utc_bound(until)
+    if since is not None and until is not None and since >= until:
+        raise HTTPException(status_code=400, detail="since must be earlier than until")
+
+    metadata_columns = ", summary, rating, year, genres, actors, directors" if include_metadata else ""
+    sql = f"""
         SELECT
             watch_id,
             username,
@@ -546,14 +574,9 @@ def get_agent_watch_history(
             media_type,
             show_title,
             title,
-            summary,
             season_number,
-            episode_number,
-            rating,
-            year,
-            genres,
-            actors,
-            directors
+            episode_number
+            {metadata_columns}
         FROM watch_history_enriched_v
     """
 
@@ -565,6 +588,12 @@ def get_agent_watch_history(
         params.append(user)
     if engaged_only:
         conditions.append("engaged = TRUE")
+    if since is not None:
+        conditions.append("watched_at >= %s")
+        params.append(since)
+    if until is not None:
+        conditions.append("watched_at < %s")
+        params.append(until)
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -584,18 +613,12 @@ def get_agent_watch_history(
             detail=f"Failed to fetch watch history: {exc}",
         ) from exc
 
-    items = [
-        WatchHistoryItem(
-            **{
-                **row,
-                "rating": normalize_float(row.get("rating")),
-            }
-        )
-        for row in rows
-    ]
-
-    next_offset = offset + limit if len(items) > limit else None
-    items = items[:limit]
+    next_offset = offset + limit if len(rows) > limit else None
+    rows = rows[:limit]
+    if include_metadata:
+        items = [WatchHistoryItem(**{**row, "rating": normalize_float(row.get("rating"))}) for row in rows]
+    else:
+        items = [CompactWatchHistoryItem(**row) for row in rows]
     return WatchHistoryResponse(
         next_offset=next_offset,
         user=user,

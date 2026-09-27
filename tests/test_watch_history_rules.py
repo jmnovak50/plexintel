@@ -320,7 +320,10 @@ class HistoryRouteTests(unittest.TestCase):
             response = self.client.get("/api/agent/watch-history", params={"user": "other", "offset": 200})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["next_offset"], 400)
-        history.assert_called_once_with(user="other", limit=200, engaged_only=False, offset=200)
+        history.assert_called_once_with(
+            user="other", limit=50, engaged_only=False, offset=200,
+            since=None, until=None, include_metadata=False,
+        )
 
     def test_users_pagination_reaches_service(self):
         payload = agent_tool_service.AgentUsersResponse(count=0, items=[], next_offset=None)

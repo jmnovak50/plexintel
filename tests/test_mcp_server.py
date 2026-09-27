@@ -1040,6 +1040,11 @@ class MCPServerTests(unittest.TestCase):
         self.assertFalse(history_tool.inputSchema["properties"]["engaged_only"]["default"])
         self.assertIn("next_offset", history_tool.outputSchema["properties"])
         self.assertIn("offset", history_tool.inputSchema["properties"])
+        self.assertFalse(history_tool.inputSchema["properties"]["include_metadata"]["default"])
+        self.assertEqual(history_tool.inputSchema["properties"]["limit"]["default"], 50)
+        self.assertEqual(history_tool.inputSchema["properties"]["limit"]["maximum"], 200)
+        self.assertIn("since", history_tool.inputSchema["properties"])
+        self.assertIn("until", history_tool.inputSchema["properties"])
         serialized_discovery = f"{initialize_result.model_dump()} {tools_result.model_dump()}"
         self.assertNotIn("private-sentinel", serialized_discovery)
         self.assertNotIn("jason@sheffieldave.com", serialized_discovery)
@@ -1219,8 +1224,39 @@ class MCPServerTests(unittest.TestCase):
                     self.assertFalse(result.isError)
                     self.assertEqual(result.structuredContent["user"], username)
                     history.assert_called_with(
-                        user=username, limit=200, engaged_only=False, offset=200,
+                        user=username, limit=50, engaged_only=False, offset=200,
+                        since=None, until=None, include_metadata=False,
                     )
+
+    def test_watch_history_compact_and_enriched_payloads_and_sql_bounds(self):
+        from api.services import agent_tool_service
+        from tests.test_agent_tool_service import FakeConnection
+        from tests.test_watch_history_compact import METADATA_FIELDS, make_history_row
+
+        with patch.object(
+            mcp_server, "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="static"),
+        ):
+            for extra, enriched in (({}, False), ({"include_metadata": True}, True)):
+                with self.subTest(enriched=enriched):
+                    conn = FakeConnection([make_history_row()])
+                    with patch.object(agent_tool_service, "connect_db", return_value=conn):
+                        result = anyio.run(lambda: self._exercise_single_tool_call(
+                            "get_watch_history", {
+                                "user": "other", "since": "2026-09-01T00:00:00-05:00",
+                                "until": "2026-10-01T00:00:00Z", **extra,
+                            },
+                            headers={"Authorization": "Bearer test-mcp-token"},
+                        ))
+                    self.assertFalse(result.isError)
+                    row = result.structuredContent["results"][0]
+                    self.assertEqual(METADATA_FIELDS.issubset(row), enriched)
+                    if not enriched:
+                        self.assertTrue(METADATA_FIELDS.isdisjoint(row))
+                        self.assertNotIn("large-metadata-sentinel", str(result.model_dump()))
+                    self.assertEqual(conn.cursor_obj.executed[0][1], [
+                        "other", datetime(2026, 9, 1, 5), datetime(2026, 10, 1), 51, 0,
+                    ])
 
     def test_watch_history_rejects_invalid_paging_without_service_access(self):
         with patch.object(

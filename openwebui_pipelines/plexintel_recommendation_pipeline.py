@@ -1,7 +1,7 @@
 """
 title: PlexIntel Recommendation Pipeline
 author: jmnovak
-version: 0.1.8
+version: 0.1.9
 requirements: requests
 description: Deterministic PlexIntel workflows with optional Ollama Gemma narration.
 """
@@ -104,7 +104,7 @@ class Pipeline:
             default="{}",
             description='JSON object mapping OpenWebUI email/name/id values to Plex usernames.',
         )
-        WATCH_HISTORY_TIMEZONE: str = Field(default="America/Chicago", description="Timezone for watch-history dates and naive timestamps.")
+        WATCH_HISTORY_TIMEZONE: str = Field(default="America/Chicago", description="Timezone for interpreting requested calendar windows; stored timestamps are UTC.")
         DEFAULT_LIMIT: int = Field(default=8, ge=1)
         MAX_LIMIT: int = Field(default=20, ge=1)
         POSTER_WIDTH: int = Field(default=180, ge=1, le=1200)
@@ -114,7 +114,7 @@ class Pipeline:
         self.id = "plexintel_recommendations"
         self.name = "PlexIntel Recommendations"
         self.description = "Deterministic PlexIntel recommendation, search, poster, and watch-history workflows."
-        self.version = "0.1.8"
+        self.version = "0.1.9"
         self.valves = self.Valves(
             PLEXINTEL_BASE_URL=os.getenv("PLEXINTEL_BASE_URL", "http://192.168.1.9:8489"),
             POSTER_BASE_URL=os.getenv("POSTER_BASE_URL", ""),
@@ -393,12 +393,12 @@ class Pipeline:
         failures = []
         for target in targets:
             try:
-                rows = self._fetch_history_for_user(target, engaged_only)
+                rows = self._fetch_history_for_user(target, engaged_only, since=start, until=end)
                 merged.extend(rows)
             except (PipelineHttpError, ValueError) as exc:
                 failures.append(f"`{target}`: {exc}")
 
-        # Filter only after every user's pages have been fetched and merged.
+        # SQL applies the window first; verify it again after merging all users.
         items = []
         undated = 0
         for row in merged:
@@ -492,14 +492,23 @@ class Pipeline:
             r"who\s+(?:has\s+been|is|was)\s+active)\b", prompt, re.I,
         ))
 
-    def _fetch_history_for_user(self, username: str, engaged_only: bool) -> list[dict[str, Any]]:
+    def _fetch_history_for_user(
+        self, username: str, engaged_only: bool, *,
+        since: datetime | None = None, until: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         items = []
         seen_ids = set()
         offset = 0
         while True:
-            page = self._plex_get("/api/agent/watch-history", params={
-                "user": username, "limit": 200, "engaged_only": engaged_only, "offset": offset,
-            })
+            params = {
+                "user": username, "limit": 50, "engaged_only": engaged_only,
+                "offset": offset, "include_metadata": False,
+            }
+            if since is not None:
+                params["since"] = since.isoformat()
+            if until is not None:
+                params["until"] = until.isoformat()
+            page = self._plex_get("/api/agent/watch-history", params=params)
             rows = list(page.get("results") or [])
             if page.get("user") != username or any(row.get("username") != username for row in rows):
                 raise ValueError("history response did not match the requested username")
@@ -512,7 +521,7 @@ class Pipeline:
                     items.append(row)
             next_offset = page.get("next_offset")
             if next_offset is None:
-                if "next_offset" not in page and len(rows) >= 200:
+                if "next_offset" not in page and len(rows) >= 50:
                     raise ValueError("history may be truncated; update the PlexIntel API for pagination")
                 return items
             if not isinstance(next_offset, int) or next_offset <= offset:
@@ -546,7 +555,7 @@ class Pipeline:
             return None
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo(self.valves.WATCH_HISTORY_TIMEZONE))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             return None
 

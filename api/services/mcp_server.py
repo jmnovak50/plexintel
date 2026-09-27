@@ -31,6 +31,8 @@ from api.services.agent_tool_service import (
     LibrarySearchResponse,
     RecentLibraryAdditionsResponse,
     WatchHistoryResponse,
+    WATCH_HISTORY_DEFAULT_LIMIT,
+    WATCH_HISTORY_MAX_LIMIT,
     get_agent_library_item,
     get_agent_recommendation_score,
     get_agent_recommendations,
@@ -117,9 +119,10 @@ Treat "all watch history", "everyone's watch history", "all users", "server-wide
 "who has been active?", "most popular by viewing", and "most watched over the last N days"
 as server-wide requests.
 1. Call list_users without username/friendly_name filters and retrieve every page.
-2. For EVERY returned user, call get_watch_history with that explicit username.
-3. Merge the returned histories, retrieving all pages needed for the requested period.
-4. Apply the requested date/time window AFTER merging.
+2. For EVERY returned user, call get_watch_history with that explicit username and
+   the same since/until bounds. Time filtering happens in SQL before pagination.
+3. Merge the returned histories, retrieving all pages for the requested period.
+4. Verify the requested date/time window after merging.
 5. Apply title/rating_key filters, aggregation, counting, ranking, and grouping to the
    merged dataset. For show-level results, group episodes by show_title.
 6. Distinguish playback events (watch_id records) from unique viewers (distinct usernames).
@@ -133,6 +136,10 @@ list_users returned multiple users. Never say "nobody watched it", "only this us
 watched", or "no other users were active" unless all users were queried and the
 returned history covers the requested period. Failed/access-denied queries are not
 empty histories: report incomplete coverage. Respect existing access controls.
+Responses are compact by default (50 events; maximum 200 per page). Keep
+include_metadata=false for history and global queries; full metadata is opt-in only.
+Use since (inclusive) and until (exclusive) for SQL time filtering. Offset-free timestamps
+mean UTC. Keep the same bounds and filters on every page and for every user.
 Use next_offset to retrieve remaining pages; never present a truncated sample as
 complete history or a definitive ranking. State any unresolved coverage limitation.
 
@@ -1585,12 +1592,17 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_watch_history",
         description=(
-            "Return enriched Plex playback events for ONE user. Determine scope first and "
+            "Return compact Plex playback events for ONE user by default (50 per page; max 200). "
+            "Pass since (inclusive) and until (exclusive) to filter in SQL before pagination. "
+            "ISO timestamps without offsets mean UTC. Full enrichment is opt-in via "
+            "include_metadata=true; leave it false for viewing history and global aggregation. "
+            "Determine scope first and "
             "prefer an explicit resolved username, including for first-person history. "
             "Omitting user scopes only to the authenticated user, NEVER all users. "
             "For server-wide history, title viewer lookups, active users, or viewing popularity: "
             "call list_users and this tool for EVERY username, retrieve pages via next_offset, "
-            "merge, then apply date/time and title/rating_key filters and aggregation. Validate "
+            "use the same SQL time bounds for every user, merge, then verify the window and "
+            "apply title/rating_key filters and aggregation. Validate "
             "returned usernames and coverage before making claims about other users or nobody "
             "watching. Keep engaged_only=false to include partial plays unless explicitly asked "
             "for engaged/completed viewing. Engaged means >=50%, not completed. Group title "
@@ -1608,7 +1620,7 @@ def _build_mcp_server() -> FastMCP:
                 "never server-wide. Call separately for every list_users username for all users."
             )),
         ] = None,
-        limit: Annotated[int, Field(ge=1, le=200)] = 200,
+        limit: Annotated[int, Field(ge=1, le=WATCH_HISTORY_MAX_LIMIT)] = WATCH_HISTORY_DEFAULT_LIMIT,
         engaged_only: Annotated[
             bool,
             Field(description=(
@@ -1617,10 +1629,14 @@ def _build_mcp_server() -> FastMCP:
             )),
         ] = False,
         offset: Annotated[int, Field(ge=0)] = 0,
+        since: Annotated[Optional[datetime], Field(description="Inclusive SQL time bound; UTC if no offset.")] = None,
+        until: Annotated[Optional[datetime], Field(description="Exclusive SQL time bound; UTC if no offset.")] = None,
+        include_metadata: Annotated[bool, Field(description="Opt in to summary, rating, year, genres, actors, and directors.")] = False,
     ) -> WatchHistoryResponse:
         resolved_user = _resolve_mcp_user(user)
         return get_agent_watch_history(
-            user=resolved_user, limit=limit, engaged_only=engaged_only, offset=offset
+            user=resolved_user, limit=limit, engaged_only=engaged_only, offset=offset,
+            since=since, until=until, include_metadata=include_metadata,
         )
 
     return mcp

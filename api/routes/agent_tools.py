@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Query
@@ -12,6 +13,8 @@ from api.services.agent_tool_service import (
     LibrarySearchResponse,
     RecentLibraryAdditionsResponse,
     WatchHistoryResponse,
+    WATCH_HISTORY_DEFAULT_LIMIT,
+    WATCH_HISTORY_MAX_LIMIT,
     get_agent_library_item,
     get_agent_recommendation_score,
     get_agent_recommendations,
@@ -242,15 +245,21 @@ def agent_watch_history(
         description="Optional username; if omitted, returns watches for all users.",
     ),
     limit: int = Query(
-        200,
+        WATCH_HISTORY_DEFAULT_LIMIT,
         ge=1,
-        le=200,
-        description="Maximum number of rows to return (1–200).",
+        le=WATCH_HISTORY_MAX_LIMIT,
+        description="Maximum playback events per page (1–200; default 50).",
     ),
     engaged_only: bool = Query(
         False,
         description="If true, only include >=50% engagement, not necessarily completed watches.",
     ),
     offset: int = Query(0, ge=0, description="Use next_offset to retrieve remaining playback events."),
+    since: Optional[datetime] = Query(None, description="Inclusive SQL time bound; ISO timestamp, UTC if no offset."),
+    until: Optional[datetime] = Query(None, description="Exclusive SQL time bound; ISO timestamp, UTC if no offset."),
+    include_metadata: bool = Query(False, description="Opt in to summary, rating, year, genres, actors, and directors."),
 ):
-    return get_agent_watch_history(user=user, limit=limit, engaged_only=engaged_only, offset=offset)
+    return get_agent_watch_history(
+        user=user, limit=limit, engaged_only=engaged_only, offset=offset,
+        since=since, until=until, include_metadata=include_metadata,
+    )

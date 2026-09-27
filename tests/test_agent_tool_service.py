@@ -355,6 +355,7 @@ class AgentToolServiceTests(unittest.TestCase):
                 user="jmnovak",
                 limit=20,
                 engaged_only=True,
+                include_metadata=True,
             )
 
         self.assertEqual(response.count, 1)
