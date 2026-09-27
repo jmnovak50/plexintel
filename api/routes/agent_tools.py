@@ -120,8 +120,8 @@ def agent_search_library(
     ),
     sort_by: str = Query(
         "title",
-        description="Sort field: 'title' or 'year'",
-        pattern="^(title|year)$",
+        description="Sort field: title, year, or rating (metadata, not viewing popularity).",
+        pattern="^(title|year|rating)$",
     ),
     sort_dir: str = Query(
         "asc",
@@ -230,8 +230,9 @@ def agent_list_users(
         le=1000,
         description="Maximum number of users to return (1–1000).",
     ),
+    offset: int = Query(0, ge=0, description="Use next_offset to retrieve remaining users."),
 ):
-    return list_agent_users(username=username, friendly_name=friendly_name, limit=limit)
+    return list_agent_users(username=username, friendly_name=friendly_name, limit=limit, offset=offset)
 
 
 @router.get("/watch-history", response_model=WatchHistoryResponse)
@@ -248,7 +249,8 @@ def agent_watch_history(
     ),
     engaged_only: bool = Query(
         False,
-        description="If true, only include watches with >=50% completion.",
+        description="If true, only include >=50% engagement, not necessarily completed watches.",
     ),
+    offset: int = Query(0, ge=0, description="Use next_offset to retrieve remaining playback events."),
 ):
-    return get_agent_watch_history(user=user, limit=limit, engaged_only=engaged_only)
+    return get_agent_watch_history(user=user, limit=limit, engaged_only=engaged_only, offset=offset)

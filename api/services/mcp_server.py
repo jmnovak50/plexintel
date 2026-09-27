@@ -90,10 +90,71 @@ POSTER_RESPONSE_INSTRUCTIONS = (
 )
 
 USER_IDENTITY_INSTRUCTIONS = (
-    "User-specific tools (get_recommendations, get_recommendation_score, get_watch_history) "
+    "Recommendation tools (get_recommendations, get_recommendation_score) "
     "automatically scope to the authenticated user. Do not pass a user argument for "
-    '"my recommendations", "what should I watch", or similar first-person requests.'
+    '"my recommendations", "what should I watch", or similar recommendation requests. '
+    "For watch history, follow WATCH HISTORY RULES and prefer explicit resolved usernames."
 )
+
+WATCH_HISTORY_INSTRUCTIONS = """
+WATCH HISTORY RULES — HIGH PRIORITY
+These rules take precedence over conflicting watch-history guidance above.
+Determine USER-SCOPED versus SERVER-WIDE / MULTI-USER scope before calling get_watch_history.
+
+USER-SCOPED HISTORY
+For "What have I watched?", "Show my watch history", "What has Ava watched?", or
+"Show Paul's recent viewing", resolve the intended Plex user first. Match named users
+against list_users usernames/friendly names; use authenticated identity for first-person
+requests. Do not guess or choose the first user. Ask if resolution is ambiguous.
+Pass the explicit resolved username in get_watch_history's user argument, even for
+the authenticated user when known. Filter dates/times and present only that user's records.
+Omitting user is a compatibility fallback for the authenticated user, NEVER all users.
+
+SERVER-WIDE / MULTI-USER HISTORY
+Treat "all watch history", "everyone's watch history", "all users", "server-wide history",
+"what has everyone watched?", "what was watched this week?", "who watched <title>?",
+"has anyone watched <title>?", "most watched movie/show", "what are people watching?",
+"who has been active?", "most popular by viewing", and "most watched over the last N days"
+as server-wide requests.
+1. Call list_users without username/friendly_name filters and retrieve every page.
+2. For EVERY returned user, call get_watch_history with that explicit username.
+3. Merge the returned histories, retrieving all pages needed for the requested period.
+4. Apply the requested date/time window AFTER merging.
+5. Apply title/rating_key filters, aggregation, counting, ranking, and grouping to the
+   merged dataset. For show-level results, group episodes by show_title.
+6. Distinguish playback events (watch_id records) from unique viewers (distinct usernames).
+7. Never treat the authenticated user's history as server-wide history.
+
+CRITICAL SCOPE VALIDATION
+Inspect usernames in each response and the merged data. A user-scoped response proves
+only that user's activity. One username does not mean other users had no activity.
+A server-wide answer is incomplete if only one user's history was inspected when
+list_users returned multiple users. Never say "nobody watched it", "only this user
+watched", or "no other users were active" unless all users were queried and the
+returned history covers the requested period. Failed/access-denied queries are not
+empty histories: report incomplete coverage. Respect existing access controls.
+Use next_offset to retrieve remaining pages; never present a truncated sample as
+complete history or a definitive ranking. State any unresolved coverage limitation.
+
+TITLE VIEWER LOOKUPS
+"Who watched Spa Weekend?", "Has anyone watched Lanterns?", and "Who watched this even
+partially?" require the server-wide workflow. Search merged histories by title or
+rating_key (and show_title for series). Group repeated playback events by username
+when answering who watched it, unless individual sessions are useful.
+
+ENGAGED VS PARTIAL
+Keep engaged_only=false unless explicitly asked for completed/engaged viewing.
+Retain partial plays and report them when relevant; distinguish engaged, completed,
+and partial/abandoned playback. engaged=true means >=50%, not a completed watch.
+For completed-only requests, also inspect percent_complete.
+
+POPULARITY TERMINOLOGY
+"highest rated" means rating metadata; "most watched" means watch-history playback
+activity; "most viewers" counts distinct usernames; "most plays" counts playback
+records. "popular" in a viewing context uses watch history. If ambiguous and the
+distinction matters, explain the available measures. Never call an item "most popular"
+solely because it has the highest rating.
+""".strip()
 
 RECENT_ADDITIONS_UI_INSTRUCTIONS = (
     "For a recent-additions poster feed in clients that render native MCP images, call "
@@ -1211,6 +1272,7 @@ def _build_mcp_server() -> FastMCP:
             USER_IDENTITY_INSTRUCTIONS,
             POSTER_RESPONSE_INSTRUCTIONS,
             RECENT_ADDITIONS_UI_INSTRUCTIONS,
+            WATCH_HISTORY_INSTRUCTIONS,
         )
         if part
     ]
@@ -1260,7 +1322,11 @@ def _build_mcp_server() -> FastMCP:
 
     @mcp.tool(
         name="list_users",
-        description="List PlexIntel users by username or friendly name.",
+        description=(
+            "List PlexIntel users by username or friendly name to resolve named users. "
+            "For server-wide watch history, omit name filters, retrieve every page using "
+            "next_offset, then call get_watch_history for EVERY returned username."
+        ),
         structured_output=True,
         annotations=tool_annotations,
         security_schemes=oauth_tool_security_schemes(),
@@ -1268,9 +1334,12 @@ def _build_mcp_server() -> FastMCP:
     def mcp_list_users(
         username: Optional[str] = None,
         friendly_name: Optional[str] = None,
-        limit: int = 200,
+        limit: Annotated[int, Field(ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(ge=0)] = 0,
     ) -> AgentUsersResponse:
-        return list_agent_users(username=username, friendly_name=friendly_name, limit=limit)
+        return list_agent_users(
+            username=username, friendly_name=friendly_name, limit=limit, offset=offset
+        )
 
     @mcp.tool(
         name="get_recommendations",
@@ -1330,7 +1399,10 @@ def _build_mcp_server() -> FastMCP:
         name="search_library",
         description=(
             "Search the PlexIntel library catalog by free text. Results include rating_key values; "
-            "call get_poster_image with a rating_key when the user asks to see a poster."
+            "call get_poster_image with a rating_key when the user asks to see a poster. "
+            "Use sort_by='rating', sort_dir='desc' for highest-rated items (q may be empty). "
+            "Rating metadata answers highest-rated questions, not most-watched or most-viewers "
+            "questions; those require watch history for every user returned by list_users."
         ),
         structured_output=True,
         annotations=tool_annotations,
@@ -1513,20 +1585,43 @@ def _build_mcp_server() -> FastMCP:
     @mcp.tool(
         name="get_watch_history",
         description=(
-            "Return enriched Plex watch history records for the authenticated user. "
-            "Omit user to scope to the authenticated user."
+            "Return enriched Plex playback events for ONE user. Determine scope first and "
+            "prefer an explicit resolved username, including for first-person history. "
+            "Omitting user scopes only to the authenticated user, NEVER all users. "
+            "For server-wide history, title viewer lookups, active users, or viewing popularity: "
+            "call list_users and this tool for EVERY username, retrieve pages via next_offset, "
+            "merge, then apply date/time and title/rating_key filters and aggregation. Validate "
+            "returned usernames and coverage before making claims about other users or nobody "
+            "watching. Keep engaged_only=false to include partial plays unless explicitly asked "
+            "for engaged/completed viewing. Engaged means >=50%, not completed. Group title "
+            "viewers by username; distinguish playback counts, unique viewers, and ratings."
         ),
         structured_output=True,
         annotations=tool_annotations,
         security_schemes=oauth_tool_security_schemes(),
     )
     def mcp_get_watch_history(
-        user: Optional[str] = None,
-        limit: int = 200,
-        engaged_only: bool = False,
+        user: Annotated[
+            Optional[str],
+            Field(description=(
+                "Explicit resolved Plex username. Omitted means the authenticated user only, "
+                "never server-wide. Call separately for every list_users username for all users."
+            )),
+        ] = None,
+        limit: Annotated[int, Field(ge=1, le=200)] = 200,
+        engaged_only: Annotated[
+            bool,
+            Field(description=(
+                "Keep false to retain partial playback. True selects >=50% engagement, "
+                "which does not prove completion."
+            )),
+        ] = False,
+        offset: Annotated[int, Field(ge=0)] = 0,
     ) -> WatchHistoryResponse:
         resolved_user = _resolve_mcp_user(user)
-        return get_agent_watch_history(user=resolved_user, limit=limit, engaged_only=engaged_only)
+        return get_agent_watch_history(
+            user=resolved_user, limit=limit, engaged_only=engaged_only, offset=offset
+        )
 
     return mcp
 

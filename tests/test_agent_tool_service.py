@@ -320,7 +320,7 @@ class AgentToolServiceTests(unittest.TestCase):
         self.assertEqual(response.items[0].friendly_name, "Jason")
         executed_sql, executed_params = conn.cursor_obj.executed[0]
         self.assertIn("username ILIKE %s", executed_sql)
-        self.assertEqual(executed_params, ["%j%", 10])
+        self.assertEqual(executed_params, ["%j%", 11, 0])
 
     def test_get_agent_watch_history_maps_rows(self):
         conn = FakeConnection(
@@ -362,7 +362,7 @@ class AgentToolServiceTests(unittest.TestCase):
         executed_sql, executed_params = conn.cursor_obj.executed[0]
         self.assertIn("username = %s", executed_sql)
         self.assertIn("engaged = TRUE", executed_sql)
-        self.assertEqual(executed_params, ["jmnovak", 20])
+        self.assertEqual(executed_params, ["jmnovak", 21, 0])
 
 
 if __name__ == "__main__":

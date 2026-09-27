@@ -96,7 +96,8 @@ Changing PlexIntel's JWT issuer to the dedicated ChatGPT Authentik provider does
 After setup:
 
 - "What should I watch?" auto-scopes to the authenticated Plex user
-- The LLM does not need to pass a `user` argument for first-person requests
+- Recommendation tools can omit `user` for first-person requests; watch history should pass the explicit resolved username when known
+- Server-wide history queries every listed user and reports incomplete coverage if access is denied; see [watch-history rules and pagination](watch-history.md)
 - Non-admin users cannot query another user's recommendations or watch history
 - Admin users (`users.is_admin = true`) can still query other users explicitly
 

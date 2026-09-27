@@ -119,6 +119,7 @@ class AgentUser(BaseModel):
 class AgentUsersResponse(BaseModel):
     count: int
     items: List[AgentUser]
+    next_offset: Optional[int] = None
 
 
 class WatchHistoryItem(BaseModel):
@@ -149,6 +150,7 @@ class WatchHistoryResponse(BaseModel):
     engaged_only: bool
     count: int
     results: list[WatchHistoryItem]
+    next_offset: Optional[int] = None
 
 
 def normalize_float(value):
@@ -317,9 +319,10 @@ def search_agent_library(
         sql += " AND media_type = %s"
         params.append(media_type)
 
-    order_col = "year" if sort_by == "year" else "title"
+    order_col = sort_by if sort_by in {"year", "rating"} else "title"
     order_dir = "ASC" if sort_dir == "asc" else "DESC"
-    sql += f" ORDER BY {order_col} {order_dir}, title ASC LIMIT %s"
+    nulls = " NULLS LAST" if order_col == "rating" else ""
+    sql += f" ORDER BY {order_col} {order_dir}{nulls}, title ASC LIMIT %s"
     params.append(limit)
 
     with _get_conn() as conn:
@@ -480,7 +483,10 @@ def list_agent_users(
     username: Optional[str] = None,
     friendly_name: Optional[str] = None,
     limit: int = 200,
+    offset: int = 0,
 ) -> AgentUsersResponse:
+    if not 1 <= limit <= 1000 or offset < 0:
+        raise HTTPException(status_code=400, detail="Invalid user pagination")
     sql = """
         SELECT
             username,
@@ -497,8 +503,8 @@ def list_agent_users(
         sql += " AND friendly_name ILIKE %s"
         params.append(f"%{friendly_name}%")
 
-    sql += " ORDER BY username ASC LIMIT %s"
-    params.append(limit)
+    sql += " ORDER BY username ASC LIMIT %s OFFSET %s"
+    params.extend([limit + 1, offset])
 
     with _get_conn() as conn:
         with conn.cursor() as cur:
@@ -512,7 +518,9 @@ def list_agent_users(
         )
         for row in rows
     ]
-    return AgentUsersResponse(count=len(items), items=items)
+    next_offset = offset + limit if len(items) > limit else None
+    items = items[:limit]
+    return AgentUsersResponse(count=len(items), items=items, next_offset=next_offset)
 
 
 def get_agent_watch_history(
@@ -520,7 +528,10 @@ def get_agent_watch_history(
     user: Optional[str] = None,
     limit: int = 200,
     engaged_only: bool = False,
+    offset: int = 0,
 ) -> WatchHistoryResponse:
+    if not 1 <= limit <= 200 or offset < 0:
+        raise HTTPException(status_code=400, detail="Invalid watch-history pagination")
     sql = """
         SELECT
             watch_id,
@@ -558,8 +569,8 @@ def get_agent_watch_history(
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
 
-    sql += " ORDER BY watched_at DESC NULLS LAST LIMIT %s"
-    params.append(limit)
+    sql += " ORDER BY watched_at DESC NULLS LAST, watch_id DESC LIMIT %s OFFSET %s"
+    params.extend([limit + 1, offset])
 
     try:
         with _get_conn() as conn:
@@ -583,7 +594,10 @@ def get_agent_watch_history(
         for row in rows
     ]
 
+    next_offset = offset + limit if len(items) > limit else None
+    items = items[:limit]
     return WatchHistoryResponse(
+        next_offset=next_offset,
         user=user,
         engaged_only=engaged_only,
         count=len(items),

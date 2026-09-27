@@ -264,7 +264,7 @@ class OpenWebUIPipelineTests(unittest.TestCase):
         self.assertIn("## PlexIntel Watch History", response)
         self.assertIn("**Scope:** `jmnovak`", response)
         self.assertIn("**Heat**", response)
-        self.assertIn(("GET", "/api/agent/watch-history", {"limit": 1, "user": "jmnovak"}), pipe.calls)
+        self.assertIn(("GET", "/api/agent/watch-history", {"limit": 200, "user": "jmnovak", "engaged_only": False, "offset": 0}), pipe.calls)
 
     def test_list_users_workflow_renders_users(self):
         pipe = FakePipeline()

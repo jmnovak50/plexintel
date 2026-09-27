@@ -1033,6 +1033,13 @@ class MCPServerTests(unittest.TestCase):
             initialize_result, tools_result, _ = anyio.run(self._exercise_unauthenticated_protocol)
 
         self.assertTrue(initialize_result.serverInfo.name)
+        self.assertIn(mcp_server.WATCH_HISTORY_INSTRUCTIONS, initialize_result.instructions)
+        history_tool = next(tool for tool in tools_result.tools if tool.name == "get_watch_history")
+        self.assertIn("EVERY username", history_tool.description)
+        self.assertIn("NEVER all users", history_tool.description)
+        self.assertFalse(history_tool.inputSchema["properties"]["engaged_only"]["default"])
+        self.assertIn("next_offset", history_tool.outputSchema["properties"])
+        self.assertIn("offset", history_tool.inputSchema["properties"])
         serialized_discovery = f"{initialize_result.model_dump()} {tools_result.model_dump()}"
         self.assertNotIn("private-sentinel", serialized_discovery)
         self.assertNotIn("jason@sheffieldave.com", serialized_discovery)
@@ -1195,6 +1202,40 @@ class MCPServerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_watch_history_explicit_users_and_paging_reach_service(self):
+        with patch.object(
+            mcp_server, "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="static"),
+        ):
+            with patch.object(mcp_server, "get_agent_watch_history") as history:
+                for username in ("jmnovak", "other"):
+                    history.return_value = WatchHistoryResponse(
+                        user=username, engaged_only=False, count=0, results=[],
+                    )
+                    result = anyio.run(lambda: self._exercise_single_tool_call(
+                        "get_watch_history", {"user": username, "offset": 200},
+                        headers={"Authorization": "Bearer test-mcp-token"},
+                    ))
+                    self.assertFalse(result.isError)
+                    self.assertEqual(result.structuredContent["user"], username)
+                    history.assert_called_with(
+                        user=username, limit=200, engaged_only=False, offset=200,
+                    )
+
+    def test_watch_history_rejects_invalid_paging_without_service_access(self):
+        with patch.object(
+            mcp_server, "get_mcp_runtime_settings",
+            return_value=self._enabled_settings(auth_mode="static"),
+        ):
+            with patch.object(mcp_server, "get_agent_watch_history") as history:
+                for arguments in ({"offset": -1}, {"limit": 0}, {"limit": 201}):
+                    result = anyio.run(lambda: self._exercise_single_tool_call(
+                        "get_watch_history", {"user": "jmnovak", **arguments},
+                        headers={"Authorization": "Bearer test-mcp-token"},
+                    ))
+                    self.assertTrue(result.isError)
+                history.assert_not_called()
+
     def test_resolve_mcp_user_auto_scopes_jwt_identity(self):
         token = mcp_server.mcp_auth_context.set(
             MCPAuthContext(
@@ -1349,7 +1390,7 @@ class MCPServerTests(unittest.TestCase):
 
         self.assertFalse(result.isError)
         self.assertEqual(result.structuredContent["items"][0]["username"], "jmnovak")
-        data_access.assert_called_once_with(username=None, friendly_name=None, limit=200)
+        data_access.assert_called_once_with(username=None, friendly_name=None, limit=200, offset=0)
 
     def test_mcp_jwt_or_static_falls_back_to_static_key(self):
         app = mcp_server.MCPAccessControlApp(mcp_server.mcp_runtime)

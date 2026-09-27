@@ -1,7 +1,7 @@
 """
 title: PlexIntel Recommendation Pipeline
 author: jmnovak
-version: 0.1.7
+version: 0.1.8
 requirements: requests
 description: Deterministic PlexIntel workflows with optional Ollama Gemma narration.
 """
@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Generator, Iterator, Optional, Union
 
 from pydantic import BaseModel, Field
@@ -102,6 +104,7 @@ class Pipeline:
             default="{}",
             description='JSON object mapping OpenWebUI email/name/id values to Plex usernames.',
         )
+        WATCH_HISTORY_TIMEZONE: str = Field(default="America/Chicago", description="Timezone for watch-history dates and naive timestamps.")
         DEFAULT_LIMIT: int = Field(default=8, ge=1)
         MAX_LIMIT: int = Field(default=20, ge=1)
         POSTER_WIDTH: int = Field(default=180, ge=1, le=1200)
@@ -111,7 +114,7 @@ class Pipeline:
         self.id = "plexintel_recommendations"
         self.name = "PlexIntel Recommendations"
         self.description = "Deterministic PlexIntel recommendation, search, poster, and watch-history workflows."
-        self.version = "0.1.7"
+        self.version = "0.1.8"
         self.valves = self.Valves(
             PLEXINTEL_BASE_URL=os.getenv("PLEXINTEL_BASE_URL", "http://192.168.1.9:8489"),
             POSTER_BASE_URL=os.getenv("POSTER_BASE_URL", ""),
@@ -120,6 +123,7 @@ class Pipeline:
             OLLAMA_MODEL=os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud"),
             ENABLE_GEMMA_NARRATION=_env_bool("ENABLE_GEMMA_NARRATION", True),
             USER_ALIASES_JSON=os.getenv("USER_ALIASES_JSON", "{}"),
+            WATCH_HISTORY_TIMEZONE=os.getenv("WATCH_HISTORY_TIMEZONE", "America/Chicago"),
             DEFAULT_LIMIT=_env_int("DEFAULT_LIMIT", 8),
             MAX_LIMIT=_env_int("MAX_LIMIT", 20),
             POSTER_WIDTH=_env_int("POSTER_WIDTH", 180),
@@ -149,6 +153,18 @@ class Pipeline:
 
         try:
             workflow = self._select_workflow(prompt)
+            if workflow == "highest_rated":
+                params = {"q": "", "sort_by": "rating", "sort_dir": "desc", "limit": self._parse_limit(prompt)}
+                media_type = self._view_to_media_type(self._parse_view(prompt))
+                if media_type:
+                    params["media_type"] = media_type
+                result = self._plex_get("/api/agent/search", params=params)
+                lines = ["## Highest Rated", "", "Ranked by metadata rating.", ""]
+                for item in result.get("items") or []:
+                    lines.append(f"- {self._format_item_detail(item)} — rating {item.get('rating') if item.get('rating') is not None else 'unavailable'}")
+                return "\n".join(lines)
+            if workflow == "popular_measure":
+                return "Popularity can mean most plays or most unique viewers. Ask for either measure; highest rated uses metadata ratings."
             if workflow == "list_users":
                 return self._handle_list_users()
             if workflow == "search":
@@ -185,10 +201,16 @@ class Pipeline:
 
     def _select_workflow(self, prompt: str) -> str:
         text = prompt.lower()
+        if self._history_is_server_wide(prompt) or re.search(r"\b(watch history|watched|viewing history|recent viewing)\b", text):
+            # A plain user-list request is not a request for viewing activity.
+            if not re.fullmatch(r"(?:list|show)(?: me)? (?:all )?(?:plex )?users[?.!]?", text.strip()):
+                return "watch_history"
         if re.search(r"\b(list|show|who are|what are)\b.*\b(users|plex users)\b", text):
             return "list_users"
-        if re.search(r"\b(watch history|watched|recently watched|viewing history)\b", text):
-            return "watch_history"
+        if re.search(r"\bhighest[- ]rated\b", text):
+            return "highest_rated"
+        if re.search(r"\bpopular\b", text):
+            return "popular_measure"
         if "poster" in text and self._extract_rating_key(prompt) is not None:
             return "item_poster"
         if re.search(r"\b(search|find|look up)\b", text):
@@ -335,34 +357,265 @@ class Pipeline:
         return "\n".join(line for line in lines if line is not None)
 
     def _handle_watch_history(self, prompt: str, body: dict[str, Any]) -> str:
+        # Resolve scope before issuing any history request.
         users = self._fetch_users()
-        first_person = self._mentions_first_person(prompt)
-        named_resolution = self._resolve_user(
-            prompt,
-            body.get("user") or {},
-            users,
-            require_user=first_person,
-        )
-        if not named_resolution.ok and named_resolution.reason:
-            return self._render_user_clarification(named_resolution, users)
+        server_wide = self._history_is_server_wide(prompt)
+        username = None
+        if not server_wide:
+            identity_prompt = re.sub(r"\b(show|tell|give)\s+me\b", r"\1", prompt, flags=re.I)
+            resolution = self._resolve_user(
+                identity_prompt, body.get("user") or {}, users, require_user=True,
+            )
+            if not resolution.ok:
+                return self._render_user_clarification(resolution, users)
+            username = resolution.username
+
+        viewer_query = bool(re.search(r"\b(who\s+(?:has\s+)?watched|(?:has|did)\s+anyone\s+(?:watched|watch))\b", prompt, re.I))
+        rating_key = self._extract_rating_key(prompt)
+        title = self._history_title(prompt) if viewer_query and rating_key is None else None
+        if viewer_query and rating_key is None and (not title or title.casefold() in {"this", "it", "that"}):
+            return "Which title or rating_key should I check across all users?"
+
+        # A title such as "Yesterday" or "Engaged" is not a history filter.
+        filter_prompt = re.sub(re.escape(title), "", prompt, count=1, flags=re.I) if title else prompt
+        try:
+            start, end, window_label = self._history_window(filter_prompt)
+        except ValueError as exc:
+            return str(exc)
+        partial_requested = bool(re.search(
+            r"\b(?:even|including|include|and|or)\s+partial(?:ly)?\b|"
+            r"\bnot\s+(?:completed|finished|engaged)\b", filter_prompt, re.I,
+        ))
+        completed_only = not partial_requested and bool(re.search(r"\b(completed|finished)\b", filter_prompt, re.I))
+        engaged_only = not partial_requested and (completed_only or bool(re.search(r"\bengaged\b", filter_prompt, re.I)))
+        targets = [u["username"] for u in users] if server_wide else [username]
+        merged = []
+        failures = []
+        for target in targets:
+            try:
+                rows = self._fetch_history_for_user(target, engaged_only)
+                merged.extend(rows)
+            except (PipelineHttpError, ValueError) as exc:
+                failures.append(f"`{target}`: {exc}")
+
+        # Filter only after every user's pages have been fetched and merged.
+        items = []
+        undated = 0
+        for row in merged:
+            if start is not None or end is not None:
+                watched = self._history_timestamp(row.get("watched_at"))
+                if watched is None:
+                    undated += 1
+                    continue
+                if (start is not None and watched < start) or (end is not None and watched >= end):
+                    continue
+            if rating_key is not None and str(row.get("rating_key")) != str(rating_key):
+                continue
+            if title and not any(str(row.get(key) or "").casefold() == title.casefold() for key in ("title", "show_title")):
+                continue
+            if completed_only and float(row.get("percent_complete") or 0) < 1:
+                continue
+            items.append(row)
 
         limit = self._parse_limit(prompt, default=10)
-        params: dict[str, Any] = {"limit": limit}
-        if named_resolution.username:
-            params["user"] = named_resolution.username
-        if re.search(r"\b(engaged|completed|finished)\b", prompt, flags=re.I):
-            params["engaged_only"] = True
+        scope = f"`{username}`" if username else f"all users ({len(targets) - len(failures)}/{len(targets)} queried successfully)"
+        lines = [
+            "## PlexIntel Watch History", "", f"**Scope:** {scope}",
+            f"**Window:** {window_label}",
+            f"**Viewing:** {'completed (100%)' if completed_only else 'engaged (>=50%)' if engaged_only else 'all playback, including partial plays'}", "",
+        ]
+        if failures:
+            lines += ["**Incomplete coverage:** " + "; ".join(failures),
+                      "Results below cover successful queries only; no server-wide absence or definitive ranking can be established.", ""]
+        if undated:
+            lines += [f"Incomplete time coverage: excluded {undated} playback events with unknown times from the requested window.", ""]
+        if not items:
+            lines.append("No matching playback events in the retrieved data." if failures or undated else "No playback events matched this request.")
+            return "\n".join(lines)
 
-        history = self._plex_get("/api/agent/watch-history", params=params)
-        return self._render_watch_history(
-            username=named_resolution.username,
-            items=list(history.get("results") or [])[:limit],
-            engaged_only=bool(params.get("engaged_only")),
-        )
+        popularity = bool(re.search(r"\b(most watched|most viewers|most plays|most popular|popular by viewing)\b", prompt, re.I))
+        active = bool(re.search(r"\bwho\s+(?:has\s+been|is|was)\s+active\b", prompt, re.I))
+        if popularity and not viewer_query:
+            view = self._parse_view(prompt)
+            if re.search(r"\b(?:most watched|most popular)\s+(?:tv\s+)?show\b|\bshow\s+(?:with|has)\s+(?:the\s+)?most", prompt, re.I):
+                view = "shows"
+            if view == "movies":
+                items = [row for row in items if row.get("media_type") == "movie"]
+            elif view in {"shows", "episodes"}:
+                items = [row for row in items if row.get("media_type") in {"episode", "show"}]
+            groups = {}
+            for row in items:
+                label = (row.get("show_title") or row.get("title")) if view == "shows" else row.get("title")
+                key = label if view == "shows" else row.get("rating_key")
+                group = groups.setdefault(key, {"label": label or str(key), "plays": 0, "viewers": set()})
+                group["plays"] += 1
+                group["viewers"].add(row["username"])
+            by_viewers = bool(re.search(r"\bmost viewers\b", prompt, re.I))
+            ranked = sorted(groups.values(), key=lambda g: (-(len(g["viewers"]) if by_viewers else g["plays"]), -g["plays"], g["label"]))
+            lines.append("Ranked by " + ("unique viewers." if by_viewers else "playback events."))
+            for index, group in enumerate(ranked[:limit], 1):
+                lines.append(f'{index}. **{group["label"]}** — {group["plays"]} playback events; {len(group["viewers"])} unique viewers')
+            if not ranked:
+                lines.append("No matching playback events for this media type.")
+        elif viewer_query or active:
+            groups = {}
+            for row in items:
+                groups.setdefault(row["username"], []).append(row)
+            if viewer_query:
+                lines.append(f"**Title:** {title or f'rating_key {rating_key}'}")
+            lines.append(f"{len(items)} playback events; {len(groups)} unique viewers.")
+            for user, rows in sorted(groups.items()):
+                completed = sum(float(row.get("percent_complete") or 0) >= 1 for row in rows)
+                engaged = sum(row.get("engaged") is True or float(row.get("percent_complete") or 0) >= .5 for row in rows)
+                partial = sum(row.get("percent_complete") is not None and float(row["percent_complete"]) < 1 for row in rows)
+                lines.append(f"- `{user}`: {len(rows)} playback events; {engaged} engaged; {completed} completed; {partial} partial.")
+            lines.append("Engaged (>=50%) can overlap partial (<100%) playback.")
+        else:
+            items.sort(key=lambda row: self._history_timestamp(row.get("watched_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            lines.append(f"{len(items)} playback events; {len({row['username'] for row in items})} unique viewers. Showing {min(limit, len(items))}.")
+            for index, row in enumerate(items[:limit], 1):
+                pct = row.get("percent_complete")
+                progress = f"{float(pct) * 100:.0f}% complete" if pct is not None else "unknown completion"
+                title_label = row.get("title") or f"rating_key {row.get('rating_key')}"
+                if row.get("show_title"):
+                    title_label = f"{row['show_title']} — {title_label}"
+                status = "completed" if pct is not None and float(pct) >= 1 else "partial" if pct is not None else "unknown"
+                lines.append(f"{index}. **{title_label}** — `{row['username']}` — {row.get('watched_at') or 'unknown time'} — {progress} ({status})")
+        return "\n".join(lines)
+
+    def _history_is_server_wide(self, prompt: str) -> bool:
+        return bool(re.search(
+            r"\b(all\s+(?:watch\s+history|users)|everyone(?:'s)?|everybody|server[- ]wide|"
+            r"who\s+(?:has\s+)?watched|(?:has|did)\s+anyone\s+(?:watched|watch)|"
+            r"what\s+(?:was|has\s+been)\s+watched|most\s+(?:watched|viewers|plays|popular)|"
+            r"popular\s+by\s+viewing|people\s+(?:are\s+)?watching|"
+            r"who\s+(?:has\s+been|is|was)\s+active)\b", prompt, re.I,
+        ))
+
+    def _fetch_history_for_user(self, username: str, engaged_only: bool) -> list[dict[str, Any]]:
+        items = []
+        seen_ids = set()
+        offset = 0
+        while True:
+            page = self._plex_get("/api/agent/watch-history", params={
+                "user": username, "limit": 200, "engaged_only": engaged_only, "offset": offset,
+            })
+            rows = list(page.get("results") or [])
+            if page.get("user") != username or any(row.get("username") != username for row in rows):
+                raise ValueError("history response did not match the requested username")
+            for row in rows:
+                watch_id = row.get("watch_id")
+                if watch_id is None:
+                    raise ValueError("history response is missing playback event IDs")
+                if watch_id not in seen_ids:
+                    seen_ids.add(watch_id)
+                    items.append(row)
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                if "next_offset" not in page and len(rows) >= 200:
+                    raise ValueError("history may be truncated; update the PlexIntel API for pagination")
+                return items
+            if not isinstance(next_offset, int) or next_offset <= offset:
+                raise ValueError("invalid history pagination")
+            offset = next_offset
 
     def _fetch_users(self) -> list[dict[str, Any]]:
-        payload = self._plex_get("/api/agent/users", params={"limit": 1000})
-        return list(payload.get("items") or [])
+        users = {}
+        offset = 0
+        while True:
+            payload = self._plex_get("/api/agent/users", params={"limit": 1000, "offset": offset})
+            rows = list(payload.get("items") or [])
+            for user in rows:
+                if not user.get("username"):
+                    raise ValueError("user listing is missing a username")
+                users[user["username"]] = user
+            next_offset = payload.get("next_offset")
+            if next_offset is None:
+                if "next_offset" not in payload and len(rows) >= 1000:
+                    raise ValueError("user listing may be truncated; update the PlexIntel API for pagination")
+                return list(users.values())
+            if not isinstance(next_offset, int) or next_offset <= offset:
+                raise ValueError("invalid user pagination")
+            offset = next_offset
+
+    def _history_now(self) -> datetime:
+        return datetime.now(ZoneInfo(self.valves.WATCH_HISTORY_TIMEZONE))
+
+    def _history_timestamp(self, value: Any) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo(self.valves.WATCH_HISTORY_TIMEZONE))
+        except (TypeError, ValueError):
+            return None
+
+    def _history_window(self, prompt: str) -> tuple[datetime | None, datetime | None, str]:
+        now = self._history_now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        text = prompt.casefold()
+        start = end = None
+        match = re.search(r"\b(?:last|past)\s+(\d+)\s+(hours?|days?|weeks?)\b", text)
+        dates = re.findall(
+            r"\b\d{4}-\d{2}-\d{2}(?:(?:t| )\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:\d{2})?)?\b",
+            text,
+        )
+        if dates:
+            parsed = [datetime.fromisoformat(value.replace("z", "+00:00")) for value in dates]
+            parsed = [value if value.tzinfo else value.replace(tzinfo=now.tzinfo) for value in parsed]
+            if len(parsed) == 2 and re.search(r"\b(between|from)\b", text):
+                start = parsed[0]
+                end = parsed[1] + (timedelta(days=1) if len(dates[1]) == 10 else timedelta())
+            elif len(parsed) == 1:
+                date_pattern = re.escape(dates[0])
+                if re.search(r"\b(?:since|after)\s+" + date_pattern, text):
+                    after_step = timedelta(days=1) if len(dates[0]) == 10 else timedelta(microseconds=1)
+                    start = parsed[0] + (after_step if re.search(r"\bafter\s+" + date_pattern, text) else timedelta())
+                elif re.search(r"\b(?:before|until)\s+" + date_pattern, text):
+                    end = parsed[0]
+                elif re.search(r"\bon\s+" + date_pattern, text) and len(dates[0]) == 10:
+                    start, end = parsed[0], parsed[0] + timedelta(days=1)
+                else:
+                    raise ValueError("Use on, since, before, or between with YYYY-MM-DD dates.")
+            else:
+                raise ValueError("Use a single date or a between/from date range.")
+        elif match:
+            amount = int(match.group(1))
+            if amount < 1:
+                raise ValueError("The history window must be positive.")
+            unit = match.group(2).rstrip("s") + "s"
+            start, end = now - timedelta(**{unit: amount}), now
+        elif "yesterday" in text:
+            start, end = today - timedelta(days=1), today
+        elif "today" in text:
+            start, end = today, now
+        elif "this week" in text:
+            start, end = today - timedelta(days=today.weekday()), now
+        elif "last week" in text:
+            end = today - timedelta(days=today.weekday())
+            start = end - timedelta(days=7)
+        elif "this month" in text:
+            start, end = today.replace(day=1), now
+        elif "last month" in text:
+            end = today.replace(day=1)
+            start = (end - timedelta(days=1)).replace(day=1)
+        elif re.search(r"\b(?:last|past|this)\s+(?:\d+|year|weekend|quarter)|\b(?:since|before|after|during|on)\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|January|February|March|April|May|June|July|August|September|October|November|December)\b", text, re.I):
+            raise ValueError("Use today, yesterday, this/last week or month, last N days/hours/weeks, or YYYY-MM-DD dates for a history window.")
+        if start is not None and end is not None and start >= end:
+            raise ValueError("The history window must end after it starts.")
+        label = "all available history" if start is None and end is None else f"{start.isoformat() if start else 'earliest'} to {end.isoformat() if end else 'latest'} (end exclusive)"
+        return start, end, label
+
+    def _history_title(self, prompt: str) -> str | None:
+        match = re.search(r"\b(?:who\s+(?:has\s+)?watched|(?:has|did)\s+anyone\s+(?:watched|watch))\s+(.+)", prompt, re.I)
+        if not match:
+            return None
+        title = match.group(1).strip().rstrip("?.!")
+        quoted = re.match(r'["“](.+?)["”]', title)
+        if quoted:
+            return quoted.group(1)
+        title = re.split(r"\s+(?:(?:over|in)\s+the\s+)?(?:last\s+\d+\s+(?:days?|hours?|weeks?)|past\s+\d+\s+(?:days?|hours?|weeks?)|this\s+(?:week|month)|last\s+(?:week|month)|today|yesterday|since\s+\d{4}-|before\s+\d{4}-|after\s+\d{4}-|on\s+\d{4}-|between\s+\d{4}-|from\s+\d{4}-|even\s+partially|including\s+partial|(?:completed|finished|engaged)\s+only)", title, maxsplit=1, flags=re.I)[0]
+        return title.strip().strip('"').rstrip(",?.!")
 
     def _resolve_user(
         self,
@@ -411,7 +664,7 @@ class Pipeline:
         return UserResolution(username=None)
 
     def _mentions_first_person(self, prompt: str) -> bool:
-        return bool(re.search(r"\b(me|my|mine|myself)\b", prompt, flags=re.I))
+        return bool(re.search(r"\b(i|me|my|mine|myself)\b", prompt, flags=re.I))
 
     def _load_aliases(self) -> dict[str, str]:
         try:
@@ -853,32 +1106,6 @@ class Pipeline:
         for index, item in enumerate(items, start=1):
             lines.append(f"{index}. {self._format_item_detail(item)}")
         return "\n".join(lines).strip()
-
-    def _render_watch_history(
-        self,
-        *,
-        username: str | None,
-        items: list[dict[str, Any]],
-        engaged_only: bool,
-    ) -> str:
-        scope = f"`{username}`" if username else "all users"
-        lines = [
-            "## PlexIntel Watch History",
-            "",
-            f"**Scope:** {scope}  ",
-            f"**Engaged only:** `{str(engaged_only).lower()}`",
-            "",
-        ]
-        if not items:
-            lines.append("No watch-history rows matched this request.")
-        for index, item in enumerate(items, start=1):
-            watched = item.get("watched_at") or "unknown time"
-            title = item.get("title") or f"rating_key {item.get('rating_key')}"
-            user = item.get("username") or "unknown user"
-            pct = item.get("percent_complete")
-            pct_text = f"{float(pct) * 100:.0f}%" if isinstance(pct, (int, float)) else "n/a"
-            lines.append(f"{index}. **{title}** - `{user}` - `{watched}` - `{pct_text}` complete")
-        return "\n".join(lines)
 
     def _format_item_detail(self, item: dict[str, Any]) -> str:
         title = item.get("title") or f"rating_key {item.get('rating_key')}"
