@@ -1,0 +1,16 @@
+---
+name: "FIntel"
+guid: "d84462bb-88da-4af1-952c-c10887752a28"
+version: "1.0.0.0"
+targetAbi: "12.1.0.0"
+framework: "net10.0"
+overview: "Personalized movie similarity from the FIntel recommendation service"
+description: >
+  Adds user-specific FIntel movie rankings to Jellyfin's native More Like This
+  results without modifying Jellyfin clients.
+category: "General"
+owner: "FIntel"
+artifacts:
+  - "Jellyfin.Plugin.FIntel.dll"
+changelog: >
+  Initial movie-only Jellyfin 12.1 vertical slice.

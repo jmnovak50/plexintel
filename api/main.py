@@ -20,6 +20,7 @@ from api.routes import auth_routes
 from api.routes import admin_routes
 from api.routes import agent_tools
 from api.routes import feedback_routes  # <- wherever your route is
+from api.routes import fintel_routes
 from api.routes import library_catalog
 from api.routes import plex_oauth_routes
 from api.routes import poster_routes
@@ -134,6 +135,7 @@ app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
 app.include_router(plex_oauth_routes.router, prefix="/api/auth", tags=["auth"])
 app.include_router(rec_router, prefix="/api")               # ✅ only once
 app.include_router(public_router)                           # ✅ public routes, no prefix
+app.include_router(fintel_routes.router)
 app.include_router(feedback_routes.router, prefix="/api")
 app.include_router(admin_routes.router, prefix="/api")
 app.include_router(rag_routes.router, prefix="/api")

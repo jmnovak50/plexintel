@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>FIntel</title>
+</head>
+<body>
+<div id="FIntelConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <h1>FIntel</h1>
+            <p>Personalized movie results for Jellyfin’s native More Like This surface.</p>
+            <form id="FIntelConfigForm">
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input id="FIntelEnabled" type="checkbox" is="emby-checkbox">
+                        <span>Enable FIntel</span>
+                    </label>
+                    <div class="fieldDescription">The provider also must be selected for each movie library.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="FIntelBackendUrl">Backend URL</label>
+                    <input id="FIntelBackendUrl" type="url" is="emby-input" required placeholder="http://fintel.example:8000/">
+                    <div class="fieldDescription">Absolute HTTP or HTTPS URL. API keys are never placed in URLs.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="FIntelApiToken">API token</label>
+                    <input id="FIntelApiToken" type="password" is="emby-input" autocomplete="new-password">
+                    <div class="fieldDescription">Stored in Jellyfin’s plugin configuration XML; server administrators can read that file.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="FIntelTimeout">Timeout (seconds)</label>
+                    <input id="FIntelTimeout" type="number" is="emby-input" min="1" max="120" required>
+                </div>
+                <h2>User mappings</h2>
+                <p>Map each Jellyfin user GUID to the corresponding FIntel username.</p>
+                <div id="FIntelMappings"></div>
+                <button id="FIntelAddMapping" is="emby-button" type="button" class="raised emby-button"><span>Add mapping</span></button>
+                <div style="margin-top: 2em">
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button"><span>Save</span></button>
+                    <button id="FIntelTest" is="emby-button" type="button" class="raised block emby-button"><span>Test connectivity</span></button>
+                </div>
+                <p id="FIntelTestResult" role="status"></p>
+            </form>
+        </div>
+    </div>
+    <script>
+        (function () {
+            'use strict';
+            var pluginId = 'd84462bb-88da-4af1-952c-c10887752a28';
+            var page = document.querySelector('#FIntelConfigPage');
+            var mappings = page.querySelector('#FIntelMappings');
+
+            function addMapping(mapping) {
+                var row = document.createElement('div');
+                row.className = 'fintelMapping';
+                row.style.marginBottom = '1em';
+                row.innerHTML = '<div class="inputContainer"><label class="inputLabel">Jellyfin user GUID</label>'
+                    + '<input class="fintelUserId" type="text" is="emby-input" required></div>'
+                    + '<div class="inputContainer"><label class="inputLabel">FIntel username</label>'
+                    + '<input class="fintelUsername" type="text" is="emby-input" required></div>'
+                    + '<button class="fintelRemove raised emby-button" is="emby-button" type="button"><span>Remove</span></button>';
+                row.querySelector('.fintelUserId').value = mapping && mapping.JellyfinUserId || '';
+                row.querySelector('.fintelUsername').value = mapping && mapping.FIntelUsername || '';
+                row.querySelector('.fintelRemove').addEventListener('click', function () { row.remove(); });
+                mappings.appendChild(row);
+            }
+
+            function readMappings() {
+                var result = [];
+                var seen = {};
+                mappings.querySelectorAll('.fintelMapping').forEach(function (row) {
+                    var id = row.querySelector('.fintelUserId').value.trim().toLowerCase();
+                    var username = row.querySelector('.fintelUsername').value.trim();
+                    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+                        throw new Error('Every Jellyfin user ID must be a valid GUID.');
+                    }
+                    if (!username) { throw new Error('FIntel usernames cannot be blank.'); }
+                    if (seen[id]) { throw new Error('Duplicate Jellyfin user IDs are not allowed.'); }
+                    seen[id] = true;
+                    result.push({ JellyfinUserId: id, FIntelUsername: username });
+                });
+                return result;
+            }
+
+            page.addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    page.querySelector('#FIntelEnabled').checked = !!config.Enabled;
+                    page.querySelector('#FIntelBackendUrl').value = config.BackendUrl || '';
+                    page.querySelector('#FIntelApiToken').value = config.ApiToken || '';
+                    page.querySelector('#FIntelTimeout').value = config.RequestTimeoutSeconds || 10;
+                    mappings.innerHTML = '';
+                    (config.UserMappings || []).forEach(addMapping);
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+            page.querySelector('#FIntelAddMapping').addEventListener('click', function () { addMapping(null); });
+            page.querySelector('#FIntelConfigForm').addEventListener('submit', function (event) {
+                event.preventDefault();
+                try {
+                    var timeout = Number(page.querySelector('#FIntelTimeout').value);
+                    var backendUrl = page.querySelector('#FIntelBackendUrl').value.trim();
+                    if (!/^https?:\/\/[^\s]+$/i.test(backendUrl)) { throw new Error('Backend URL must be absolute HTTP or HTTPS.'); }
+                    if (timeout < 1 || timeout > 120) { throw new Error('Timeout must be between 1 and 120 seconds.'); }
+                    var userMappings = readMappings();
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        config.Enabled = page.querySelector('#FIntelEnabled').checked;
+                        config.BackendUrl = backendUrl;
+                        config.ApiToken = page.querySelector('#FIntelApiToken').value;
+                        config.RequestTimeoutSeconds = timeout;
+                        config.UserMappings = userMappings;
+                        return ApiClient.updatePluginConfiguration(pluginId, config);
+                    }).then(Dashboard.processPluginConfigurationUpdateResult).catch(function (error) {
+                        Dashboard.hideLoadingMsg();
+                        page.querySelector('#FIntelTestResult').textContent = error.message || 'Unable to save configuration.';
+                    });
+                } catch (error) {
+                    page.querySelector('#FIntelTestResult').textContent = error.message;
+                }
+                return false;
+            });
+
+            page.querySelector('#FIntelTest').addEventListener('click', function () {
+                var output = page.querySelector('#FIntelTestResult');
+                output.textContent = 'Testing…';
+                ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('FIntel/HealthCheck'), dataType: 'json' })
+                    .then(function (result) {
+                        output.textContent = result.message + ' (' + result.elapsedMilliseconds + ' ms)';
+                    }).catch(function () { output.textContent = 'Connectivity test failed.'; });
+            });
+        }());
+    </script>
+</div>
+</body>
+</html>

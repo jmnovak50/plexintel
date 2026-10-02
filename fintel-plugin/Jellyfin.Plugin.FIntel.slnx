@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Jellyfin.Plugin.FIntel/Jellyfin.Plugin.FIntel.csproj" />
+  <Project Path="Jellyfin.Plugin.FIntel.Tests/Jellyfin.Plugin.FIntel.Tests.csproj" />
+</Solution>
