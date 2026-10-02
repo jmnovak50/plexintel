@@ -9,11 +9,11 @@
     "versions": [
       {
         "version": "1.0.0.0",
-        "changelog": "Initial movie-only Jellyfin 12.1 vertical slice.",
+        "changelog": "Add FIntel Jellyfin repository packaging",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/jmnovak50/plexintel/releases/download/fintel-v1.0.0.0/FIntel_1.0.0.0.zip",
-        "checksum": "dc34602deb9dc8a92346d90ad2d11431",
-        "timestamp": "2026-10-02T13:07:45Z"
+        "checksum": "c3914b06029916731ec8b666b54aa28c",
+        "timestamp": "2026-10-02T18:17:24Z"
       }
     ]
   }
