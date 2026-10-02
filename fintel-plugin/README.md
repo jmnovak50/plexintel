@@ -16,7 +16,7 @@ The plugin references `Jellyfin.Controller` and `Jellyfin.Model` 12.1.0 and is
 not intended for Jellyfin 10.x, 12.0, or a later ABI without rebuilding and
 retesting.
 
-## Build and install
+## Build
 
 ```bash
 dotnet restore Jellyfin.Plugin.FIntel.slnx
@@ -24,10 +24,34 @@ dotnet test Jellyfin.Plugin.FIntel.slnx -c Release
 dotnet build Jellyfin.Plugin.FIntel/Jellyfin.Plugin.FIntel.csproj -c Release
 ```
 
-Copy the resulting `Jellyfin.Plugin.FIntel.dll` from
-`Jellyfin.Plugin.FIntel/bin/Release/net10.0/` into a dedicated directory under
-Jellyfin's plugins directory, then restart Jellyfin. A packaged release uses
-the ABI and artifact metadata in `build.yaml`.
+### Normal installation
+
+In Jellyfin, open **Dashboard → Plugins → Repositories**, add this repository
+URL, and save:
+
+```text
+https://raw.githubusercontent.com/jmnovak50/plexintel/main/fintel-plugin/manifest.json
+```
+
+Then open **Catalog → FIntel → Install** and restart Jellyfin if prompted.
+Release packages are immutable GitHub Release assets; the stable repository
+manifest keeps older versions under the same FIntel entry.
+
+### Development/manual installation
+
+Copy the compiled DLL into its own directory beneath Jellyfin's plugins
+directory:
+
+```text
+Jellyfin plugins directory/
+    FIntel/
+        Jellyfin.Plugin.FIntel.dll
+```
+
+The compiled DLL is at
+`Jellyfin.Plugin.FIntel/bin/Release/net10.0/Jellyfin.Plugin.FIntel.dll`. Restart
+Jellyfin after copying or replacing it. A packaged release uses the ABI and
+artifact metadata in `build.yaml`.
 
 ## Configure
 

@@ -1,0 +1,148 @@
+name: FIntel Release
+
+on:
+  push:
+    tags:
+      - "fintel-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fintel-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#fintel-v}"
+          if [[ "${tag}" == "${version}" || ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a tag such as fintel-v1.0.0.0" >&2
+            exit 1
+          fi
+
+          project_version="$(python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          print(ET.parse('fintel-plugin/Jellyfin.Plugin.FIntel/Jellyfin.Plugin.FIntel.csproj').findtext('.//Version'))
+          PY
+          )"
+          build_version="$(sed -n 's/^version: "\([^"]*\)"/\1/p' fintel-plugin/build.yaml)"
+          if [[ "${version}" != "${project_version}" || "${version}" != "${build_version}" ]]; then
+            echo "Tag version ${version}, project version ${project_version}, and build.yaml version ${build_version} must match" >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "zip_name=FIntel_${version}.zip" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore
+        run: dotnet restore fintel-plugin/Jellyfin.Plugin.FIntel.slnx
+
+      - name: Test
+        run: dotnet test fintel-plugin/Jellyfin.Plugin.FIntel.slnx -c Release --no-restore --nologo
+
+      - name: Build
+        run: dotnet build fintel-plugin/Jellyfin.Plugin.FIntel/Jellyfin.Plugin.FIntel.csproj -c Release --no-restore --nologo
+
+      - name: Package deterministically
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ZIP_NAME: ${{ steps.version.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          package_dir="${RUNNER_TEMP}/fintel-package"
+          zip_path="${RUNNER_TEMP}/${ZIP_NAME}"
+          mkdir -p "${package_dir}"
+          cp "fintel-plugin/Jellyfin.Plugin.FIntel/bin/Release/net10.0/Jellyfin.Plugin.FIntel.dll" "${package_dir}/"
+          cp fintel-plugin/LICENSE fintel-plugin/build.yaml "${package_dir}/"
+
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          touch -d "@${source_date_epoch}" "${package_dir}"/*
+          (
+            cd "${package_dir}"
+            zip -X -q "${zip_path}" Jellyfin.Plugin.FIntel.dll LICENSE build.yaml
+          )
+          unzip -t "${zip_path}"
+
+          checksum="$(md5sum "${zip_path}" | cut -d ' ' -f 1)"
+          timestamp="$(date -u -d "@${source_date_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
+          source_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ZIP_NAME}"
+          echo "zip_path=${zip_path}" >> "${GITHUB_OUTPUT}"
+          echo "checksum=${checksum}" >> "${GITHUB_OUTPUT}"
+          echo "timestamp=${timestamp}" >> "${GITHUB_OUTPUT}"
+          echo "source_url=${source_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish immutable GitHub Release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          ZIP_NAME: ${{ steps.version.outputs.zip_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            existing="${RUNNER_TEMP}/existing-release"
+            mkdir -p "${existing}"
+            if gh release download "${GITHUB_REF_NAME}" --pattern "${ZIP_NAME}" --dir "${existing}"; then
+              cmp "${ZIP_PATH}" "${existing}/${ZIP_NAME}" || {
+                echo "Release asset already exists with different bytes; refusing to replace it" >&2
+                exit 1
+              }
+            else
+              gh release upload "${GITHUB_REF_NAME}" "${ZIP_PATH}"
+            fi
+          else
+            gh release create "${GITHUB_REF_NAME}" "${ZIP_PATH}" \
+              --verify-tag \
+              --title "FIntel ${VERSION}" \
+              --notes "FIntel ${VERSION} for Jellyfin 12.1 (ABI 12.1.0.0)."
+          fi
+
+      - name: Update stable repository manifest on main
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          TIMESTAMP: ${{ steps.package.outputs.timestamp }}
+          SOURCE_URL: ${{ steps.package.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout --force -B main origin/main
+          changelog="$(git show -s --format=%B "${GITHUB_SHA}")"
+          python3 fintel-plugin/scripts/update_manifest.py \
+            --manifest fintel-plugin/manifest.json \
+            --version "${VERSION}" \
+            --source-url "${SOURCE_URL}" \
+            --checksum "${CHECKSUM}" \
+            --timestamp "${TIMESTAMP}" \
+            --changelog "${changelog}"
+          python3 -m json.tool fintel-plugin/manifest.json >/dev/null
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fintel-plugin/manifest.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update FIntel plugin manifest for ${VERSION}"
+            git push origin HEAD:main
+          fi

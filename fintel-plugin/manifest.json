@@ -1,0 +1,20 @@
+[
+  {
+    "guid": "d84462bb-88da-4af1-952c-c10887752a28",
+    "name": "FIntel",
+    "description": "Adds user-specific FIntel movie rankings to Jellyfin's native More Like This results without modifying Jellyfin clients.",
+    "overview": "Personalized movie similarity from the FIntel recommendation service",
+    "owner": "FIntel",
+    "category": "General",
+    "versions": [
+      {
+        "version": "1.0.0.0",
+        "changelog": "Initial movie-only Jellyfin 12.1 vertical slice.",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/jmnovak50/plexintel/releases/download/fintel-v1.0.0.0/FIntel_1.0.0.0.zip",
+        "checksum": "dc34602deb9dc8a92346d90ad2d11431",
+        "timestamp": "2026-10-02T13:07:45Z"
+      }
+    ]
+  }
+]
