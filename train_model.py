@@ -398,10 +398,145 @@ def preprocess(
 
 import xgboost as xgb
 from xgboost import plot_importance
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score, precision_score, recall_score
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 import joblib
 from sklearn.model_selection import train_test_split
+
+
+CLASSIFICATION_LABELS = (0, 1)
+EVALUATION_THRESHOLDS = (0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
+
+
+def evaluate_classification_thresholds(
+    y_true,
+    positive_class_probabilities,
+    thresholds=EVALUATION_THRESHOLDS,
+):
+    """Calculate consistent binary-classification diagnostics at each threshold."""
+    y_true = np.asarray(y_true)
+    positive_class_probabilities = np.asarray(positive_class_probabilities)
+    if y_true.ndim != 1 or positive_class_probabilities.ndim != 1:
+        raise ValueError("Labels and positive-class probabilities must be one-dimensional.")
+    if len(y_true) != len(positive_class_probabilities):
+        raise ValueError("Labels and positive-class probabilities must have the same length.")
+
+    threshold_results = []
+    for threshold in thresholds:
+        predictions = (positive_class_probabilities >= threshold).astype(int)
+        report = classification_report(
+            y_true,
+            predictions,
+            labels=CLASSIFICATION_LABELS,
+            output_dict=True,
+            zero_division=0,
+        )
+        report_text = classification_report(
+            y_true,
+            predictions,
+            labels=CLASSIFICATION_LABELS,
+            digits=3,
+            zero_division=0,
+        )
+        class_0 = report["0"]
+        class_1 = report["1"]
+        threshold_results.append({
+            "threshold": float(threshold),
+            "classification_report": report_text,
+            "classification_report_data": report,
+            "confusion_matrix": confusion_matrix(
+                y_true,
+                predictions,
+                labels=CLASSIFICATION_LABELS,
+            ),
+            "accuracy": float(report["accuracy"]),
+            "class_0_precision": float(class_0["precision"]),
+            "class_0_recall": float(class_0["recall"]),
+            "class_0_f1": float(class_0["f1-score"]),
+            "class_1_precision": float(class_1["precision"]),
+            "class_1_recall": float(class_1["recall"]),
+            "class_1_f1": float(class_1["f1-score"]),
+            "macro_f1": float(report["macro avg"]["f1-score"]),
+            "weighted_f1": float(report["weighted avg"]["f1-score"]),
+            "balanced_accuracy": float(
+                (class_0["recall"] + class_1["recall"]) / 2
+            ),
+        })
+
+    return threshold_results
+
+
+def thresholds_with_best_metric(threshold_results, metric):
+    """Return every result tied for the highest value of ``metric``."""
+    if not threshold_results:
+        raise ValueError("At least one threshold result is required.")
+
+    best_value = max(result[metric] for result in threshold_results)
+    return [
+        result
+        for result in threshold_results
+        if np.isclose(result[metric], best_value, rtol=0, atol=1e-12)
+    ]
+
+
+def print_classification_threshold_evaluation(threshold_results):
+    """Print detailed reports, a consolidated table, and diagnostic bests."""
+    for result in threshold_results:
+        threshold = result["threshold"]
+        print(f"\n📋 Classification report at threshold {threshold:.2f}")
+        print(result["classification_report"])
+        print(f"🧮 Confusion matrix at threshold {threshold:.2f} (labels: [0, 1])")
+        print(result["confusion_matrix"])
+
+    print("\n📊 Threshold comparison:")
+    print(
+        "threshold | accuracy | class_0_precision | class_0_recall | class_0_f1 | "
+        "class_1_precision | class_1_recall | class_1_f1 | macro_f1 | weighted_f1 | "
+        "balanced_accuracy"
+    )
+    for result in threshold_results:
+        print(
+            f"{result['threshold']:.2f} | "
+            f"{result['accuracy']:.3f} | "
+            f"{result['class_0_precision']:.3f} | "
+            f"{result['class_0_recall']:.3f} | "
+            f"{result['class_0_f1']:.3f} | "
+            f"{result['class_1_precision']:.3f} | "
+            f"{result['class_1_recall']:.3f} | "
+            f"{result['class_1_f1']:.3f} | "
+            f"{result['macro_f1']:.3f} | "
+            f"{result['weighted_f1']:.3f} | "
+            f"{result['balanced_accuracy']:.3f}"
+        )
+
+    best_metrics = {
+        "macro_f1": thresholds_with_best_metric(threshold_results, "macro_f1"),
+        "class_0_f1": thresholds_with_best_metric(threshold_results, "class_0_f1"),
+        "class_0_recall": thresholds_with_best_metric(threshold_results, "class_0_recall"),
+        "balanced_accuracy": thresholds_with_best_metric(
+            threshold_results,
+            "balanced_accuracy",
+        ),
+    }
+    metric_labels = {
+        "macro_f1": "Highest macro F1",
+        "class_0_f1": "Highest class 0 F1",
+        "class_0_recall": "Highest class 0 recall",
+        "balanced_accuracy": "Highest balanced accuracy",
+    }
+    print("\n🎯 Diagnostic best thresholds (ties preserved):")
+    for metric, results in best_metrics.items():
+        thresholds = ", ".join(f"{result['threshold']:.2f}" for result in results)
+        print(f"{metric_labels[metric]}: {thresholds} ({results[0][metric]:.3f})")
+
+    print(
+        "📝 Trade-off note: raising the positive-class threshold can increase class 0 "
+        "recall by predicting more examples as class 0, but class 0 precision may fall "
+        "and class 1 recall cannot improve. These results are diagnostic only; no "
+        "production threshold is selected or changed."
+    )
+    return best_metrics
+
 
 def train_and_evaluate(
     X,
@@ -455,99 +590,40 @@ def train_and_evaluate(
     model.fit(X_train, y_train, sample_weight=sample_weights)
 
     y_prob = model.predict_proba(X_test)[:, 1]
-    threshold_metrics = []
-    for threshold in np.arange(0.50, 0.701, 0.05):
-        y_pred_at_threshold = (y_prob >= threshold).astype(int)
-        class_0_precision = precision_score(y_test, y_pred_at_threshold, pos_label=0, zero_division=0)
-        class_0_recall = recall_score(y_test, y_pred_at_threshold, pos_label=0, zero_division=0)
-        class_0_f1 = f1_score(y_test, y_pred_at_threshold, pos_label=0, zero_division=0)
-        class_1_f1 = f1_score(y_test, y_pred_at_threshold, pos_label=1, zero_division=0)
-        macro_f1 = f1_score(y_test, y_pred_at_threshold, average="macro", zero_division=0)
-        weighted_f1 = f1_score(y_test, y_pred_at_threshold, average="weighted", zero_division=0)
-        threshold_metrics.append((
-            threshold,
-            class_0_precision,
-            class_0_recall,
-            class_0_f1,
-            class_1_f1,
-            macro_f1,
-            weighted_f1,
-        ))
+    threshold_results = evaluate_classification_thresholds(y_test, y_prob)
+    print_classification_threshold_evaluation(threshold_results)
 
-    print("📊 Threshold comparison:")
-    print("threshold | class_0_recall | class_0_f1 | macro_f1")
-    for threshold, _class_0_precision, class_0_recall, class_0_f1, _class_1_f1, macro_f1, _weighted_f1 in threshold_metrics:
-        print(f"{threshold:.2f}      | {class_0_recall:.3f}          | {class_0_f1:.3f}      | {macro_f1:.3f}")
-
-    (
-        recommended_threshold,
-        recommended_class_0_precision,
-        recommended_class_0_recall,
-        recommended_class_0_f1,
-        recommended_class_1_f1,
-        recommended_macro_f1,
-        recommended_weighted_f1,
-    ) = max(
-        threshold_metrics,
-        key=lambda m: (m[3], m[5])
+    # Retain the existing class-0-F1/macro-F1 choice for the single diagnostic
+    # plot and experiment row. It is not persisted or applied during scoring.
+    diagnostic_result = max(
+        threshold_results,
+        key=lambda result: (result["class_0_f1"], result["macro_f1"]),
     )
-    (
-        macro_threshold,
-        _macro_class_0_precision,
-        macro_class_0_recall,
-        macro_class_0_f1,
-        _macro_class_1_f1,
-        macro_macro_f1,
-        _macro_weighted_f1,
-    ) = max(
-        threshold_metrics,
-        key=lambda m: (m[5], m[3])
-    )
-
+    diagnostic_threshold = diagnostic_result["threshold"]
     print(
-        "🎯 Recommended operating threshold by class_0_f1, then macro_f1: "
-        f"{recommended_threshold:.2f} "
-        f"(class_0_recall={recommended_class_0_recall:.3f}, "
-        f"class_0_f1={recommended_class_0_f1:.3f}, macro_f1={recommended_macro_f1:.3f})"
-    )
-    print(
-        "📌 Best threshold by macro_f1, then class_0_f1: "
-        f"{macro_threshold:.2f} "
-        f"(class_0_recall={macro_class_0_recall:.3f}, "
-        f"class_0_f1={macro_class_0_f1:.3f}, macro_f1={macro_macro_f1:.3f})"
-    )
-    print(
-        "📝 Recommendation note: validation currently suggests a display threshold "
-        "around 0.65-0.70 may be better than the default 0.50 for recommendation display. "
-        "score_model.py is unchanged."
+        "📝 Evaluation note: the diagnostic comparison does not change model training, "
+        "saved probabilities, recommendation ranking, or score_model.py behavior."
     )
     print("📊 Experiment summary row:")
-    print("variant | feature_count | actor_feature_count | best_threshold | class_0_precision | class_0_recall | class_0_f1 | class_1_f1 | macro_f1 | weighted_f1")
+    print("variant | feature_count | actor_feature_count | diagnostic_threshold | class_0_precision | class_0_recall | class_0_f1 | class_1_f1 | macro_f1 | weighted_f1")
     print(
         f"{experiment_label} | "
         f"{len(feature_names)} | "
         f"{sum(1 for name in feature_names if str(name).startswith('actor_'))} | "
-        f"{recommended_threshold:.2f} | "
-        f"{recommended_class_0_precision:.3f} | "
-        f"{recommended_class_0_recall:.3f} | "
-        f"{recommended_class_0_f1:.3f} | "
-        f"{recommended_class_1_f1:.3f} | "
-        f"{recommended_macro_f1:.3f} | "
-        f"{recommended_weighted_f1:.3f}"
+        f"{diagnostic_threshold:.2f} | "
+        f"{diagnostic_result['class_0_precision']:.3f} | "
+        f"{diagnostic_result['class_0_recall']:.3f} | "
+        f"{diagnostic_result['class_0_f1']:.3f} | "
+        f"{diagnostic_result['class_1_f1']:.3f} | "
+        f"{diagnostic_result['macro_f1']:.3f} | "
+        f"{diagnostic_result['weighted_f1']:.3f}"
     )
 
-    for threshold, *_unused_metrics in threshold_metrics:
-        y_pred_at_threshold = (y_prob >= threshold).astype(int)
-        print(f"\n📋 Classification report at threshold {threshold:.2f}")
-        print(classification_report(y_test, y_pred_at_threshold, zero_division=0))
-        print(f"🧮 Confusion matrix at threshold {threshold:.2f}")
-        print(confusion_matrix(y_test, y_pred_at_threshold))
-
-    y_pred = (y_prob >= recommended_threshold).astype(int)
-    cm = confusion_matrix(y_test, y_pred)
+    y_pred = (y_prob >= diagnostic_threshold).astype(int)
+    cm = confusion_matrix(y_test, y_pred, labels=CLASSIFICATION_LABELS)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm)
     disp.plot()
-    plt.title(f"XGBoost Confusion Matrix (threshold {recommended_threshold:.2f})")
+    plt.title(f"XGBoost Confusion Matrix (threshold {diagnostic_threshold:.2f})")
     plt.show()
 
     final_sample_weights, full_neg_count, full_pos_count = class_balanced_sample_weights(
