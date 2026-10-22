@@ -614,9 +614,46 @@ def ensure_app_schema(db_url: str | None = None) -> None:
         conn.close()
 
 
+def _has_sql_content(sql: str) -> bool:
+    """Skip only whitespace/comments; leave SQL parsing and validation to PostgreSQL.
+
+    Stop at the first other character, so strings, quoted identifiers and dollar-
+    quoted bodies never need parsing or rewriting. PostgreSQL block comments can
+    nest. An unterminated block comment is passed through to expose its SQL error.
+    This is a no-op check, not a validator (even punctuation is passed through).
+    """
+    index = 0
+    while index < len(sql):
+        if sql[index] in " \t\n\r\f\v":
+            index += 1
+        elif sql.startswith("--", index):
+            index += 2
+            while index < len(sql) and sql[index] not in "\r\n":
+                index += 1
+        elif sql.startswith("/*", index):
+            index += 2
+            depth = 1
+            while index < len(sql) and depth:
+                if sql.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif sql.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                return True
+        else:
+            return True
+    return False
+
+
 def apply_dimension_schema(conn):
     """Idempotent additive migration; never execute model or labeling work."""
     with conn.cursor() as cur:
         cur.execute('SELECT pg_advisory_xact_lock(184725, 0)')
         for path in sorted((Path(__file__).parent / 'migrations').glob('*.sql')):
-            cur.execute(path.read_text())
+            sql = path.read_text()
+            if _has_sql_content(sql):
+                cur.execute(sql)
