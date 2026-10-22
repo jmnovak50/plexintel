@@ -162,6 +162,10 @@ def group_members(row):
     return members if source_id in members else None
 
 
+class HistoryPaginationError(RuntimeError):
+    """A non-snapshot history page changed or was incomplete; safe to retry by date."""
+
+
 def iter_history_pages(fetch, *, grouping, after=None, before=None, page_size=1000, reference_id=None):
     if grouping not in (0, 1):
         raise ValueError("Explicit source grouping 0 or 1 is required")
@@ -179,23 +183,23 @@ def iter_history_pages(fetch, *, grouping, after=None, before=None, page_size=10
             params["before"] = before
         response = fetch("get_history", params)
         if not isinstance(response, dict) or not isinstance(response.get("data"), list):
-            raise RuntimeError("History page missing a list 'data' payload")
+            raise HistoryPaginationError("History page missing a list 'data' payload")
         rows = response["data"]
         count = integer(response.get("recordsFiltered", response.get("recordsTotal")))
         if count is None or count < 0 or (total is not None and count != total):
-            raise RuntimeError("Invalid or changing history count; repeat this date window")
+            raise HistoryPaginationError("Invalid or changing history count; repeat this date window")
         total = count
         for row in rows:
             mapped = map_history(row)
             if mapped:
                 event_id = mapped[0]["watch_id"]
                 if event_id in seen:
-                    raise RuntimeError("History shifted during pagination; repeat this date window")
+                    raise HistoryPaginationError("History shifted during pagination; repeat this date window")
                 seen.add(event_id)
         if len(rows) > page_size or start + len(rows) > total:
-            raise RuntimeError("History exceeded reported count")
+            raise HistoryPaginationError("History exceeded reported count")
         if not rows and start < total:
-            raise RuntimeError(f"Incomplete history: got {start} of {total}")
+            raise HistoryPaginationError(f"Incomplete history: got {start} of {total}")
         if rows:
             yield rows
         start += len(rows)

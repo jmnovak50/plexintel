@@ -1222,18 +1222,29 @@ def sync_new_watch_history(conn, cursor):
 
 
 def run_watch_sessions(*, dry_run=False, since=None, until=None, page_size=1000, incremental=False):
-    """Separate credential and entrypoint; never use the model writer connection."""
+    """Independent raw job. File/connection failures never print DSNs or passwords."""
     import psycopg2
+    from api.services.private_config import PrivateConfigError, load_session_credentials
     from api.services.watch_session_sync import ingest_sessions
-    dsn = os.getenv("WATCH_SESSIONS_DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("WATCH_SESSIONS_DATABASE_URL must name the dedicated restricted session writer")
-    conn = psycopg2.connect(dsn)
+    conn = None
     try:
+        load_session_credentials()
+        conn = psycopg2.connect(os.environ["WATCH_SESSIONS_DATABASE_URL"], connect_timeout=10)
         return ingest_sessions(conn, dry_run=dry_run, since=since, until=until,
                                page_size=page_size, incremental=incremental)
+    except PrivateConfigError:
+        category = "private_credentials_invalid"
+        print("Session configuration failed: verify the owner-only credential file and supported keys")
+    except psycopg2.OperationalError as exc:
+        category = "database_authentication_failed" if str(getattr(exc,"pgcode","") or "").startswith("28") else "database_connection_failed"
+        print("Session database connection failed: verify credential, database, host reachability and pg_hba; no connection details logged")
+    except Exception:
+        category = "session_configuration_or_runtime_failed"
+        print("Session operation failed: inspect configuration and sanitized ingestion diagnostics")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+    return {"failed": 0, "errors": 1, "busy": False, "error_category": category}
 
 
 def generate_media_embeddings(batch_size: int | None = None):
@@ -1561,7 +1572,7 @@ if __name__ == "__main__":
         stats = run_watch_sessions(dry_run=args.dry_run, since=args.since,
                                   until=args.until, page_size=args.page_size,
                                   incremental=args.mode == "watch-sessions-sync")
-        raise SystemExit(1 if stats["failed"] or stats["errors"] else 0)
+        raise SystemExit(75 if stats.get("busy") else (1 if stats["failed"] or stats["errors"] else 0))
     elif args.mode == "incremental":
         run_incremental_load()
     elif args.mode == "recover":

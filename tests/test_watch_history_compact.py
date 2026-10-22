@@ -1,4 +1,5 @@
 from __future__ import annotations
+from api.services.agent_auth import require_agent_principal, AgentPrincipal
 
 import unittest
 from datetime import datetime, timezone
@@ -135,6 +136,7 @@ class CompactHistoryHTTPTests(unittest.TestCase):
     def setUp(self):
         app = FastAPI()
         app.include_router(agent_tools.router, prefix="/api/agent")
+        app.dependency_overrides[require_agent_principal] = lambda: AgentPrincipal("jwt","admin",True)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 
@@ -142,7 +144,7 @@ class CompactHistoryHTTPTests(unittest.TestCase):
         for query, enriched in (({}, False), ({"include_metadata": "false"}, False), ({"include_metadata": "true"}, True)):
             with self.subTest(query=query):
                 with patch.object(service, "connect_db", return_value=FakeConnection([make_history_row()])):
-                    response = self.client.get("/api/agent/watch-history", params=query)
+                    response = self.client.get("/api/agent/watch-history", params={**query,"all_users":"true"})
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
                 self.assertIsNone(payload["user"])
@@ -174,7 +176,7 @@ class CompactHistoryHTTPTests(unittest.TestCase):
             ({"limit": 201, "include_metadata": True}, 422),
         ):
             with self.subTest(query=query), patch.object(service, "connect_db") as connect:
-                response = self.client.get("/api/agent/watch-history", params=query)
+                response = self.client.get("/api/agent/watch-history", params={**query,"all_users":"true"})
                 self.assertEqual(response.status_code, status)
                 connect.assert_not_called()
 

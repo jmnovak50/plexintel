@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Generator, Iterator, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 import requests
 
 
@@ -70,6 +70,7 @@ class UserResolution:
 
 class Pipeline:
     class Valves(BaseModel):
+        PLEXINTEL_API_TOKEN: SecretStr = Field(default=SecretStr(""), description="Server-managed REST bearer credential; never an end-user identity header.")
         PLEXINTEL_BASE_URL: str = Field(
             default="http://192.168.1.9:8489",
             description="Base URL for PlexIntel, without a trailing slash.",
@@ -116,6 +117,7 @@ class Pipeline:
         self.description = "Deterministic PlexIntel recommendation, search, poster, and watch-history workflows."
         self.version = "0.1.9"
         self.valves = self.Valves(
+            PLEXINTEL_API_TOKEN=os.getenv("PLEXINTEL_API_TOKEN", ""),
             PLEXINTEL_BASE_URL=os.getenv("PLEXINTEL_BASE_URL", "http://192.168.1.9:8489"),
             POSTER_BASE_URL=os.getenv("POSTER_BASE_URL", ""),
             POSTER_PATH_PREFIX=os.getenv("POSTER_PATH_PREFIX", "/api/posters"),
@@ -179,7 +181,7 @@ class Pipeline:
         except Exception as exc:
             return (
                 "## PlexIntel Pipeline Error\n\n"
-                f"The deterministic pipeline failed before it could complete the workflow: `{exc}`"
+                "The deterministic pipeline failed before it could complete the workflow. Check the server configuration."
             )
 
     def _last_user_message(self, messages: list[dict[str, Any]]) -> str:
@@ -219,11 +221,32 @@ class Pipeline:
             return "item_poster"
         return "recommendations"
 
+    def _plex_headers(self):
+        token = self.valves.PLEXINTEL_API_TOKEN.get_secret_value().strip()
+        if not token and os.getenv("PLEXINTEL_API_TOKEN_FILE"):
+            import stat
+            try:
+                fd = os.open(os.environ["PLEXINTEL_API_TOKEN_FILE"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "r") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                        raise ValueError("unsafe credential file")
+                    token = handle.read(32769).strip()
+                    if len(token)>32768 or any(c.isspace() for c in token):
+                        raise ValueError("invalid credential")
+            except Exception:
+                raise PipelineHttpError(endpoint="PlexIntel REST", status_code=503,
+                                        detail="Private REST credential file is unavailable or unsafe") from None
+        if not token:
+            raise PipelineHttpError(endpoint="PlexIntel REST", status_code=401,
+                                    detail="Configure the server-managed PLEXINTEL_API_TOKEN before using this pipeline")
+        return {"Authorization": "Bearer " + token}
+
     def _plex_get(self, path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        return self._http_json("GET", self._plexintel_url(path), params=params)
+        return self._http_json("GET", self._plexintel_url(path), params=params, headers=self._plex_headers())
 
     def _plex_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._http_json("POST", self._plexintel_url(path), json_payload=payload)
+        return self._http_json("POST", self._plexintel_url(path), json_payload=payload, headers=self._plex_headers())
 
     def _ollama_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Send a POST request to an Ollama server.
@@ -257,13 +280,14 @@ class Pipeline:
                 params=params,
                 json=json_payload,
                 headers=headers,
+                allow_redirects=False,
                 timeout=self.valves.REQUEST_TIMEOUT_S,
             )
         except requests.RequestException as exc:
-            raise PipelineHttpError(endpoint=url, detail=str(exc)) from exc
+            raise PipelineHttpError(endpoint="PlexIntel request", detail="Connection failed; inspect restricted server diagnostics") from None
 
-        if response.status_code >= 400:
-            detail = response.text[:500] if response.text else response.reason
+        if response.status_code >= 300:
+            detail = "Request rejected; verify authentication, entitlement and endpoint configuration"
             raise PipelineHttpError(
                 endpoint=url,
                 status_code=response.status_code,

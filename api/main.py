@@ -123,10 +123,11 @@ app.add_middleware(
     expose_headers=["Mcp-Session-Id"],
 )
 
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET", "dev-secret-key")  # fallback for dev
-)
+session_secret = os.getenv("SESSION_SECRET", "dev-secret-key")
+# Snapshot the actual signer configuration; a later dotenv read cannot authorize
+# cookies which were verified with the development fallback key.
+app.state.agent_session_auth_enabled = len(session_secret) >= 32 and session_secret != "dev-secret-key"
+app.add_middleware(SessionMiddleware, secret_key=session_secret)
 
 app.add_middleware(MCPPathCompatibilityMiddleware)
 

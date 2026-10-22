@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily PlexIntel raw session synchronization
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=5min
+Unit=plexintel-watch-sessions.service
+
+[Install]
+WantedBy=timers.target

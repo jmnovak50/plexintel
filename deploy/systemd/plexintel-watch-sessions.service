@@ -1,0 +1,24 @@
+[Unit]
+Description=PlexIntel independent raw playback session synchronization
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jmnovak
+WorkingDirectory=/home/jmnovak/projects/plexintel
+Environment=WATCH_SESSIONS_CREDENTIALS_FILE=/home/jmnovak/.config/plexintel/watch-sessions.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/jmnovak/projects/plexintel/plexenv/bin/python /home/jmnovak/projects/plexintel/fetch_tautulli_data.py --mode watch-sessions-sync
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=45min
+TimeoutStopSec=30s
+KillSignal=SIGINT
+SuccessExitStatus=75

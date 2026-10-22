@@ -631,11 +631,14 @@ def get_agent_watch_history(
                 cur.execute(sql, params)
                 rows = cur.fetchall()
     except Exception as exc:
-        logger.exception("Error fetching agent watch history")
+        import uuid
+        incident = uuid.uuid4().hex[:12]
+        logger.error("History query failed incident=%s exception_class=%s sqlstate=%s",
+                     incident, type(exc).__name__, getattr(exc, "pgcode", None))
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to fetch watch history: {exc}",
-        ) from exc
+            detail={"message": "Watch history is temporarily unavailable", "incident": incident},
+        ) from None
     finally:
         if connection is not None and hasattr(connection, "close"):
             connection.close()
@@ -653,3 +656,19 @@ def get_agent_watch_history(
         count=len(items),
         results=items,
     )
+
+
+def get_agent_self_user(user, *, username=None, friendly_name=None):
+    connection = _get_conn()
+    try:
+        with connection as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT username, friendly_name FROM users_v WHERE username = %s", (user,))
+                rows = cur.fetchall()
+    finally:
+        if hasattr(connection, "close"):
+            connection.close()
+    items = [AgentUser(**row) for row in rows if
+             (not username or username.casefold() in row['username'].casefold()) and
+             (not friendly_name or friendly_name.casefold() in (row.get('friendly_name') or '').casefold())]
+    return AgentUsersResponse(count=len(items), items=items, next_offset=None)

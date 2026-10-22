@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends, Request
 from pydantic import BaseModel, Field
 
 from api.db.connection import connect_db
@@ -30,7 +30,11 @@ from api.services.poster_markup_service import (
 )
 from api.services.poster_service import build_public_poster_url
 
-router = APIRouter()
+from api.services.agent_auth import (
+    AgentPrincipal, require_agent_principal, authorize_user, authorize_feedback, sanitize_agent_errors,
+)
+
+router = APIRouter(dependencies=[Depends(require_agent_principal)])
 
 
 class FeedbackPayload(BaseModel):
@@ -76,6 +80,7 @@ class PosterGalleryResponse(BaseModel):
 
 
 @router.get("/recommendations", response_model=AgentRecommendationsResponse)
+@sanitize_agent_errors
 def agent_get_recommendations(
     user: str = Query(..., description="Username, e.g. jmnovak"),
     view: Optional[str] = Query(
@@ -92,7 +97,9 @@ def agent_get_recommendations(
     max_score: Optional[float] = Query(
         None, ge=0.0, le=1.0, description="Optional max predicted_probability (0.0–1.0)"
     ),
+    principal: AgentPrincipal = Depends(require_agent_principal),
 ):
+    user = authorize_user(principal, user)
     return get_agent_recommendations(
         user=user,
         view=view,
@@ -108,14 +115,18 @@ def agent_get_recommendations(
     response_model=AgentRecommendationScore,
     summary="Fetch one user's raw recommendation score for a library item.",
 )
+@sanitize_agent_errors
 def agent_get_recommendation_score(
     rating_key: int,
     user: str = Query(..., description="Username, e.g. jmnovak"),
+    principal: AgentPrincipal = Depends(require_agent_principal),
 ):
+    user = authorize_user(principal, user)
     return get_agent_recommendation_score(user=user, rating_key=rating_key)
 
 
 @router.get("/search", response_model=LibrarySearchResponse)
+@sanitize_agent_errors
 def agent_search_library(
     q: str = Query(..., description="Free text query over title / summary / genres / people."),
     media_type: Optional[str] = Query(
@@ -143,11 +154,13 @@ def agent_search_library(
 
 
 @router.get("/items/{rating_key}", response_model=LibraryItem)
+@sanitize_agent_errors
 def agent_get_item(rating_key: int):
     return get_agent_library_item(rating_key=rating_key)
 
 
 @router.post("/poster-gallery", response_model=PosterGalleryResponse)
+@sanitize_agent_errors
 def agent_poster_gallery(payload: PosterGalleryPayload):
     entries = coerce_gallery_entries(
         rating_keys=payload.rating_keys,
@@ -175,6 +188,7 @@ def agent_poster_gallery(payload: PosterGalleryPayload):
 
 
 @router.get("/recent-additions", response_model=RecentLibraryAdditionsResponse)
+@sanitize_agent_errors
 def agent_recent_library_additions(
     media_type: Optional[str] = Query(
         None,
@@ -196,7 +210,9 @@ def agent_recent_library_additions(
     response_model=FeedbackResponse,
     summary="Submit explicit feedback on an item from a user.",
 )
-def agent_submit_feedback(payload: FeedbackPayload):
+@sanitize_agent_errors
+def agent_submit_feedback(payload: FeedbackPayload, request: Request, principal: AgentPrincipal = Depends(require_agent_principal)):
+    authorize_feedback(request, principal, payload.user)
     action = normalize_feedback_action(payload.thumb, field_name="thumb")
 
     with connect_db() as conn:
@@ -218,6 +234,7 @@ def agent_submit_feedback(payload: FeedbackPayload):
 
 
 @router.get("/users", response_model=AgentUsersResponse)
+@sanitize_agent_errors
 def agent_list_users(
     username: Optional[str] = Query(
         None,
@@ -234,15 +251,27 @@ def agent_list_users(
         description="Maximum number of users to return (1–1000).",
     ),
     offset: int = Query(0, ge=0, description="Use next_offset to retrieve remaining users."),
+    principal: AgentPrincipal = Depends(require_agent_principal),
 ):
+    if not principal.can_read_all:
+        if not principal.username:
+            from fastapi import HTTPException
+            raise HTTPException(403, 'User directory access requires a mapped identity or read-all entitlement')
+        if offset:
+            return AgentUsersResponse(count=0, items=[], next_offset=None)
+        # Exact identity filter; never use an untrusted substring as authority.
+        from api.services.agent_tool_service import get_agent_self_user
+        return get_agent_self_user(principal.username, username=username, friendly_name=friendly_name)
+
     return list_agent_users(username=username, friendly_name=friendly_name, limit=limit, offset=offset)
 
 
 @router.get("/watch-history", response_model=WatchHistoryResponse)
+@sanitize_agent_errors
 def agent_watch_history(
     user: Optional[str] = Query(
         None,
-        description="Optional username; if omitted, returns watches for all users.",
+        description="Optional username; omitted means authenticated self. All-user scope requires all_users=true and entitlement.",
     ),
     limit: int = Query(
         WATCH_HISTORY_DEFAULT_LIMIT,
@@ -261,7 +290,10 @@ def agent_watch_history(
     player: Optional[str] = Query(None, max_length=512, description="Exact player of the latest verified member session."),
     platform: Optional[str] = Query(None, max_length=512, description="Exact platform of the latest verified member session."),
     device: Optional[str] = Query(None, max_length=512, description="Exact device of the latest verified member session."),
+    all_users: bool = Query(False, description='Explicit administrative/service all-user scope.'),
+    principal: AgentPrincipal = Depends(require_agent_principal),
 ):
+    user = authorize_user(principal, user, all_users=all_users)
     return get_agent_watch_history(
         user=user, limit=limit, engaged_only=engaged_only, offset=offset,
         since=since, until=until, include_metadata=include_metadata,

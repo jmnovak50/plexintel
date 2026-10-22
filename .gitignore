@@ -35,3 +35,8 @@ xgb_model*.pkl
 feature_importance_log.txt
 feature_importance_plot.png
 xgb_model.pkl
+
+# Private operator credentials
+.secrets/
+.env.*
+!.env.example

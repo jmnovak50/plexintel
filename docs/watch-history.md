@@ -44,8 +44,11 @@ and follow its pages. Supply the same `since` and `until` on every page and for 
 user when a time window is requested. Merge the results, then summarize.
 
 An omitted MCP `user` still resolves only to the authenticated user for backwards
-compatibility. It never means everyone. The REST endpoint retains its existing
-all-user behavior when `user` is omitted, but the pipeline always supplies a username.
+compatibility. It never means everyone. REST also defaults to the authenticated
+user; explicit `all_users=true` requires a verified admin or scoped service
+entitlement. The pipeline supplies explicit usernames and needs an approved
+read_all service credential for global fan-out. User parameters and forwarded
+identity headers never grant access. See [REST setup](watch-history-playback.md#rest-authentication-and-consumers).
 
 Offset pagination is not a database snapshot: playback added during retrieval may
 shift page boundaries. The pipeline deduplicates repeated watch IDs per user.
@@ -73,8 +76,9 @@ offset-free API bounds mean UTC. Tautulli stores naive UTC timestamps in the
 database, and responses label those timestamps as UTC.
 
 Example: `/api/agent/watch-history?since=2026-09-01T00:00:00Z&until=2026-10-01T00:00:00Z&limit=50`
-returns a compact page across users in that UTC interval. Add
-`&user=alice` to scope the REST request and `&include_metadata=true` for enrichment.
+returns a compact page for the authenticated user in that UTC interval. An
+authorized admin/service can add `&all_users=true` for global scope or `&user=alice`
+for a named user; add `&include_metadata=true` for enrichment.
 
 ## Partial plays, dates, and rankings
 

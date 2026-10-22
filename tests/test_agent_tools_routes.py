@@ -7,6 +7,7 @@ from unittest.mock import patch
 from fastapi.encoders import jsonable_encoder
 
 from api.routes import agent_tools
+from api.services.agent_auth import AgentPrincipal
 from api.services.agent_tool_service import (
     AgentRecommendationScore,
     AgentRecommendation,
@@ -39,7 +40,7 @@ class AgentToolsRouteTests(unittest.TestCase):
 
         with patch.object(agent_tools, "get_agent_recommendations", return_value=payload) as mock_get:
             response = agent_tools.agent_get_recommendations(
-                user="jmnovak",
+                user="jmnovak", principal=AgentPrincipal("jwt","jmnovak",True),
                 view="shows",
                 media_type="episode",
                 limit=12,
@@ -76,7 +77,7 @@ class AgentToolsRouteTests(unittest.TestCase):
         ) as mock_get:
             response = agent_tools.agent_get_recommendation_score(
                 rating_key=37641,
-                user="jmnovak",
+                user="jmnovak", principal=AgentPrincipal("jwt","jmnovak",True),
             )
 
         data = jsonable_encoder(response)
@@ -255,8 +256,8 @@ class AgentToolsRouteTests(unittest.TestCase):
 
         with patch.object(agent_tools, "list_agent_users", return_value=users_payload):
             with patch.object(agent_tools, "get_agent_watch_history", return_value=history_payload):
-                users_response = agent_tools.agent_list_users()
-                history_response = agent_tools.agent_watch_history()
+                users_response = agent_tools.agent_list_users(principal=AgentPrincipal("jwt","jmnovak",True))
+                history_response = agent_tools.agent_watch_history(user="jmnovak",all_users=False,principal=AgentPrincipal("jwt","jmnovak",True))
 
         users_data = jsonable_encoder(users_response)
         history_data = jsonable_encoder(history_response)

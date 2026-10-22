@@ -112,3 +112,15 @@ After setup:
 | `401 Invalid or expired MCP bearer token` | A JWT-shaped token was sent but failed validation; check issuer URL |
 
 To inspect what PlexIntel receives, check backend logs for MCP request lines. Successful user mapping logs the caller email.
+
+## Deterministic REST adapter is separate
+
+The shared MCP connection above retains its existing OAuth identity handling.
+The optional `openwebui_pipelines/plexintel_recommendation_pipeline.py` adapter
+calls REST instead and now requires an explicit bearer credential. MCP login or
+forwarded email headers do not authorize REST. Configure its SecretStr
+PLEXINTEL_API_TOKEN valve or owner-only PLEXINTEL_API_TOKEN_FILE before deploying
+REST enforcement. Cross-user workflows require an explicitly approved service
+read_all delegation; ordinary OAuth tokens remain limited to their mapped user.
+See the [Birch deployment runbook](watch-history-playback.md) for setup, rollout
+order and verification. No existing MCP tool names or inputs change.

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from api.services.agent_auth import require_agent_principal, AgentPrincipal
 
 import unittest
 from datetime import datetime
@@ -309,6 +310,7 @@ class HistoryRouteTests(unittest.TestCase):
         self.routes = agent_tools
         app = FastAPI()
         app.include_router(agent_tools.router, prefix="/api/agent")
+        app.dependency_overrides[require_agent_principal] = lambda: AgentPrincipal("jwt","admin",True)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 

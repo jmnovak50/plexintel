@@ -1,3 +1,4 @@
+from api.services.agent_auth import require_agent_principal, AgentPrincipal
 """Session isolation and compatibility against an explicitly disposable PostgreSQL DB."""
 import ast
 import os
@@ -80,6 +81,7 @@ def test_each_path_sets_its_own_grouping_and_detects_pagination_drift():
 def test_api_metadata_filters_and_privacy_contract():
     app = FastAPI()
     app.include_router(agent_tools.router, prefix='/api/agent')
+    app.dependency_overrides[require_agent_principal] = lambda: AgentPrincipal("jwt","admin",True)
     row = dict(make_history_row(), player='TV', platform='Linux', product='Plex', device='HTPC',
                platform_version='1', product_version='2', ip_address='192.0.2.99', session_id='secret')
     conn = FakeConnection([row])
@@ -297,9 +299,7 @@ def test_ip_disabled_by_default_and_retention_cannot_be_bypassed(database):
 
 def test_repeat_historical_ingestion_suppresses_expired_ips_and_dry_run_is_read_only(database):
     admin,worker,_=database
-    with admin.cursor() as cur:
-        cur.execute('UPDATE watch_session_policy SET ip_retention_days=2')
-    admin.commit()
+    # Production integration intentionally enforces the zero-day policy.
     old=event(date=int((NOW-timedelta(days=3)).timestamp()),started=int((NOW-timedelta(days=3)).timestamp()),ip_address='192.0.2.1')
     before=model_snapshot(admin)
     stats=sessions.ingest_sessions(worker,fetch=mock_source([old]),dry_run=True)
@@ -428,3 +428,72 @@ def test_missing_optional_start_preserves_existing_retained_ip(database):
         cur.execute('SELECT ip_address::text,ip_suppressed_at FROM watch_sessions')
         assert cur.fetchone()==('192.0.2.1/32',None)
     worker.rollback()
+
+
+def test_session_job_lock_prevents_sync_backfill_overlap(database):
+    admin,worker,dsn=database
+    with worker.cursor() as cur:
+        cur.execute('SELECT pg_advisory_lock(7402,0)')
+    worker.commit()
+    other=psycopg2.connect(dsn,user='watch_fixture_ingest')
+    try:
+        fetch=__import__('unittest.mock',fromlist=['Mock']).Mock()
+        stats=sessions.ingest_sessions(other,fetch=fetch,incremental=True)
+        assert stats['busy'] and stats['inserted']==0
+        fetch.assert_not_called()
+    finally:
+        other.close()
+        with worker.cursor() as cur:
+            cur.execute('SELECT pg_advisory_unlock(7402,0)')
+        worker.rollback()
+    assert sessions.ingest_sessions(worker,fetch=mock_source([event()]),incremental=True)['inserted']==1
+
+
+def test_bounded_pagination_replay_is_idempotent_and_never_changes_models(database):
+    admin,worker,_=database
+    before=model_snapshot(admin)
+    state={'failed_once':False}
+    def fetch(command,params):
+        if params['grouping']==1:
+            return dict(recordsFiltered=1,data=[history_group()])
+        if params['start']==1 and not state['failed_once']:
+            state['failed_once']=True
+            return {}  # Incomplete source page after first page was committed.
+        rows=[event(),event(101)]
+        return dict(recordsFiltered=2,data=rows[params['start']:params['start']+1])
+    stats=sessions.ingest_sessions(worker,fetch=fetch,page_size=1,retries=1)
+    assert stats['inserted']==2 and stats['unchanged']==1
+    assert stats['attempts']==2 and stats['retries']==1 and stats['errors']==0
+    assert model_snapshot(admin)==before
+    with admin.cursor() as cur:
+        cur.execute('SELECT count(*) FROM watch_sessions');assert cur.fetchone()==(2,)
+
+
+def test_positive_ip_policy_prevents_collection_before_source_access(database):
+    admin,worker,_=database
+    with admin.cursor() as cur:
+        cur.execute('UPDATE watch_session_policy SET ip_retention_days=2')
+    admin.commit()
+    from unittest.mock import Mock
+    fetch=Mock()
+    stats=sessions.ingest_sessions(worker,fetch=fetch)
+    assert stats['errors']==1
+    fetch.assert_not_called()
+    # Verify failure releases the job-wide lock.
+    with worker.cursor() as cur:
+        cur.execute('SELECT pg_try_advisory_lock(7402,0)');assert cur.fetchone()==(True,)
+        cur.execute('SELECT pg_advisory_unlock(7402,0)')
+    worker.rollback()
+
+
+def test_incremental_window_is_configurable_and_unlinked_reasons_are_safe(database,capsys):
+    admin,worker,_=database
+    captured=[]
+    def fetch(command,params):
+        captured.append(params)
+        return dict(recordsFiltered=1,data=[event(900,reference_id=None)])
+    stats=sessions.ingest_sessions(worker,fetch=fetch,incremental=True,reconciliation_days=7)
+    assert stats['unlinked']==1
+    assert stats['unlinked_reasons']=={'missing_source_reference':1}
+    assert captured[0]['after']==(datetime.now(timezone.utc)-timedelta(days=8)).strftime('%Y-%m-%d')
+    assert '192.0.2.' not in capsys.readouterr().out
