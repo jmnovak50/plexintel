@@ -109,3 +109,14 @@ large histories can be paginated.
 
 The MCP rules guide the connected model's tool use; the deterministic pipeline
 executes the per-user workflow directly.
+
+## Playback context
+
+Compact and enriched events also include nullable `player`, `platform`, `product`,
+`device`, `platform_version`, and `product_version`. Exact player/platform/device
+filters apply to the latest verified member session and combine with existing
+user and date filters before pagination. This representative may not describe
+every device in a resumed group; it never duplicates grouped history rows. IP addresses
+and source session identifiers are never returned. See
+[playback metadata operations](watch-history-playback.md) for source availability,
+migration, privacy, backfill and bounded reconciliation behavior.

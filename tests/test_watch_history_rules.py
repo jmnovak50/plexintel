@@ -323,6 +323,7 @@ class HistoryRouteTests(unittest.TestCase):
         history.assert_called_once_with(
             user="other", limit=50, engaged_only=False, offset=200,
             since=None, until=None, include_metadata=False,
+            player=None, platform=None, device=None,
         )
 
     def test_users_pagination_reaches_service(self):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import psycopg2
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -140,6 +142,13 @@ class CompactWatchHistoryItem(BaseModel):
     title: Optional[str]
     season_number: Optional[int]
     episode_number: Optional[int]
+
+    player: Optional[str] = None
+    platform: Optional[str] = None
+    product: Optional[str] = None
+    device: Optional[str] = None
+    platform_version: Optional[str] = None
+    product_version: Optional[str] = None
 
     @field_validator("watched_at")
     @classmethod
@@ -544,6 +553,9 @@ def get_agent_watch_history(
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     include_metadata: bool = False,
+    player: Optional[str] = None,
+    platform: Optional[str] = None,
+    device: Optional[str] = None,
 ) -> WatchHistoryResponse:
     if not 1 <= limit <= WATCH_HISTORY_MAX_LIMIT or offset < 0:
         raise HTTPException(status_code=400, detail="Invalid watch-history pagination")
@@ -562,7 +574,7 @@ def get_agent_watch_history(
     metadata_columns = ", summary, rating, year, genres, actors, directors" if include_metadata else ""
     sql = f"""
         SELECT
-            watch_id,
+            h.watch_id AS watch_id,
             username,
             friendly_name,
             rating_key,
@@ -575,9 +587,11 @@ def get_agent_watch_history(
             show_title,
             title,
             season_number,
-            episode_number
+            episode_number,
+            p.player, p.platform, p.product, p.device, p.platform_version, p.product_version
             {metadata_columns}
-        FROM watch_history_enriched_v
+        FROM watch_history_enriched_v h
+        LEFT JOIN watch_history_playback_v p ON p.watch_id = h.watch_id
     """
 
     conditions: list[str] = []
@@ -595,14 +609,24 @@ def get_agent_watch_history(
         conditions.append("watched_at < %s")
         params.append(until)
 
+    for column, value in (("player", player), ("platform", platform), ("device", device)):
+        if value is not None:
+            conditions.append(f"p.{column} = %s")
+            params.append(value)
+
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
 
     sql += " ORDER BY watched_at DESC NULLS LAST, watch_id DESC LIMIT %s OFFSET %s"
     params.extend([limit + 1, offset])
 
+    connection = None
     try:
-        with _get_conn() as conn:
+        dsn = os.getenv("WATCH_HISTORY_DATABASE_URL")
+        connection = psycopg2.connect(dsn, cursor_factory=RealDictCursor) if dsn else _get_conn()
+        if dsn:
+            connection.set_session(readonly=True)
+        with connection as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
@@ -612,6 +636,9 @@ def get_agent_watch_history(
             status_code=500,
             detail=f"Failed to fetch watch history: {exc}",
         ) from exc
+    finally:
+        if connection is not None and hasattr(connection, "close"):
+            connection.close()
 
     next_offset = offset + limit if len(rows) > limit else None
     rows = rows[:limit]

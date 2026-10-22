@@ -258,8 +258,12 @@ def agent_watch_history(
     since: Optional[datetime] = Query(None, description="Inclusive SQL time bound; ISO timestamp, UTC if no offset."),
     until: Optional[datetime] = Query(None, description="Exclusive SQL time bound; ISO timestamp, UTC if no offset."),
     include_metadata: bool = Query(False, description="Opt in to summary, rating, year, genres, actors, and directors."),
+    player: Optional[str] = Query(None, max_length=512, description="Exact player of the latest verified member session."),
+    platform: Optional[str] = Query(None, max_length=512, description="Exact platform of the latest verified member session."),
+    device: Optional[str] = Query(None, max_length=512, description="Exact device of the latest verified member session."),
 ):
     return get_agent_watch_history(
         user=user, limit=limit, engaged_only=engaged_only, offset=offset,
         since=since, until=until, include_metadata=include_metadata,
+        player=player, platform=platform, device=device,
     )

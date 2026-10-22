@@ -400,6 +400,8 @@ class MCPServerTests(unittest.TestCase):
                     media_type="movie",
                     show_title=None,
                     title="Heat",
+                    player="TV", platform="Linux", product="Plex", device="HTPC",
+                    platform_version="1", product_version="2",
                     summary="Crime drama",
                     season_number=None,
                     episode_number=None,
@@ -538,6 +540,12 @@ class MCPServerTests(unittest.TestCase):
         )
         self.assertEqual(results["recent_native"].structuredContent["days"], 7)
         self.assertEqual(results["history"].structuredContent["results"][0]["title"], "Heat")
+        history_row = results["history"].structuredContent["results"][0]
+        self.assertEqual(history_row["player"], "TV")
+        self.assertEqual(history_row["product_version"], "2")
+        self.assertNotIn("ip_address", history_row)
+        self.assertNotIn("session_id", history_row)
+
 
     def test_build_poster_markup_payload_uses_public_agent_url(self):
         with patch.object(
@@ -1045,6 +1053,14 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(history_tool.inputSchema["properties"]["limit"]["maximum"], 200)
         self.assertIn("since", history_tool.inputSchema["properties"])
         self.assertIn("until", history_tool.inputSchema["properties"])
+        for field in ("player", "platform", "device"):
+            self.assertIn(field, history_tool.inputSchema["properties"])
+        definitions = history_tool.outputSchema["$defs"]
+        for name in ("CompactWatchHistoryItem", "WatchHistoryItem"):
+            fields = definitions[name]["properties"]
+            self.assertIn("product_version", fields)
+            self.assertNotIn("ip_address", fields)
+            self.assertNotIn("session_id", fields)
         serialized_discovery = f"{initialize_result.model_dump()} {tools_result.model_dump()}"
         self.assertNotIn("private-sentinel", serialized_discovery)
         self.assertNotIn("jason@sheffieldave.com", serialized_discovery)
@@ -1226,6 +1242,7 @@ class MCPServerTests(unittest.TestCase):
                     history.assert_called_with(
                         user=username, limit=50, engaged_only=False, offset=200,
                         since=None, until=None, include_metadata=False,
+                        player=None, platform=None, device=None,
                     )
 
     def test_watch_history_compact_and_enriched_payloads_and_sql_bounds(self):

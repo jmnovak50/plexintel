@@ -1069,3 +1069,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS watch_embeddings_watch_id_uidx ON public.watch
 --
 -- PostgreSQL database dump complete
 --
+
+-- Fresh-install grouped reporting contract; never apply bootstrap DDL to production.
+CREATE VIEW public.watch_history_enriched_v AS
+SELECT wh.watch_id, wh.username, uv.friendly_name, wh.rating_key, wh.watched_at,
+       wh.played_duration, me.duration AS media_duration,
+       wh.played_duration::numeric / NULLIF(me.duration::numeric / 1000.0, 0) AS percent_complete,
+       CASE WHEN wh.played_duration::numeric >= 0.5 * (me.duration::numeric / 1000.0)
+            THEN true ELSE false END AS engaged,
+       me.media_type, me.show_title, me.title, me.summary, me.season_number,
+       me.episode_number, me.rating, me.year, me.genres, me.actors, me.directors
+FROM public.watch_history wh
+JOIN public.media_enriched_v me ON me.rating_key = wh.rating_key
+LEFT JOIN public.users_v uv ON uv.username = wh.username;
+
+-- Same additive session schema for fresh installs (psql bootstrap).
+BEGIN;
+\ir api/db/migrations/004_watch_sessions.sql
+COMMIT;

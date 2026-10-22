@@ -1,0 +1,5 @@
+-- Superseded pre-deployment draft. Deliberate no-op.
+-- Do not add context columns to model-facing watch_history or rewrite its views.
+-- Apply 004_watch_sessions.sql instead. No production deployment used this draft.
+-- If an environment applied an earlier draft, retain its columns pending a
+-- separately reviewed cleanup; 004 does not copy, drop, or alter history data.

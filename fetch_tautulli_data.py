@@ -70,8 +70,8 @@ def fetch_tautulli_data(endpoint, params=None):
             timeout=30,
             require_data=True,
         )
-    except TautulliApiError as e:
-        print(f"❌ ERROR: Tautulli API error occurred: {e}")
+    except TautulliApiError:
+        print("Tautulli API request failed; no source payload logged")
         return {}
     
 # 👥 ---------- User sync helpers (Tautulli → users table) ----------
@@ -426,7 +426,10 @@ def get_library_data(movies_limit=None, tv_limit=None):
 
 # ✅ Fetch watch history with pagination
 def get_watch_history():
-    return fetch_paginated_data("get_history")
+    result = fetch_watch_history_pages()
+    if not result["ok"]:
+        raise RuntimeError("Incomplete Tautulli history response")
+    return result["rows"]
 
 # ✅ Store library metadata in PostgreSQL
 def store_library_data(conn, cursor, library_data):
@@ -652,49 +655,11 @@ def store_directors(conn, cursor, rating_key, directors):
 
 
 # ✅ Store watch history in PostgreSQL
-def store_watch_history(conn, cursor, watch_history, *, raise_on_error=False):
-    insert_watch = """
-        INSERT INTO watch_history (
-            rating_key, watched_at, played_duration, percent_complete, watch_id, media_type, username,
-            title, episode_title, season_number, episode_number, friendly_name, show_rating_key
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (watch_id) 
-        DO UPDATE SET
-                played_duration = EXCLUDED.played_duration, 
-                percent_complete = EXCLUDED.percent_complete,
-                watched_at = EXCLUDED.watched_at,
-                show_rating_key = EXCLUDED.show_rating_key
-"""
-    for record in watch_history:
-        raw_watch_id = record.get("watch_id")
-        if raw_watch_id is None:
-            raw_watch_id = record.get("id")
-        watch_id = safe_int(raw_watch_id)
-        rating_key = safe_int(record.get("rating_key"))
-        if watch_id is None or rating_key is None:
-            print(f"⚠️ Skipping watch history insert due to missing watch_id or rating_key: {record}")
-            continue
-        show_rating_key = safe_int(record.get("grandparent_rating_key"))
-        if show_rating_key is None and record.get("media_type") == "season":
-            show_rating_key = safe_int(record.get("parent_rating_key"))
-        if record.get("media_type") in ("show", "series"):
-            show_rating_key = safe_int(record.get("rating_key"))
-        try:
-            cursor.execute(insert_watch, (
-                rating_key, convert_timestamp(record.get("date")), record.get("play_duration"), 
-                record.get("percent_complete"), watch_id, record.get("media_type"),
-                record.get("user"), record.get("grandparent_title") if record.get("media_type") == "episode" else record.get("title"),
-                record.get("title") if record.get("media_type") == "episode" else None,
-                convert_to_int(record.get("parent_media_index")), convert_to_int(record.get("media_index")),
-                record.get("friendly_name"),  # Added friendly_name here
-                show_rating_key
-            ))
-        except Exception as e:
-            print(f"❌ Error inserting watch history for watch_id={watch_id}: {e}")
-            if raise_on_error:
-                raise
-            conn.rollback()
+def store_watch_history(conn, cursor, watch_history, *, source_grouping, raise_on_error=True):
+    """Only explicitly grouped responses may reach the model-facing writer."""
+    from api.services.watch_history_sync import persist_grouped_history
+    return persist_grouped_history(conn, cursor, watch_history,
+                                   source_grouping=source_grouping, raise_on_error=raise_on_error)
 
 #def fetch_existing_library_data(cursor):
 #    query = "SELECT rating_key, title FROM library WHERE media_type = 'show'"
@@ -816,7 +781,9 @@ def run_incremental_load():
     backfill_missing_plex_guids(conn, cursor)
 
     # 7. Sync new watch history
-    sync_new_watch_history(conn, cursor)
+    if sync_new_watch_history(conn, cursor) is False:
+        conn.close()
+        raise RuntimeError("Watch history synchronization failed")
 
     # 8. Optionally embed new stuff immediately after sync
     if get_setting_value("embeddings.enable_media", default=True):
@@ -1098,88 +1065,32 @@ WATCH_HISTORY_PAGE_SIZE = 1000
 
 
 def fetch_watch_history_pages(after_ts=None, page_size=WATCH_HISTORY_PAGE_SIZE):
-    scope = f"after {after_ts}" if after_ts is not None else "from the beginning"
-    print(f"🕵️ Fetching all Tautulli history {scope} (paginated)")
+    from api.services.watch_history_sync import iter_history_pages
     all_rows = []
-    start = 0
-    expected_total = None
+    started = time.monotonic()
+    pages = 0
 
-    while True:
-        params = {
-            "order_dir": "asc",
-            "length": page_size,
-            "start": start,
-        }
-        if after_ts is not None:
-            params["after"] = after_ts
-
-        response = fetch_tautulli_data("get_history", params)
-        if not isinstance(response, dict):
-            return {
-                "ok": False,
-                "rows": all_rows,
-                "error": f"Page {start // page_size + 1} returned a non-object response",
-            }
-
-        rows = response.get("data")
-        if not isinstance(rows, list):
-            return {
-                "ok": False,
-                "rows": all_rows,
-                "error": f"Page {start // page_size + 1} was missing a list 'data' payload",
-            }
-
-        total_value = response.get("recordsFiltered")
-        if total_value in (None, ""):
-            total_value = response.get("recordsTotal")
-        if total_value not in (None, ""):
-            try:
-                expected_total = int(total_value)
-            except (TypeError, ValueError):
-                return {
-                    "ok": False,
-                    "rows": all_rows,
-                    "error": f"Page {start // page_size + 1} returned invalid total count: {total_value}",
-                }
-
-        print(f"📦 Page {start // page_size + 1}: Retrieved {len(rows)} rows")
-
-        all_rows.extend(rows)
-
-        if expected_total is not None and len(all_rows) > expected_total:
-            return {
-                "ok": False,
-                "rows": all_rows,
-                "error": (
-                    "Pagination returned more rows than Tautulli reported: "
-                    f"got {len(all_rows)} of {expected_total}"
-                ),
-            }
-        if expected_total is not None and len(all_rows) == expected_total:
-            break
-        if not rows:
-            break
-        if len(rows) < page_size:
-            break
-
-        start += page_size
-
-    if expected_total is not None and len(all_rows) < expected_total:
+    def result(ok):
         return {
-            "ok": False,
-            "rows": all_rows,
-            "error": (
-                "Pagination ended before all rows were fetched: "
-                f"got {len(all_rows)} of {expected_total}"
-            ),
+            "ok": ok, "rows": all_rows,
+            "error": None if ok else "Incomplete or invalid history pagination",
+            "metrics": {
+                "pages": pages, "rows": len(all_rows),
+                "fetch_seconds": round(time.monotonic() - started, 4),
+            },
         }
 
-    return {
-        "ok": True,
-        "rows": all_rows,
-        "error": None,
-        "expected_total": expected_total,
-    }
+    def fetch_page(endpoint, params):
+        nonlocal pages
+        pages += 1
+        return fetch_tautulli_data(endpoint, params)
+
+    try:
+        for rows in iter_history_pages(fetch_page, grouping=1, after=after_ts, page_size=page_size):
+            all_rows.extend(rows)
+        return result(True)
+    except Exception:
+        return result(False)
 
 
 def fetch_all_watch_history(after_ts):
@@ -1269,57 +1180,61 @@ def purge_deleted_watch_history(cursor, upstream_watch_ids):
 
 
 def sync_new_watch_history(conn, cursor):
-    print("🎬 Reconciling watch history with Tautulli...")
+    """Reconcile recent events without treating upstream absence as a deletion."""
+    from datetime import timedelta
+    started = time.monotonic()
+    cursor.execute("SELECT MAX(watched_at) FROM watch_history")
+    latest = cursor.fetchone()[0]
+    watermark_seconds = time.monotonic() - started
+    days = max(1, int(os.getenv("WATCH_HISTORY_RECONCILIATION_DAYS", "30")))
+    since = latest - timedelta(days=days) if latest else None
+    # Tautulli accepts calendar dates in its own timezone, not Unix timestamps.
+    after = (since - timedelta(days=1)).strftime("%Y-%m-%d") if since else None
+    result = fetch_watch_history_pages(after_ts=after)
+    metrics = {
+        **result.get("metrics", {}), "rows": len(result["rows"]),
+        "window_days": days, "watermark_seconds": round(watermark_seconds, 4),
+    }
 
-    cursor.execute("SELECT COUNT(*) FROM watch_history")
-    count_row = cursor.fetchone()
-    local_count = count_row[0] if count_row else 0
+    def report(status, stats=None):
+        print("Watch history sync metrics: " + json.dumps({
+            **metrics, **(stats or {}), "status": status,
+            "total_seconds": round(time.monotonic() - started, 4),
+        }, sort_keys=True))
 
-    result = fetch_watch_history_pages(after_ts=None)
     if not result["ok"]:
-        print(f"⚠️ Watch history reconciliation skipped: {result['error']}")
+        report("fetch_failed")
+        print("Watch history synchronization failed: incomplete upstream history")
         return False
-
-    rows = result["rows"]
-    print(f"🧪 Tautulli returned {len(rows)} raw rows total")
-
-    valid_rows, upstream_watch_ids, malformed_rows = normalize_watch_history_rows(rows)
-    if malformed_rows:
-        print(f"⚠️ Watch history reconciliation skipped due to {len(malformed_rows)} malformed row(s).")
-        print("⚠️ Example malformed row:")
-        print(json.dumps(malformed_rows[0], indent=2, default=str))
-        return False
-
-    if not valid_rows and local_count:
-        print(
-            "⚠️ Watch history reconciliation skipped: Tautulli returned zero valid "
-            f"rows while {local_count} local row(s) exist."
-        )
-        return False
-
-    print(f"📥 Found {len(valid_rows)} valid watch history rows. Upserting...")
-
-    if valid_rows:
-        latest_insert = max(safe_int(r.get("date")) or 0 for r in valid_rows)
-        if latest_insert:
-            print(f"🆕 Most recent fetched watched_at: {datetime.fromtimestamp(latest_insert, timezone.utc)}")
-
+    persistence_started = time.monotonic()
     try:
-        store_watch_history(conn, cursor, valid_rows, raise_on_error=True)
-        purge_counts = purge_deleted_watch_history(cursor, upstream_watch_ids)
+        stats = store_watch_history(conn, cursor, result["rows"], source_grouping=1, raise_on_error=True)
         conn.commit()
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        print(f"❌ Watch history reconciliation failed; rolled back changes: {e}")
+        metrics["persistence_seconds"] = round(time.monotonic() - persistence_started, 4)
+        report("rolled_back")
+        print("Watch history synchronization failed; transaction rolled back")
         return False
-
-    print(
-        "✅ Watch history reconciliation complete. "
-        f"Deleted {purge_counts['deleted_watch_rows']} stale watch row(s), "
-        f"{purge_counts['deleted_embedding_rows']} stale watch embedding(s), "
-        f"{purge_counts['deleted_orphan_embeddings']} orphan watch embedding(s)."
-    )
+    metrics["persistence_seconds"] = round(time.monotonic() - persistence_started, 4)
+    report("committed", stats)
     return True
+
+
+def run_watch_sessions(*, dry_run=False, since=None, until=None, page_size=1000, incremental=False):
+    """Separate credential and entrypoint; never use the model writer connection."""
+    import psycopg2
+    from api.services.watch_session_sync import ingest_sessions
+    dsn = os.getenv("WATCH_SESSIONS_DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("WATCH_SESSIONS_DATABASE_URL must name the dedicated restricted session writer")
+    conn = psycopg2.connect(dsn)
+    try:
+        return ingest_sessions(conn, dry_run=dry_run, since=since, until=until,
+                               page_size=page_size, incremental=incremental)
+    finally:
+        conn.close()
+
 
 def generate_media_embeddings(batch_size: int | None = None):
     """
@@ -1603,7 +1518,7 @@ def main():
 
         # Fetch and store watch history
         watch_history = get_watch_history()
-        store_watch_history(conn, cursor, watch_history)
+        store_watch_history(conn, cursor, watch_history, source_grouping=1)
 
         # 🔥 Crucial: commit database changes after cursor block
         conn.commit()
@@ -1622,21 +1537,31 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plex/Tautulli Media Metadata Importer")
     parser.add_argument(
         "--mode",
-        choices=["full", "incremental", "recover", "embeddings", "watch_embeddings", "backfill_cast_order"],
+        choices=["full", "incremental", "recover", "embeddings", "watch_embeddings", "backfill_cast_order", "watch-history-backfill", "watch-sessions-backfill", "watch-sessions-sync"],
         default="full",
-        help="Select run mode: full (default), incremental, recover missing items, generate embeddings, generate watch history embeddings, or backfill actor cast order",
+        help="Select grouped ingestion, recovery, embeddings, or independent watch-sessions sync/backfill",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="If set, missing items will only be printed and NOT inserted into the database",
+        help="Preview raw-session backfill changes without writes, or preview recover mode",
     )
+    parser.add_argument("--since", help="Inclusive UTC ISO timestamp for raw-session backfill")
+    parser.add_argument("--until", help="Exclusive UTC ISO timestamp for raw-session backfill")
+    parser.add_argument("--page-size", type=int, default=1000)
     args = parser.parse_args()
 
     print(f"🚀 Starting script in '{args.mode}' mode...")
 
     if args.mode == "full":
         main()
+    elif args.mode in ("watch-history-backfill", "watch-sessions-backfill", "watch-sessions-sync"):
+        if args.mode == "watch-history-backfill":
+            print("Deprecated mode alias: backfill writes watch_sessions only")
+        stats = run_watch_sessions(dry_run=args.dry_run, since=args.since,
+                                  until=args.until, page_size=args.page_size,
+                                  incremental=args.mode == "watch-sessions-sync")
+        raise SystemExit(1 if stats["failed"] or stats["errors"] else 0)
     elif args.mode == "incremental":
         run_incremental_load()
     elif args.mode == "recover":

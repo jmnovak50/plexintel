@@ -1593,6 +1593,10 @@ def _build_mcp_server() -> FastMCP:
         name="get_watch_history",
         description=(
             "Return compact Plex playback events for ONE user by default (50 per page; max 200). "
+            "Includes nullable player, platform, product, device, platform_version and product_version "
+            "from the latest verified member session (start time, then source ID); "
+            "filters apply to that representative, not every session in a group. "
+            "raw IP addresses and source session identifiers are never returned. "
             "Pass since (inclusive) and until (exclusive) to filter in SQL before pagination. "
             "ISO timestamps without offsets mean UTC. Full enrichment is opt-in via "
             "include_metadata=true; leave it false for viewing history and global aggregation. "
@@ -1632,11 +1636,15 @@ def _build_mcp_server() -> FastMCP:
         since: Annotated[Optional[datetime], Field(description="Inclusive SQL time bound; UTC if no offset.")] = None,
         until: Annotated[Optional[datetime], Field(description="Exclusive SQL time bound; UTC if no offset.")] = None,
         include_metadata: Annotated[bool, Field(description="Opt in to summary, rating, year, genres, actors, and directors.")] = False,
+        player: Annotated[Optional[str], Field(max_length=512, description="Exact player filter.")] = None,
+        platform: Annotated[Optional[str], Field(max_length=512, description="Exact platform filter.")] = None,
+        device: Annotated[Optional[str], Field(max_length=512, description="Exact device filter.")] = None,
     ) -> WatchHistoryResponse:
         resolved_user = _resolve_mcp_user(user)
         return get_agent_watch_history(
             user=resolved_user, limit=limit, engaged_only=engaged_only, offset=offset,
             since=since, until=until, include_metadata=include_metadata,
+            player=player, platform=platform, device=device,
         )
 
     return mcp

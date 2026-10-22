@@ -15,7 +15,7 @@ def compact_sql(sql):
 
 class FakeWatchCursor:
     def __init__(self, *, local_count=0, rowcounts=None):
-        self.local_count = local_count
+        self.local_count = None
         self.rowcounts = rowcounts or {}
         self.executed = []
         self.rowcount = 0
@@ -108,7 +108,7 @@ class TautulliWatchReconciliationTests(unittest.TestCase):
             result = tautulli_sync.fetch_watch_history_pages(page_size=2)
 
         self.assertFalse(result["ok"])
-        self.assertIn("missing a list 'data'", result["error"])
+        self.assertIn("history pagination", result["error"])
 
     def test_fetch_pages_detects_incomplete_pagination(self):
         pages = [
@@ -120,67 +120,21 @@ class TautulliWatchReconciliationTests(unittest.TestCase):
             result = tautulli_sync.fetch_watch_history_pages(page_size=2)
 
         self.assertFalse(result["ok"])
-        self.assertIn("got 2 of 3", result["error"])
+        self.assertIn("history pagination", result["error"])
 
-    def test_sync_reconciles_deleted_watch_rows_and_embeddings(self):
+    def test_sync_preserves_history_and_embeddings_and_uses_date_window(self):
+        from datetime import datetime
         conn = FakeWatchConnection()
-        cursor = FakeWatchCursor(
-            local_count=2,
-            rowcounts={
-                "DELETE FROM watch_embeddings we USING watch_history wh": 1,
-                "DELETE FROM watch_history": 1,
-                "DELETE FROM watch_embeddings we WHERE NOT EXISTS": 0,
-            },
-        )
-        fetch_result = {
-            "ok": True,
-            "rows": [
-                {
-                    "id": "100",
-                    "rating_key": "500",
-                    "date": "1760000000",
-                    "play_duration": 1200,
-                    "percent_complete": 95,
-                    "media_type": "movie",
-                    "user": "jason",
-                    "title": "Arrival",
-                    "friendly_name": "Jason",
-                }
-            ],
-            "error": None,
-        }
-
-        with patch.object(tautulli_sync, "fetch_watch_history_pages", return_value=fetch_result):
-            result = tautulli_sync.sync_new_watch_history(conn, cursor)
-
-        self.assertTrue(result)
+        cursor = FakeWatchCursor()
+        cursor.local_count = datetime(2026, 10, 20)
+        with patch.object(tautulli_sync, "fetch_watch_history_pages", return_value={
+            "ok": True, "rows": [{"id": "100", "rating_key": "500"}],
+        }) as fetch, patch.object(tautulli_sync, "store_watch_history", return_value={}) as store:
+            self.assertTrue(tautulli_sync.sync_new_watch_history(conn, cursor))
+        fetch.assert_called_once_with(after_ts="2026-09-19")
+        store.assert_called_once()
         self.assertEqual(conn.commit_count, 1)
-        self.assertEqual(conn.rollback_count, 0)
-
-        statements = [sql for sql, _params in cursor.executed]
-        insert_index = next(i for i, sql in enumerate(statements) if sql.startswith("INSERT INTO watch_history"))
-        stale_embedding_index = next(
-            i for i, sql in enumerate(statements)
-            if sql.startswith("DELETE FROM watch_embeddings we USING watch_history wh")
-        )
-        stale_watch_index = next(i for i, sql in enumerate(statements) if sql.startswith("DELETE FROM watch_history"))
-        orphan_embedding_index = next(
-            i for i, sql in enumerate(statements)
-            if sql.startswith("DELETE FROM watch_embeddings we WHERE NOT EXISTS")
-        )
-
-        self.assertLess(insert_index, stale_embedding_index)
-        self.assertLess(stale_embedding_index, stale_watch_index)
-        self.assertLess(stale_watch_index, orphan_embedding_index)
-
-        insert_params = cursor.executed[insert_index][1]
-        self.assertEqual(insert_params[0], 500)
-        self.assertEqual(insert_params[4], 100)
-        self.assertIn("we.watch_id::text = wh.watch_id::text", statements[stale_embedding_index])
-        self.assertIn("wh.watch_id::text = ANY(%s)", statements[stale_embedding_index])
-        self.assertIn("watch_id::text = ANY(%s)", statements[stale_watch_index])
-        self.assertIn("wh.watch_id::text = we.watch_id::text", statements[orphan_embedding_index])
-        self.assertEqual(cursor.executed[stale_watch_index][1], (["100"],))
+        self.assertFalse(any(sql.startswith("DELETE") for sql, _ in cursor.executed))
 
     def test_sync_aborts_without_deleting_on_fetch_failure(self):
         conn = FakeWatchConnection()
@@ -197,7 +151,7 @@ class TautulliWatchReconciliationTests(unittest.TestCase):
         self.assertEqual(conn.commit_count, 0)
         self.assertFalse(any(sql.startswith("DELETE FROM") for sql, _params in cursor.executed))
 
-    def test_sync_aborts_without_deleting_on_malformed_rows(self):
+    def test_sync_skips_malformed_rows_without_deleting(self):
         conn = FakeWatchConnection()
         cursor = FakeWatchCursor(local_count=2)
 
@@ -208,11 +162,11 @@ class TautulliWatchReconciliationTests(unittest.TestCase):
         ):
             result = tautulli_sync.sync_new_watch_history(conn, cursor)
 
-        self.assertFalse(result)
-        self.assertEqual(conn.commit_count, 0)
+        self.assertTrue(result)
+        self.assertEqual(conn.commit_count, 1)
         self.assertFalse(any(sql.startswith("DELETE FROM") for sql, _params in cursor.executed))
 
-    def test_sync_aborts_without_deleting_on_suspicious_empty_upstream(self):
+    def test_sync_preserves_rows_on_empty_upstream(self):
         conn = FakeWatchConnection()
         cursor = FakeWatchCursor(local_count=2)
 
@@ -223,8 +177,8 @@ class TautulliWatchReconciliationTests(unittest.TestCase):
         ):
             result = tautulli_sync.sync_new_watch_history(conn, cursor)
 
-        self.assertFalse(result)
-        self.assertEqual(conn.commit_count, 0)
+        self.assertTrue(result)
+        self.assertEqual(conn.commit_count, 1)
         self.assertFalse(any(sql.startswith("DELETE FROM") for sql, _params in cursor.executed))
 
 
@@ -326,6 +280,55 @@ class UserEmbeddingRebuildTests(unittest.TestCase):
             stored_embedding.to_numpy(),
             np.array([0.5, 0.5], dtype=np.float32),
         )
+
+
+
+
+class WatchHistoryMetricsTests(unittest.TestCase):
+    def test_fetch_metrics_cover_every_page_without_logging_source_payloads(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        output = StringIO()
+        pages = [
+            {'recordsFiltered': 2, 'data': [{'id': 1, 'rating_key': 5, 'ip_address': '192.0.2.99'}]},
+            {'recordsFiltered': 2, 'data': [{'id': 2, 'rating_key': 5}]},
+        ]
+        with patch.object(tautulli_sync, 'fetch_tautulli_data', side_effect=pages), redirect_stdout(output):
+            result = tautulli_sync.fetch_watch_history_pages(page_size=1)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['metrics']['pages'], 2)
+        self.assertEqual(result['metrics']['rows'], 2)
+        self.assertGreaterEqual(result['metrics']['fetch_seconds'], 0)
+        self.assertNotIn('192.0.2.99', output.getvalue())
+
+    def test_sync_metrics_report_committed_counts_and_duration(self):
+        import json
+        from contextlib import redirect_stdout
+        from io import StringIO
+        conn, cursor, output = FakeWatchConnection(), FakeWatchCursor(), StringIO()
+        with patch.object(tautulli_sync, 'fetch_watch_history_pages', return_value={
+            'ok': True, 'rows': [{'id': i + 1, 'rating_key': 5} for i in range(12)],
+            'metrics': {'pages': 1, 'fetch_seconds': 0.1},
+        }), patch.object(tautulli_sync, 'store_watch_history', return_value={
+            'inserted': 0, 'updated': 0, 'unchanged': 12, 'skipped': 0, 'failed': 0,
+        }), redirect_stdout(output):
+            self.assertTrue(tautulli_sync.sync_new_watch_history(conn, cursor))
+        metrics = json.loads(output.getvalue().split('Watch history sync metrics: ')[1])
+        self.assertEqual(metrics['status'], 'committed')
+        self.assertEqual(metrics['unchanged'], 12)
+        self.assertEqual(metrics['rows'], 12)
+        self.assertEqual(metrics['pages'], 1)
+        for key in ('watermark_seconds', 'fetch_seconds', 'persistence_seconds', 'total_seconds'):
+            self.assertGreaterEqual(metrics[key], 0)
+
+    def test_empty_history_still_records_the_api_page_request(self):
+        with patch.object(tautulli_sync, 'fetch_tautulli_data', return_value={
+            'recordsFiltered': 0, 'data': [],
+        }):
+            result = tautulli_sync.fetch_watch_history_pages()
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['metrics']['pages'], 1)
+        self.assertEqual(result['metrics']['rows'], 0)
 
 
 if __name__ == "__main__":
