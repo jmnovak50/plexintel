@@ -5,6 +5,9 @@ from fastapi import APIRouter, Query, Depends, Request
 from pydantic import BaseModel, Field
 
 from api.db.connection import connect_db
+from api.services.library_stats_service import (
+    LibraryStatsMediaType, LibraryStatsResponse, get_library_stats,
+)
 from api.services.agent_tool_service import (
     AgentRecommendationScore,
     AgentRecommendationsResponse,
@@ -35,6 +38,16 @@ from api.services.agent_auth import (
 )
 
 router = APIRouter(dependencies=[Depends(require_agent_principal)])
+
+
+@router.get("/library/stats", response_model=LibraryStatsResponse)
+@sanitize_agent_errors
+def agent_library_stats(
+    since: Optional[datetime] = Query(None, description="Inclusive added_at bound; ISO timestamp, UTC if no offset."),
+    until: Optional[datetime] = Query(None, description="Exclusive added_at bound; defaults to now in UTC."),
+    media_type: Optional[LibraryStatsMediaType] = Query(None),
+):
+    return get_library_stats(since=since, until=until, media_type=media_type)
 
 
 class FeedbackPayload(BaseModel):

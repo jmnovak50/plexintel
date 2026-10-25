@@ -14,6 +14,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
+import httpx
+from fastapi import FastAPI, HTTPException
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, Icon, ImageContent, TextContent, Tool as MCPTool, ToolAnnotations
@@ -42,6 +44,8 @@ from api.services.agent_tool_service import (
     search_agent_library,
 )
 from api.services.app_settings import get_setting_value
+from api.services.agent_auth import AgentPrincipal, require_agent_principal
+from api.services.library_stats_service import LibraryStatsMediaType, LibraryStatsResponse
 from api.services.mcp_auth import (
     MCPAuthContext,
     MCPOAuthSettings,
@@ -1269,7 +1273,26 @@ class MCPPathCompatibilityMiddleware:
         await self.app(scope, receive, send)
 
 
+def _library_stats_mcp_principal() -> AgentPrincipal:
+    """Bridge an already verified MCP identity to the in-process REST request.
+
+    This dependency override belongs only to the private ASGI client, never to
+    the public FastAPI application. Static MCP credentials retain catalog access.
+    """
+    context = get_current_mcp_auth_context()
+    if context is None or (context.auth_method == "jwt" and not context.plex_username):
+        raise HTTPException(401, "Authentication required")
+    return AgentPrincipal("mcp", context.plex_username, context.is_admin)
+
+
 def _build_mcp_server() -> FastMCP:
+    from api.routes.agent_tools import router as agent_router
+
+    # Existing tools share services directly; this tool needs the REST contract.
+    # In-process HTTP avoids new credentials, network configuration or DB clients.
+    stats_api = FastAPI()
+    stats_api.include_router(agent_router, prefix="/api/agent")
+    stats_api.dependency_overrides[require_agent_principal] = _library_stats_mcp_principal
     server_name = get_setting_value("mcp.server_name", default="PlexIntel")
     instructions = get_setting_value("mcp.instructions")
     instruction_parts = [
@@ -1304,6 +1327,37 @@ def _build_mcp_server() -> FastMCP:
 
     def oauth_tool_security_schemes() -> list[dict[str, Any]]:
         return [{"type": "oauth2", "scopes": list(oauth_settings.required_scopes)}]
+
+    @mcp.tool(
+        name="get_library_stats",
+        description=(
+            "Return exact database-aggregated library counts for movies, TV shows, seasons and episodes. "
+            "Use for how many items were added this year/month, date-range breakdowns, or library totals. "
+            "Call once with since at the start of the requested period and optional until (exclusive, defaults to now). "
+            "ISO timestamps without offsets mean UTC. Omit since for inventory across all addition dates. "
+            "Counts cover synced library records, not historical deletion/addition events; unsupported categories are explicit. "
+            "No search pagination limits apply. Use search_library for item lists, title/actor/genre searches or posters. "
+            "Format the structured results as Markdown/table/prose in the conversation as requested."
+        ),
+        structured_output=True,
+        annotations=tool_annotations,
+        security_schemes=oauth_tool_security_schemes(),
+    )
+    async def mcp_get_library_stats(
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        media_type: Optional[LibraryStatsMediaType] = None,
+    ) -> LibraryStatsResponse:
+        params = {key: value.isoformat() if isinstance(value, datetime) else value
+                  for key, value in {"since": since, "until": until, "media_type": media_type}.items()
+                  if value is not None}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=stats_api), base_url="http://plexintel-internal",
+        ) as client:
+            response = await client.get("/api/agent/library/stats", params=params)
+        if response.is_error:
+            raise ValueError(f"Library statistics API returned HTTP {response.status_code}: {response.json().get('detail')}")
+        return LibraryStatsResponse.model_validate(response.json())
 
     @mcp.resource(
         RECENT_ADDITIONS_WIDGET_URI,

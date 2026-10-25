@@ -198,6 +198,7 @@ class MCPServerTests(unittest.TestCase):
             "get_recent_library_additions_native": {},
             "render_recent_library_additions": {"items": []},
             "get_watch_history": {},
+            "get_library_stats": {},
         }
         async with mcp_server.mcp_runtime.lifespan():
             async with httpx.AsyncClient(
@@ -468,6 +469,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_recommendations",
                 "get_recommendation_score",
                 "search_library",
+                "get_library_stats",
                 "get_library_item",
                 "get_poster_image",
                 "get_poster_gallery",
@@ -546,6 +548,28 @@ class MCPServerTests(unittest.TestCase):
         self.assertNotIn("ip_address", history_row)
         self.assertNotIn("session_id", history_row)
 
+
+    def test_library_stats_protocol_calls_authenticated_rest(self):
+        from api.routes import agent_tools
+        from api.services.library_stats_service import LibraryStatsResponse, LibraryStatsPeriod
+        from datetime import timezone
+
+        payload = LibraryStatsResponse(
+            period=LibraryStatsPeriod(since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                                      until=datetime(2026, 10, 25, tzinfo=timezone.utc)),
+            media_type=None, counts={"movies": 125, "shows": 20, "seasons": 35, "episodes": 300},
+            total=480, unsupported_categories=[], added_at_timezone="America/Chicago",
+        )
+        with patch.object(mcp_server, "get_mcp_runtime_settings", return_value=self._enabled_settings()), \
+             patch.object(agent_tools, "get_library_stats", return_value=payload) as query:
+            result = anyio.run(lambda: self._exercise_single_tool_call(
+                "get_library_stats", {"since": "2026-01-01T00:00:00Z"},
+                headers={"authorization": "Bearer test-mcp-token"},
+            ))
+        self.assertFalse(result.isError)
+        self.assertEqual(result.structuredContent, payload.model_dump(mode="json"))
+        query.assert_called_once_with(since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                                      until=None, media_type=None)
 
     def test_build_poster_markup_payload_uses_public_agent_url(self):
         with patch.object(
@@ -1071,6 +1095,7 @@ class MCPServerTests(unittest.TestCase):
             "get_recommendations",
             "get_recommendation_score",
             "search_library",
+            "get_library_stats",
             "get_library_item",
             "get_poster_image",
             "get_poster_gallery",
@@ -1111,6 +1136,7 @@ class MCPServerTests(unittest.TestCase):
                 "get_recommendations",
                 "get_recommendation_score",
                 "search_library",
+                "get_library_stats",
                 "get_library_item",
                 "get_poster_image",
                 "get_poster_gallery",
@@ -1187,7 +1213,7 @@ class MCPServerTests(unittest.TestCase):
                 lambda: self._exercise_unauthenticated_protocol(call_tools=True)
             )
 
-        self.assertEqual(len(call_results), 13)
+        self.assertEqual(len(call_results), 14)
         for tool_name, result in call_results.items():
             self.assertTrue(result.isError, tool_name)
             self.assertEqual(result.content[0].text, "Authentication required.", tool_name)
