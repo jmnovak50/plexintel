@@ -16,3 +16,5 @@ logs/
 .secrets/
 .env
 .env.*
+.seer_creds
+artifacts/seerr-exploration/

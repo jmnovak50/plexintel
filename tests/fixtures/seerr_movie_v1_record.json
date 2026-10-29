@@ -1,0 +1,430 @@
+{
+  "source": "synthetic fixture normalized and hashed by pre-unification implementation",
+  "raw_movie": {
+    "id": 701,
+    "title": "Fixture 701",
+    "originalTitle": "Original 701",
+    "mediaType": "movie",
+    "overview": "Descriptive synopsis",
+    "originalLanguage": "en",
+    "runtime": 90,
+    "releaseDate": "2026-11-01",
+    "popularity": 1.2,
+    "voteCount": 0,
+    "voteAverage": 0,
+    "genres": [
+      {
+        "id": 18,
+        "name": "Drama"
+      }
+    ],
+    "productionCountries": [
+      {
+        "iso_3166_1": "US",
+        "name": "United States"
+      }
+    ],
+    "productionCompanies": [
+      {
+        "id": 1,
+        "name": "Fixture Studio",
+        "originCountry": "US"
+      }
+    ],
+    "credits": {
+      "cast": [
+        {
+          "id": 1,
+          "name": "Fixture Actor",
+          "order": 0
+        }
+      ],
+      "crew": [
+        {
+          "id": 2,
+          "name": "Fixture Director",
+          "job": "Director"
+        }
+      ]
+    },
+    "releases": {
+      "results": [
+        {
+          "iso_3166_1": "US",
+          "release_dates": [
+            {
+              "type": 4,
+              "release_date": "2026-12-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "sanitized_movie": {
+    "id": 701,
+    "title": "Fixture 701",
+    "originalTitle": "Original 701",
+    "overview": "Descriptive synopsis",
+    "originalLanguage": "en",
+    "releaseDate": "2026-11-01",
+    "popularity": 1.2,
+    "voteCount": 0,
+    "voteAverage": 0,
+    "runtime": 90,
+    "genres": [
+      {
+        "id": 18,
+        "name": "Drama"
+      }
+    ],
+    "productionCountries": [
+      {
+        "iso_3166_1": "US",
+        "name": "United States"
+      }
+    ],
+    "productionCompanies": [
+      {
+        "id": 1,
+        "name": "Fixture Studio",
+        "originCountry": "US"
+      }
+    ],
+    "credits": {
+      "cast": [
+        {
+          "id": 1,
+          "name": "Fixture Actor",
+          "order": 0
+        }
+      ],
+      "crew": [
+        {
+          "id": 2,
+          "name": "Fixture Director",
+          "job": "Director"
+        }
+      ]
+    },
+    "releases": {
+      "_fields": {
+        "results": "value"
+      },
+      "results": [
+        {
+          "iso_3166_1": "US",
+          "_fields": {
+            "release_dates": "value"
+          },
+          "release_dates": [
+            {
+              "type": 4,
+              "release_date": "2026-12-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "_fields": {
+      "title": "value",
+      "originalTitle": "value",
+      "overview": "value",
+      "originalLanguage": "value",
+      "releaseDate": "value",
+      "status": "omitted",
+      "imdbId": "omitted",
+      "posterPath": "omitted",
+      "backdropPath": "omitted",
+      "popularity": "value",
+      "voteCount": "value",
+      "voteAverage": "value",
+      "runtime": "value",
+      "adult": "omitted",
+      "video": "omitted",
+      "genres": "value",
+      "productionCountries": "value",
+      "productionCompanies": "value",
+      "genreIds": "omitted",
+      "credits": "value",
+      "releases": "value",
+      "mediaInfo": "omitted"
+    }
+  },
+  "canonical_movie_v1": {
+    "tmdb_id": 701,
+    "title": "Fixture 701",
+    "original_title": "Original 701",
+    "synopsis": "Descriptive synopsis",
+    "original_language": "en",
+    "release_date": "2026-11-01",
+    "runtime": 90,
+    "genres": [
+      {
+        "id": 18,
+        "name": "Drama"
+      }
+    ],
+    "directors": [
+      "Fixture Director"
+    ],
+    "cast_members": [
+      {
+        "id": 1,
+        "name": "Fixture Actor",
+        "order": 0
+      }
+    ],
+    "crew_members": [
+      {
+        "id": 2,
+        "name": "Fixture Director",
+        "job": "Director"
+      }
+    ],
+    "production_countries": [
+      {
+        "iso_3166_1": "US",
+        "name": "United States"
+      }
+    ],
+    "production_companies": [
+      {
+        "id": 1,
+        "name": "Fixture Studio",
+        "originCountry": "US"
+      }
+    ],
+    "popularity": 1.2,
+    "vote_count": 0,
+    "vote_average": 0.0,
+    "release_events": [
+      {
+        "country": "US",
+        "type": 4,
+        "release_date": "2026-12-01T00:00:00Z"
+      }
+    ],
+    "media_status": null,
+    "media_status_4k": null,
+    "media_state": {
+      "media_info": "omitted",
+      "status": "omitted",
+      "status4k": "omitted",
+      "requests": "omitted",
+      "request_count": null,
+      "request_states": null
+    },
+    "field_states": {
+      "title": "value",
+      "original_title": "value",
+      "synopsis": "value",
+      "original_language": "value",
+      "release_date": "value",
+      "runtime": "value",
+      "genres": "value",
+      "production_countries": "value",
+      "production_companies": "value",
+      "popularity": "value",
+      "vote_count": "value",
+      "vote_average": "value",
+      "cast_members": "value",
+      "crew_members": "value",
+      "directors": "value",
+      "release_events": "value"
+    },
+    "discovery_release_date": "2026-11-01",
+    "first_discovered_at": "2026-10-28T14:00:00+00:00",
+    "first_discovery_run_id": "11111111-1111-4111-8111-111111111111",
+    "last_observed_at": "2026-10-28T14:00:00+00:00",
+    "last_enriched_at": "2026-10-28T14:00:00+00:00",
+    "last_enrichment_attempt_at": "2026-10-28T14:00:00+00:00",
+    "metadata_updated_at": "2026-10-28T14:00:00+00:00",
+    "enrichment_status": "success",
+    "enrichment_error": null,
+    "metadata_source_key": "65622f37e6d4c2b67cd1f675e3c3a89982a65a38d41a4157161a27c0297eeb80",
+    "source_metadata": {
+      "discovery": {
+        "id": 701,
+        "title": "Fixture 701",
+        "originalTitle": "Original 701",
+        "overview": "Descriptive synopsis",
+        "originalLanguage": "en",
+        "releaseDate": "2026-11-01",
+        "popularity": 1.2,
+        "voteCount": 0,
+        "voteAverage": 0,
+        "runtime": 90,
+        "genres": [
+          {
+            "id": 18,
+            "name": "Drama"
+          }
+        ],
+        "productionCountries": [
+          {
+            "iso_3166_1": "US",
+            "name": "United States"
+          }
+        ],
+        "productionCompanies": [
+          {
+            "id": 1,
+            "name": "Fixture Studio",
+            "originCountry": "US"
+          }
+        ],
+        "credits": {
+          "cast": [
+            {
+              "id": 1,
+              "name": "Fixture Actor",
+              "order": 0
+            }
+          ],
+          "crew": [
+            {
+              "id": 2,
+              "name": "Fixture Director",
+              "job": "Director"
+            }
+          ]
+        },
+        "releases": {
+          "_fields": {
+            "results": "value"
+          },
+          "results": [
+            {
+              "iso_3166_1": "US",
+              "_fields": {
+                "release_dates": "value"
+              },
+              "release_dates": [
+                {
+                  "type": 4,
+                  "release_date": "2026-12-01T00:00:00Z"
+                }
+              ]
+            }
+          ]
+        },
+        "_fields": {
+          "title": "value",
+          "originalTitle": "value",
+          "overview": "value",
+          "originalLanguage": "value",
+          "releaseDate": "value",
+          "status": "omitted",
+          "imdbId": "omitted",
+          "posterPath": "omitted",
+          "backdropPath": "omitted",
+          "popularity": "value",
+          "voteCount": "value",
+          "voteAverage": "value",
+          "runtime": "value",
+          "adult": "omitted",
+          "video": "omitted",
+          "genres": "value",
+          "productionCountries": "value",
+          "productionCompanies": "value",
+          "genreIds": "omitted",
+          "credits": "value",
+          "releases": "value",
+          "mediaInfo": "omitted"
+        }
+      },
+      "detail": {
+        "id": 701,
+        "title": "Fixture 701",
+        "originalTitle": "Original 701",
+        "overview": "Descriptive synopsis",
+        "originalLanguage": "en",
+        "releaseDate": "2026-11-01",
+        "popularity": 1.2,
+        "voteCount": 0,
+        "voteAverage": 0,
+        "runtime": 90,
+        "genres": [
+          {
+            "id": 18,
+            "name": "Drama"
+          }
+        ],
+        "productionCountries": [
+          {
+            "iso_3166_1": "US",
+            "name": "United States"
+          }
+        ],
+        "productionCompanies": [
+          {
+            "id": 1,
+            "name": "Fixture Studio",
+            "originCountry": "US"
+          }
+        ],
+        "credits": {
+          "cast": [
+            {
+              "id": 1,
+              "name": "Fixture Actor",
+              "order": 0
+            }
+          ],
+          "crew": [
+            {
+              "id": 2,
+              "name": "Fixture Director",
+              "job": "Director"
+            }
+          ]
+        },
+        "releases": {
+          "_fields": {
+            "results": "value"
+          },
+          "results": [
+            {
+              "iso_3166_1": "US",
+              "_fields": {
+                "release_dates": "value"
+              },
+              "release_dates": [
+                {
+                  "type": 4,
+                  "release_date": "2026-12-01T00:00:00Z"
+                }
+              ]
+            }
+          ]
+        },
+        "_fields": {
+          "title": "value",
+          "originalTitle": "value",
+          "overview": "value",
+          "originalLanguage": "value",
+          "releaseDate": "value",
+          "status": "omitted",
+          "imdbId": "omitted",
+          "posterPath": "omitted",
+          "backdropPath": "omitted",
+          "popularity": "value",
+          "voteCount": "value",
+          "voteAverage": "value",
+          "runtime": "value",
+          "adult": "omitted",
+          "video": "omitted",
+          "genres": "value",
+          "productionCountries": "value",
+          "productionCompanies": "value",
+          "genreIds": "omitted",
+          "credits": "value",
+          "releases": "value",
+          "mediaInfo": "omitted"
+        }
+      }
+    },
+    "metadata_fingerprint": "bfc9d235d8c54745c01ab991a5368bb1a9b3ba094af965e49d2a398910746a7d"
+  }
+}

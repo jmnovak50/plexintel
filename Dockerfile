@@ -38,6 +38,8 @@ RUN pip install --no-index --find-links=/wheels -r /app/requirements.runtime.txt
     && rm -rf /wheels
 
 COPY api /app/api
+COPY scripts/sync_seerr_discovery.py /app/scripts/sync_seerr_discovery.py
+COPY deploy/seerr-discovery.env.example /app/deploy/seerr-discovery.env.example
 COPY bootstrap.sh create.sql /app/
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
 

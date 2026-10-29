@@ -1,6 +1,6 @@
 # Secrets
 .env
-
+.seer_creds
 # Python junk
 __pycache__/
 *.py[cod]
@@ -38,5 +38,6 @@ xgb_model.pkl
 
 # Private operator credentials
 .secrets/
+artifacts/seerr-exploration/
 .env.*
 !.env.example
