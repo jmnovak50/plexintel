@@ -588,7 +588,7 @@ def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[st
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT run_id, status, current_pid
+                SELECT run_id, status, current_pid, delivery_type
                 FROM public.pipeline_runs
                 WHERE run_id = %s
                 FOR UPDATE
@@ -599,6 +599,12 @@ def request_pipeline_cancel(*, run_id: int, requested_by: str | None) -> dict[st
             if row is None:
                 conn.commit()
                 return {"status": "not_found", "run_id": run_id}
+
+            delivery = row.get('delivery_type', '') if hasattr(row, 'get') else (row[3] if len(row)>3 else '')
+            if str(delivery).startswith('content_discovery_'):
+                # This worker is not an ML subprocess. Marking it cancelled here
+                # would falsely imply that its canonical writer had stopped.
+                return {"status": "independent_workflow", "run_id": run_id}
 
             current_status = str(_row_value(row, "status", 1))
             if current_status in TERMINAL_RUN_STATUSES:

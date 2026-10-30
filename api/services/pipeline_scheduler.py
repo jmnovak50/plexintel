@@ -37,6 +37,15 @@ async def _scheduler_loop(interval_seconds: int) -> None:
             raise
         except Exception as exc:
             print(f"Pipeline scheduler error: {exc}")
+        # Independent operation, never an ML pipeline stage. Fast no-op unless
+        # separately activated server gates and per-operation settings agree.
+        from api.services.discovery_workflow import run_scheduled_discovery
+        try:
+            await asyncio.to_thread(run_scheduled_discovery)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            print("Content discovery scheduler unavailable; no automatic retry run.")
         await asyncio.sleep(interval_seconds)
 
 

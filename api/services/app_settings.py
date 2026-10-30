@@ -38,6 +38,7 @@ SECTION_DEFINITIONS: tuple[dict[str, str], ...] = (
     {"key": "advanced_labeling", "label": "Advanced Labeling"},
     {"key": "email_digests", "label": "Email & Digests"},
     {"key": "pipeline", "label": "Nightly pipeline"},
+    {"key": "discovery", "label": "Content Discovery scheduling"},
 )
 
 
@@ -1227,6 +1228,18 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
     ),
 )
 
+# Scheduling intent only. Provider credentials and ingestion limits remain owned
+# by the existing private-file/environment contract, including CLI executions.
+SETTING_DEFINITIONS += (
+    _setting('discovery.timezone','discovery','Discovery timezone','string',default='UTC'),
+    *(_setting(f'discovery.{operation}.enabled','discovery',f'{operation.title()} schedule enabled','boolean',default=False)
+      for operation in ('daily','sweep','refresh')),
+    *(_setting(f'discovery.{operation}.time','discovery',f'{operation.title()} time','string',default=hour)
+      for operation,hour in (('daily','09:00'),('sweep','10:00'),('refresh','11:00'))),
+    _setting('discovery.sweep.day','discovery','Wider sweep weekday','integer',default=6,minimum=0,maximum=6),
+    _setting('discovery.sweep.lookback','discovery','Sweep lookback days','integer',default=365,minimum=0,maximum=3650),
+    _setting('discovery.sweep.lookahead','discovery','Sweep lookahead days','integer',default=365,minimum=0,maximum=3650),
+)
 SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFINITIONS}
 
 
@@ -1345,9 +1358,9 @@ def parse_value(definition: SettingDefinition, value: Any) -> Any:
             parsed_value = _normalize_url(parsed_value)
         elif definition.key in {"smtp.from_email", "smtp.reply_to"}:
             parsed_value = _normalize_email(parsed_value)
-        elif definition.key in {"digest.send_time", "pipeline.run_time"}:
+        elif definition.key in {"digest.send_time", "pipeline.run_time"} or (definition.key.startswith('discovery.') and definition.key.endswith('.time')):
             parsed_value = _normalize_time_of_day(parsed_value)
-        elif definition.key in {"digest.timezone", "pipeline.timezone"}:
+        elif definition.key in {"digest.timezone", "pipeline.timezone", "discovery.timezone"}:
             parsed_value = _normalize_timezone(parsed_value)
     elif definition.value_type == "integer":
         cleaned = _strip_inline_annotation(value)

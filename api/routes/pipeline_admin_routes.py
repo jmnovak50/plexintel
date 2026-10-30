@@ -86,6 +86,8 @@ def admin_cancel_pipeline_run(run_id: int, admin_user=Depends(require_admin)):
     )
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail="Run not found")
+    if result["status"] == "independent_workflow":
+        raise HTTPException(status_code=409, detail="Discovery jobs cannot be cancelled through the ML pipeline endpoint.")
     if result["status"] == "already_terminal":
         raise HTTPException(
             status_code=409,

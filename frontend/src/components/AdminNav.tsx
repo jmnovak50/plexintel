@@ -5,6 +5,7 @@ const ADMIN_NAV_ITEMS = [
   { to: '/admin', label: 'Persona View', end: true },
   { to: '/admin/dimensions', label: 'Dimensions & Labels', end: false },
   { to: '/admin/pipeline', label: 'Pipeline runs', end: false },
+  { to: '/admin/discovery', label: 'Content Discovery', end: false },
   { to: '/admin/digest', label: 'Digest Studio', end: false },
   { to: '/admin/settings', label: 'Settings', end: false },
 ] as const;
