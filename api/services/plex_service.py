@@ -65,10 +65,6 @@ def get_plex_user_info(token: str) -> dict:
     headers = _build_plex_headers(token=token, accept="application/xml")
     response = httpx.get("https://plex.tv/users/account", headers=headers)
 
-    print(f"📡 get_plex_user_info status={response.status_code}")
-    print(f"📭 Content-Type: {response.headers.get('Content-Type')}")
-    print(f"📬 Raw response: {response.text}")
-
     if response.status_code != 200:
         return None
 
@@ -86,8 +82,7 @@ def get_plex_user_info(token: str) -> dict:
             "username": data["user"]["username"],
             "email": data["user"].get("email"),
         }
-    except Exception as e:
-        print(f"❌ Unexpected response format: {e}")
+    except Exception:
         return None
 
 

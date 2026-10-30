@@ -333,12 +333,14 @@ PYTOKEN
 Set these nonsecret settings in backend private `.env`:
 
 ```dotenv
-PLEXINTEL_AGENT_SERVICE_TOKEN_FILE=/app/.secrets/agent-rest.token
+PLEXINTEL_AGENT_SERVICE_TOKEN_FILE=/home/jmnovak/projects/plexintel/.secrets/agent-rest.token
 PLEXINTEL_AGENT_SERVICE_SCOPES="plexintel.read plexintel.read_all"
 ```
 
-Existing Compose repository bind mounting provides the file; it is excluded from
-Git and Docker build context. Transfer the same credential through an approved
+This is the direct-Python host path used by the production service. A separately
+managed Compose runtime with the repository mounted at `/app` instead uses
+`/app/.secrets/agent-rest.token`; do not use that container path on the host.
+The file is excluded from Git and Docker build context. Transfer the same credential through an approved
 private channel to an owner-only file readable by the OpenWebUI pipeline runtime,
 set its PLEXINTEL_API_TOKEN_FILE to that runtime's path, or populate its
 PLEXINTEL_API_TOKEN SecretStr admin valve. Neither requires exposing a token to
