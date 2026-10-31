@@ -19,6 +19,7 @@ from api.db.users import get_or_create_user
 from api.routes import auth_routes
 from api.routes import admin_routes
 from api.routes import discovery_admin_routes
+from api.routes import eligibility_admin_routes
 from api.routes import agent_tools
 from api.routes import feedback_routes  # <- wherever your route is
 from api.routes import fintel_routes
@@ -145,6 +146,7 @@ app.include_router(fintel_routes.router)
 app.include_router(feedback_routes.router, prefix="/api")
 app.include_router(admin_routes.router, prefix="/api")
 app.include_router(discovery_admin_routes.router, prefix="/api", tags=["content-discovery"])
+app.include_router(eligibility_admin_routes.router, prefix="/api", tags=["global-eligibility"])
 app.include_router(rag_routes.router, prefix="/api")
 app.include_router(poster_routes.router, prefix="/api")
 app.include_router(library_catalog.router, prefix="/api/library", tags=["library"])

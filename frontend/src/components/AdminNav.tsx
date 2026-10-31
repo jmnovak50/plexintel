@@ -6,6 +6,9 @@ const ADMIN_NAV_ITEMS = [
   { to: '/admin/dimensions', label: 'Dimensions & Labels', end: false },
   { to: '/admin/pipeline', label: 'Pipeline runs', end: false },
   { to: '/admin/discovery', label: 'Content Discovery', end: false },
+  { to: '/admin/eligibility', label: 'Global Eligibility', end: false },
+  { to: '/admin/engagement', label: 'Community Engagement', end: false },
+  { to: '/admin/requests', label: 'Request Management', end: false },
   { to: '/admin/digest', label: 'Digest Studio', end: false },
   { to: '/admin/settings', label: 'Settings', end: false },
 ] as const;

@@ -1,5 +1,7 @@
 # Content Discovery administrative workspace
 
+The repository now also contains the [content lifecycle and Global Eligibility foundation](content-lifecycle.md). That extension has not been migrated or deployed to production.
+
 Implementation prepared on October 29, 2026. **Read-only UI deployed and verified October 30, 2026.** Discovery execution, persistence and scheduling remain disabled. See [deployment PASS report](content-discovery-readonly-deployment.md). Implementation-time and pre-activation statements below are historical; this deployment did not authorize execution or scheduling.
 
 Administrators receive `/admin/discovery` in the existing navigation, with Overview, Discovered Titles, Execution History, and Settings & Scheduling. The implementation uses React Router, AppShell/Tailwind styles, FastAPI session administration, existing PostgreSQL connection/settings conventions, and the host pipeline scheduler. No second web application, scheduling service, acquisition integration, model stage, or canonical discovery schema is introduced.

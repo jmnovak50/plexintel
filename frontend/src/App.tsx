@@ -9,6 +9,8 @@ import AdminDigest from "./pages/AdminDigest";
 import AdminDimensions from "./pages/AdminDimensions";
 import AdminPipeline from "./pages/AdminPipeline";
 import AdminDiscovery from "./pages/AdminDiscovery";
+import AdminEligibility from "./pages/AdminEligibility";
+import ContentLifecycleFoundation from "./pages/ContentLifecycleFoundation";
 import DigestUnsubscribe from "./pages/DigestUnsubscribe";
 import Recommendations from "./components/Recommendations";
 
@@ -27,6 +29,10 @@ function App() {
           <Route path="/admin/dimensions" element={<AdminDimensions />} />
           <Route path="/admin/pipeline" element={<AdminPipeline />} />
           <Route path="/admin/discovery" element={<AdminDiscovery />} />
+          <Route path="/admin/eligibility" element={<AdminEligibility />} />
+          <Route path="/admin/engagement" element={<ContentLifecycleFoundation stage="engagement" />} />
+          <Route path="/admin/requests" element={<ContentLifecycleFoundation stage="requests" />} />
+          <Route path="/requests" element={<ContentLifecycleFoundation stage="queue" />} />
           <Route path="/digest/unsubscribe/:token" element={<DigestUnsubscribe />} />
         </Routes>
       </BrowserRouter>

@@ -1,6 +1,7 @@
 import { Moon, Sun } from 'lucide-react';
 import type { ReactNode } from 'react';
 import AdminNav from './AdminNav';
+import { Link } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 
 interface AppShellProps {
@@ -51,6 +52,7 @@ export default function AppShell({
             )}
             <div className="flex flex-wrap items-center gap-2 sm:justify-end">
               {showAdminNav && <AdminNav />}
+              <Link className="recs-btn-secondary" to="/requests">My Request Queue</Link>
               <button
                 type="button"
                 onClick={toggleDarkMode}

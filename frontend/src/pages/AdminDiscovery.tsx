@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import { DiscoveryState } from '../components/DiscoveryState';
 import { displayValue as val, coverageLabel } from '../lib/discoveryFormatting';
@@ -44,6 +44,7 @@ function Paging({page,total,limit=25,onChange}:{page:number;total:number;limit?:
 function RunSummary({run}:{run:Run|null}) {return run?<div className="space-y-3"><Badge status={run.status}/><p>{coverageLabel(run.status,run.discovery_complete,run.enrichment_complete)}</p><Fields data={{run_id:run.run_id,started:stamp(run.started_at),completed:stamp(run.completed_at),duration_seconds:run.duration_seconds,...run.counts}}/><details><summary>Query scope</summary><Fields data={run.parameters}/></details></div>:<p>No recorded run.</p>;}
 
 export default function AdminDiscovery() {
+  const [deepLink]=useSearchParams();
   const navigate=useNavigate();const [me,setMe]=useState<Me|null>(null);const [authError,setAuthError]=useState<string|null>(null);
   const [reload,setReload]=useState(0);const [tab,setTab]=useState('Overview');const [overview,setOverview]=useState<Overview|null>(null);const [settings,setSettings]=useState<Settings|null>(null);
   const [items,setItems]=useState<Page<Title>|null>(null);const [runs,setRuns]=useState<Page<Run>|null>(null);const [jobs,setJobs]=useState<Page<Job>|null>(null);
@@ -62,6 +63,10 @@ export default function AdminDiscovery() {
     const [o,c,j]=await Promise.all([api<Overview>('/overview'),api<Settings>('/settings'),api<Page<Job>>(`/jobs?page=${jobPage}`)]);
     setOverview(o);setSettings(c);setJobs(j);setSchedule(old=>Object.keys(old).length?old:c.editable_schedule);
   },[jobPage]);
+  useEffect(()=>{if(!me)return;const media=deepLink.get('media_type'),id=deepLink.get('tmdb_id');
+    if(!['movie','tv'].includes(media||'')||!id||!/^\d+$/.test(id)||Number(id)<=0)return;
+    let active=true;api<Title>(`/titles/${media}/${id}`).then(t=>{if(active)setSelected(t);}).catch(e=>{if(active)setError(e.message);});
+    return()=>{active=false;};},[me,deepLink]);
   useEffect(()=>{if(!me)return;let active=true;setLoading(true);setError(null);
     refresh().catch(e=>{if(active)setError(String(e.message));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};},[me,refresh,reload]);
