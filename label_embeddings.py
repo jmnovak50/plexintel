@@ -169,6 +169,8 @@ def label_single_dimension(dimension, top_n=10, generate_label=False, save_label
 
 
 def main():
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--dimension", type=int, help="Single embedding dimension index")

@@ -1,0 +1,92 @@
+[
+  {
+    "generation_id": "0c48f29b-1229-473a-a753-671564ff7363",
+    "contract_hash": "bf452591b9bbf2d7ccdeea882a816740fb2f5895aa4beeb1778256549a432820",
+    "counts": {
+      "media": {
+        "expected": 8,
+        "failed": 0,
+        "pending": 0,
+        "processed": 8,
+        "succeeded": 8
+      },
+      "user": {
+        "expected": 1,
+        "failed": 0,
+        "pending": 0,
+        "processed": 1,
+        "succeeded": 1
+      },
+      "watch": {
+        "expected": 4,
+        "failed": 0,
+        "pending": 0,
+        "processed": 4,
+        "succeeded": 4
+      }
+    },
+    "preparations": [
+      {
+        "metadata_seconds": 0.099637353036087,
+        "n": 8,
+        "preprocessing_seconds": null,
+        "retrieval_seconds": null,
+        "stage": "metadata",
+        "status": "succeeded"
+      },
+      {
+        "metadata_seconds": null,
+        "n": 8,
+        "preprocessing_seconds": 3.3682861139823217,
+        "retrieval_seconds": 0.10553235198312905,
+        "stage": "poster",
+        "status": "succeeded"
+      }
+    ],
+    "timing": {
+      "media": {
+        "client_seconds": 57.49126384400006,
+        "inference_requests": 8,
+        "inherited": 0,
+        "server_nonload_seconds": 55.538692287
+      },
+      "watch": {
+        "client_seconds": 1.5206196349899983,
+        "inference_requests": 4,
+        "inherited": 0,
+        "server_nonload_seconds": 1.509523539
+      }
+    },
+    "shared_space_checks": [
+      {
+        "candidates": 4,
+        "media_key": "14410",
+        "other_max_cosine": 0.6946265320818293,
+        "own_cosine": 0.8917477440505599,
+        "own_rank": 1
+      },
+      {
+        "candidates": 4,
+        "media_key": "4",
+        "other_max_cosine": 0.750118147442978,
+        "own_cosine": 0.8879518482723292,
+        "own_rank": 1
+      },
+      {
+        "candidates": 4,
+        "media_key": "14416",
+        "other_max_cosine": 0.7107483532272595,
+        "own_cosine": 0.888631772419569,
+        "own_rank": 1
+      },
+      {
+        "candidates": 4,
+        "media_key": "3",
+        "other_max_cosine": 0.7523396187571747,
+        "own_cosine": 0.8865761887045466,
+        "own_rank": 1
+      }
+    ],
+    "resume_zero_additional_inference": true
+  }
+]

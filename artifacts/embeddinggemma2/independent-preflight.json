@@ -1,0 +1,43 @@
+{
+  "observed_at": "2026-11-03T18:49:26.682801+00:00",
+  "host": "birch",
+  "read_only": true,
+  "ollama_host": "http://192.168.1.123:31770",
+  "ollama_version": "0.40.13",
+  "encoder": {
+    "name": "embeddinggemma-2:latest",
+    "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+    "variant": "embeddinggemma-2:740m-q8_0",
+    "quantization": "Q8_0",
+    "projector_hash": "aa51094230ca75d57fa120c04613b4c93acb31399dad534bd3bcec67e683e297",
+    "dimensions": 768,
+    "normalization": "ollama-l2-unit/1.0",
+    "num_ctx": 8192,
+    "num_thread": 16,
+    "num_batch": 2048
+  },
+  "schema_v2_installed": false,
+  "backend_origin": "https://plexintel.kabolly.com",
+  "target_counts": {
+    "media_text": 8393,
+    "media_poster": 8393,
+    "watch": 9586,
+    "user": 31
+  },
+  "watch_coverage": {
+    "policy": "library-linked-unembedded-quarantine/1.0",
+    "source_watch_events": 9860,
+    "eligible_watch_events": 9586,
+    "quarantined_watch_events": 274,
+    "quarantined_media_titles": 153,
+    "existing_vector_coverage_verified": true,
+    "existing_watch_embeddings": 9586,
+    "existing_watch_embeddings_covered": 9586,
+    "new_library_linked_events": 0,
+    "quarantine_sha256": "c121d3c3e076c45f67bd7900ad6845efa14a4b95d825d411a31a611337d75a45"
+  },
+  "project_free_bytes": 839368577024,
+  "legacy_model_sha256": "d812b3660aec406c3b77b77fe3bcf2132ede7be01ed7b98a175e17bd67ccf3af",
+  "activation_marker_present": false,
+  "next_stage": "Review scope/resources, then explicitly run install/create. No inference was performed."
+}

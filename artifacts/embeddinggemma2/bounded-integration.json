@@ -1,0 +1,275 @@
+{
+  "generation_id": "9c4140f5-d645-4861-b7fd-a2eda30a1d9f",
+  "scope": "bounded",
+  "status": "building",
+  "contract_hash": "0309b16151d03e168bf82ec51672ff407129909cb1d2b0b68d910e7b54825960",
+  "encoder": {
+    "name": "embeddinggemma-2:latest",
+    "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+    "num_ctx": 8192,
+    "variant": "embeddinggemma-2:740m-q8_0",
+    "dimensions": 768,
+    "num_thread": 16,
+    "quantization": "Q8_0",
+    "normalization": "ollama-l2-unit/1.0",
+    "projector_hash": "aa51094230ca75d57fa120c04613b4c93acb31399dad534bd3bcec67e683e297"
+  },
+  "counts": {
+    "user": {
+      "expected": 1,
+      "processed": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "pending": 0
+    },
+    "media": {
+      "expected": 8,
+      "processed": 8,
+      "succeeded": 8,
+      "failed": 0,
+      "pending": 0
+    },
+    "watch": {
+      "expected": 4,
+      "processed": 4,
+      "succeeded": 4,
+      "failed": 0,
+      "pending": 0
+    }
+  },
+  "preparations": [
+    {
+      "stage": "metadata",
+      "status": "succeeded",
+      "n": 8,
+      "metadata_seconds": 0.11690579300920945,
+      "retrieval_seconds": null,
+      "preprocessing_seconds": null
+    },
+    {
+      "stage": "poster",
+      "status": "succeeded",
+      "n": 8,
+      "metadata_seconds": null,
+      "retrieval_seconds": 0.11433064899756573,
+      "preprocessing_seconds": 3.320584445988061
+    }
+  ],
+  "preparation_counts": {
+    "metadata": {
+      "expected": 8,
+      "succeeded": 8,
+      "failed": 0,
+      "pending": 0
+    },
+    "poster": {
+      "expected": 8,
+      "succeeded": 8,
+      "failed": 0,
+      "pending": 0
+    }
+  },
+  "timing": {
+    "media": {
+      "inference_requests": 8,
+      "inherited": 0,
+      "client_seconds": 51.788723138030036,
+      "server_nonload_seconds": 51.401746774
+    },
+    "watch": {
+      "inference_requests": 4,
+      "inherited": 0,
+      "client_seconds": 1.518463405998773,
+      "server_nonload_seconds": 1.506626303
+    }
+  },
+  "source_availability": {
+    "expected": 4,
+    "unknown_end_times": 0,
+    "verified_end_times": 4
+  },
+  "missing_art": 0,
+  "validation": null,
+  "observed_at": "2026-11-03T16:21:10.995179+00:00",
+  "ollama_version": "0.40.13",
+  "vector_integrity": {
+    "media": {
+      "count": 8,
+      "dimensions": 768,
+      "finite": true,
+      "nonzero": true,
+      "min_norm": 0.9999994884425951,
+      "max_norm": 1.0000004262124857
+    },
+    "watch": {
+      "count": 4,
+      "dimensions": 768,
+      "finite": true,
+      "nonzero": true,
+      "min_norm": 0.9999997915557861,
+      "max_norm": 1.0000002175235738
+    },
+    "user": {
+      "count": 1,
+      "dimensions": 768,
+      "finite": true,
+      "nonzero": true,
+      "min_norm": 0.999999985378494,
+      "max_norm": 0.999999985378494
+    }
+  },
+  "request_statistics": {
+    "media": [
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 37058943,
+        "client_seconds": 6.144217163993744,
+        "total_duration": 6133855289,
+        "request_attempts": 1,
+        "prompt_eval_count": 918,
+        "server_nonload_seconds": 6.096796346
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 59803818,
+        "client_seconds": 6.48677882400807,
+        "total_duration": 6464030528,
+        "request_attempts": 1,
+        "prompt_eval_count": 999,
+        "server_nonload_seconds": 6.40422671
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 23734302,
+        "client_seconds": 6.844124708004529,
+        "total_duration": 6833966357,
+        "request_attempts": 1,
+        "prompt_eval_count": 1189,
+        "server_nonload_seconds": 6.810232055
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 23405528,
+        "client_seconds": 6.432100684003672,
+        "total_duration": 6422421217,
+        "request_attempts": 1,
+        "prompt_eval_count": 951,
+        "server_nonload_seconds": 6.399015689
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 33455625,
+        "client_seconds": 6.696297368005617,
+        "total_duration": 6683585121,
+        "request_attempts": 1,
+        "prompt_eval_count": 1073,
+        "server_nonload_seconds": 6.650129496
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 22977924,
+        "client_seconds": 6.788193764994503,
+        "total_duration": 6774823738,
+        "request_attempts": 1,
+        "prompt_eval_count": 1171,
+        "server_nonload_seconds": 6.751845814
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 20740726,
+        "client_seconds": 5.869941124008619,
+        "total_duration": 5862648455,
+        "request_attempts": 1,
+        "prompt_eval_count": 955,
+        "server_nonload_seconds": 5.841907729
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 51761025,
+        "client_seconds": 6.527069501011283,
+        "total_duration": 6499353960,
+        "request_attempts": 1,
+        "prompt_eval_count": 971,
+        "server_nonload_seconds": 6.447592935
+      }
+    ],
+    "watch": [
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 528108,
+        "client_seconds": 0.46484559099189937,
+        "total_duration": 462380671,
+        "request_attempts": 1,
+        "prompt_eval_count": 555,
+        "server_nonload_seconds": 0.461852563
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 524760,
+        "client_seconds": 0.2661072960036108,
+        "total_duration": 263714761,
+        "request_attempts": 1,
+        "prompt_eval_count": 315,
+        "server_nonload_seconds": 0.263190001
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 543830,
+        "client_seconds": 0.444769964000443,
+        "total_duration": 442314019,
+        "request_attempts": 1,
+        "prompt_eval_count": 518,
+        "server_nonload_seconds": 0.441770189
+      },
+      {
+        "model": "sha256:f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+        "load_duration": 653311,
+        "client_seconds": 0.34274055500281975,
+        "total_duration": 340466861,
+        "request_attempts": 1,
+        "prompt_eval_count": 373,
+        "server_nonload_seconds": 0.33981355
+      }
+    ]
+  },
+  "resident_model_allocation": [
+    {
+      "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+      "size": 634461879,
+      "size_vram": 0
+    }
+  ],
+  "peak_memory": "Not measurable through remote Ollama API; allocation snapshots are not peak RSS.",
+  "resume_zero_additional_inference": true,
+  "shared_space_checks": [
+    {
+      "media_key": "14410",
+      "own_cosine": 0.8917477440505599,
+      "other_max_cosine": 0.6946265320818293,
+      "own_rank": 1,
+      "candidates": 4
+    },
+    {
+      "media_key": "4",
+      "own_cosine": 0.8879518482723292,
+      "other_max_cosine": 0.750118147442978,
+      "own_rank": 1,
+      "candidates": 4
+    },
+    {
+      "media_key": "14416",
+      "own_cosine": 0.888631772419569,
+      "other_max_cosine": 0.7107483532272595,
+      "own_rank": 1,
+      "candidates": 4
+    },
+    {
+      "media_key": "3",
+      "own_cosine": 0.8865761887045466,
+      "other_max_cosine": 0.7523396187571747,
+      "own_rank": 1,
+      "candidates": 4
+    }
+  ],
+  "shared_space_interpretation": "Own-title versus other-title cross-modal ranks are a bounded shared-space sanity check, not recommendation-quality evidence."
+}

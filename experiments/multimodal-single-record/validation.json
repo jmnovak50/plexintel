@@ -1,0 +1,13 @@
+{
+  "checked_at": "2026-11-03T14:50:52.719893+00:00",
+  "live_embedding_responses": 20,
+  "distinct_movies": 1,
+  "artifact_integrity": "passed",
+  "production_serializer_parity": "passed",
+  "vector_validity": "20/20 passed",
+  "timing_and_comparison_recalculation": "passed",
+  "credential_scan": "passed",
+  "tracked_production_files_unchanged": true,
+  "all_untracked_changes_inside_experiment": true,
+  "scope": "No additional inference requests during validation"
+}

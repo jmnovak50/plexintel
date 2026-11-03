@@ -698,7 +698,10 @@ def store_watch_history(conn, cursor, watch_history, *, source_grouping, raise_o
 #    print(f"✅ Found {len(to_process)} new or updated media items.")
 #    return to_process
 
-def run_incremental_load():
+def run_incremental_load(*, embed=True):
+    if embed:
+        from api.embedding_generation.runtime import assert_legacy_allowed
+        assert_legacy_allowed()
     print("🔁 Running incremental update...")
 
     conn, cursor = connect_to_db()
@@ -786,10 +789,10 @@ def run_incremental_load():
         raise RuntimeError("Watch history synchronization failed")
 
     # 8. Optionally embed new stuff immediately after sync
-    if get_setting_value("embeddings.enable_media", default=True):
+    if embed and get_setting_value("embeddings.enable_media", default=True):
         generate_media_embeddings()
 
-    if get_setting_value("embeddings.enable_watches", default=True):
+    if embed and get_setting_value("embeddings.enable_watches", default=True):
         generate_watch_embeddings()
 
     conn.commit()
@@ -1255,6 +1258,8 @@ def generate_media_embeddings(batch_size: int | None = None):
       - media_embeddings.embedding is pgvector `vector(768)`
       - Ollama (embeddinggemma) is reachable via embed_texts()
     """
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     print("🧠 Generating media embeddings...")
 
     conn, cur = connect_to_db()
@@ -1388,6 +1393,8 @@ def generate_watch_embeddings(batch_size: int | None = None):
     Uses library + genre/actor/director context to build the text.
     Assumes watch_embeddings.embedding is vectors.vector(768).
     """
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     print("🧠 Generating watch embeddings via Ollama (EmbeddingGemma)...")
 
     conn, cur = connect_to_db()
@@ -1560,6 +1567,7 @@ if __name__ == "__main__":
     parser.add_argument("--since", help="Inclusive UTC ISO timestamp for raw-session backfill")
     parser.add_argument("--until", help="Exclusive UTC ISO timestamp for raw-session backfill")
     parser.add_argument("--page-size", type=int, default=1000)
+    parser.add_argument("--no-embeddings", action="store_true", help="Metadata/history ingestion only; generation pipeline owns encoding")
     args = parser.parse_args()
 
     print(f"🚀 Starting script in '{args.mode}' mode...")
@@ -1574,7 +1582,7 @@ if __name__ == "__main__":
                                   incremental=args.mode == "watch-sessions-sync")
         raise SystemExit(75 if stats.get("busy") else (1 if stats["failed"] or stats["errors"] else 0))
     elif args.mode == "incremental":
-        run_incremental_load()
+        run_incremental_load(embed=not args.no_embeddings)
     elif args.mode == "recover":
         recover_missing_media(dry_run=args.dry_run)
     elif args.mode == "embeddings":

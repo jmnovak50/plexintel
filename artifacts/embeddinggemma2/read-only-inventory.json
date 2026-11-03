@@ -1,0 +1,12 @@
+{
+  "observed_at": "2026-11-03T15:57:07.761336+00:00",
+  "media": 8393,
+  "watch": 9860,
+  "users": 31,
+  "source_hash": "e126e3b8c00e0d4bcbc7bfe61ddd3e6ac8916c8b56e950dd75e532f12a4b7aca",
+  "historical_availability": {
+    "expected": 9860,
+    "verified_end_times": 9844,
+    "unknown_end_times": 16
+  }
+}

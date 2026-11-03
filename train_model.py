@@ -548,6 +548,8 @@ def train_and_evaluate(
     importance_plot_path="feature_importance_plot.png",
     experiment_label="production no-direct-actor model",
 ):
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     from sklearn.model_selection import train_test_split
 
     def class_balanced_sample_weights(labels, base_weights):

@@ -39,6 +39,8 @@ def chunks(seq, batch):
 
 
 def _post_embed(inputs: List[str]) -> List[List[float]]:
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     ollama_model = get_setting_value("ollama.embedding_model", default="embeddinggemma")
     ollama_threads = get_setting_value("ollama.threads")
     ollama_host = str(get_setting_value("ollama.host", default="http://localhost:11434")).rstrip("/")
@@ -238,6 +240,8 @@ def fetch_user_vectors(conn):
 
 
 def build_user_embeddings(user_rows, conn):
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     users = {}
     for row in user_rows:
         u = row["username"]

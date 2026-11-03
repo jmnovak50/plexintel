@@ -2005,6 +2005,8 @@ def save_label_result(
 
 
 def main():
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", action="store_true", help="Generate labels using the configured LLM provider")
     parser.add_argument("--gpt_label", dest="label", action="store_true", help="Deprecated alias for --label")

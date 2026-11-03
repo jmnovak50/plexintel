@@ -1,0 +1,35 @@
+{
+  "commands_checked": 46,
+  "operations": [
+    "coverage",
+    "create",
+    "export",
+    "inspect",
+    "install",
+    "media-poster",
+    "media-text",
+    "metadata",
+    "posters",
+    "preflight",
+    "promote",
+    "recover-transition",
+    "refresh-source",
+    "review",
+    "rollback",
+    "score",
+    "status",
+    "train",
+    "users",
+    "validate",
+    "verify",
+    "watch"
+  ],
+  "review_gates": [
+    "poster",
+    "profiles",
+    "quality",
+    "text"
+  ],
+  "valid": true,
+  "method": "Actual argparse parsing; no documented migration commands executed"
+}

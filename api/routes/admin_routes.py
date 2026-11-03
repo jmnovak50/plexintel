@@ -29,6 +29,12 @@ from api.routes.recommendation_routes import (
 
 router = APIRouter()
 
+# Captured when this module is loaded, rather than recomputed from potentially
+# newer on-disk sources. Promotion requires this authenticated deployment receipt.
+from api.embedding_generation.runtime import code_hash as _embedding_code_hash
+_EMBEDDING_GENERATION_DEPLOYED_HASH = _embedding_code_hash()
+
+
 # Whitelisted scripts that can be run
 ALLOWED_SCRIPTS = {
     "train_model.py",
@@ -129,6 +135,13 @@ def require_admin(user=Depends(get_current_user)):
     if not user["is_admin"]:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+@router.get("/admin/embedding-generation/status")
+def embedding_generation_deployment_status(admin_user=Depends(require_admin)):
+    from api.embedding_generation.runtime import active_generation
+    return {"generation_api": 1, "deployed_code_sha256": _EMBEDDING_GENERATION_DEPLOYED_HASH,
+            "active_generation": active_generation()}
 
 
 @router.get("/admin/me")

@@ -55,9 +55,14 @@ def _positive_label_array_sql(
         TASTE_MATCH_DIMENSION_PREDICATE: (768, 1536),
     }
     lower, upper = bounds[dimension_predicate]
-    return f"""(SELECT COALESCE(ARRAY_AGG(display_label ORDER BY max_shap DESC), ARRAY[]::text[])
-        FROM public.selected_embedding_labels(
-            {username_column}, {rating_key_column}, {lower}, {upper}, {int(limit)}))"""
+    modern_lower,modern_upper=(0,1536) if dimension_predicate==TITLE_TRAIT_DIMENSION_PREDICATE else (1536,2304)
+    def select(start,end):
+        return f"""(SELECT COALESCE(ARRAY_AGG(display_label ORDER BY max_shap DESC), ARRAY[]::text[])
+            FROM public.selected_embedding_labels(
+                {username_column}, {rating_key_column}, {start}, {end}, {int(limit)}))"""
+    return f"""(CASE WHEN EXISTS(SELECT 1 FROM public.embedding_feature_config
+        WHERE active AND metadata->>'ordering'='media_text,media_poster,user')
+        THEN {select(modern_lower,modern_upper)} ELSE {select(lower,upper)} END)"""
 
 
 

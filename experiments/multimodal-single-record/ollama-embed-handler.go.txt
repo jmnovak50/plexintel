@@ -1,0 +1,320 @@
+func (s *Server) EmbedHandler(c *gin.Context) {
+	checkpointStart := time.Now()
+	var req api.EmbedRequest
+	err := c.ShouldBindJSON(&req)
+	switch {
+	case errors.Is(err, io.EOF):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+		return
+	case err != nil:
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	modelRef, err := parseAndValidateModelRef(req.Model)
+	if err != nil {
+		writeModelRefParseError(c, err, http.StatusNotFound, fmt.Sprintf("model '%s' not found", req.Model))
+		return
+	}
+
+	if modelRef.Source == modelSourceCloud {
+		req.Model = modelRef.Base
+		req.Runner = ""
+		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
+		return
+	}
+
+	if runner, err := normalizeRunner(req.Runner); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	} else {
+		req.Runner = runner
+	}
+
+	// embedInput is one item from the input list: its text plus whatever
+	// media blobs it carries. Items without media go through the plain
+	// text embed path; items with media go through the runner's media-aware
+	// embed.
+	type embedInput struct {
+		text  string
+		media [][]byte
+	}
+
+	var input []embedInput
+
+	// parseMultimodalItem reads one map-shaped input item. Any of "text",
+	// "image", "audio" are accepted (short names, base64-encoded blobs for
+	// media); "video" exists in the config but the runner has no video tower
+	// yet, so it's a hard error rather than silently ignored.
+	parseMultimodalItem := func(m map[string]any) (embedInput, error) {
+		var item embedInput
+		for key, v := range m {
+			str, ok := v.(string)
+			if !ok {
+				return item, fmt.Errorf("input.%s must be a string", key)
+			}
+			switch key {
+			case "text":
+				item.text = str
+			case "image", "audio":
+				raw, err := base64.StdEncoding.DecodeString(str)
+				if err != nil {
+					return item, fmt.Errorf("input.%s: %v", key, err)
+				}
+				item.media = append(item.media, raw)
+			case "video":
+				return item, fmt.Errorf("input.video not supported")
+			default:
+				return item, fmt.Errorf("unknown input field %q", key)
+			}
+		}
+		if item.text == "" && len(item.media) == 0 {
+			return item, errors.New("input item has no text, image, or audio")
+		}
+		return item, nil
+	}
+
+	switch i := req.Input.(type) {
+	case string:
+		if i != "" {
+			input = append(input, embedInput{text: i})
+		}
+	case map[string]any:
+		item, err := parseMultimodalItem(i)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		input = append(input, item)
+	case []any:
+		for _, v := range i {
+			switch v := v.(type) {
+			case string:
+				input = append(input, embedInput{text: v})
+			case map[string]any:
+				item, err := parseMultimodalItem(v)
+				if err != nil {
+					c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+				input = append(input, item)
+			default:
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid input type"})
+				return
+			}
+		}
+	default:
+		if req.Input != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid input type"})
+			return
+		}
+	}
+
+	m, err := s.getExistingModelForRunner(modelRef.Name.String(), req.Runner)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
+			return
+		}
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	r, m, opts, err := s.scheduleRunnerForModel(c.Request.Context(), m, []model.Capability{}, req.Options, req.KeepAlive, nil)
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	checkpointLoaded := time.Now()
+
+	if len(input) == 0 {
+		c.JSON(http.StatusOK, api.EmbedResponse{Model: req.Model, Embeddings: [][]float32{}})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	adjustTokenLimit := func(tokens []int, limit int) int {
+		if bos := m.metadata.Int("tokenizer.ggml.bos_token_id"); len(tokens) > 0 && tokens[0] != int(bos) && m.metadata.Bool("add_bos_token", true) {
+			limit--
+		}
+		if eos := m.metadata.Int("tokenizer.ggml.eos_token_id"); len(tokens) > 0 && tokens[len(tokens)-1] != int(eos) && m.metadata.Bool("add_eos_token", true) {
+			limit--
+		}
+		return limit
+	}
+
+	inputTokensAndContext := func(text string) ([]int, int, error) {
+		tokens, err := r.Tokenize(ctx, text)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		// GGUF metadata carries the GGUF context length; safetensors (MLX)
+		// models never populate ggufMetadata, so fall back to the manifest
+		// config's context_length written by create/ from the HF config.
+		ctxLen := int(m.metadata.Int("context_length"))
+		if ctxLen == 0 && m.Config.ModelFormat == "safetensors" {
+			ctxLen = m.Config.ContextLen
+		}
+		if opts.NumCtx > 0 {
+			ctxLen = min(opts.NumCtx, ctxLen)
+		}
+
+		return tokens, adjustTokenLimit(tokens, ctxLen), nil
+	}
+
+	truncateInputToLimit := func(text string, limit int) (string, bool, error) {
+		tokens, ctxLen, err := inputTokensAndContext(text)
+		if err != nil {
+			return "", false, err
+		}
+		if limit > 0 {
+			ctxLen = min(ctxLen, adjustTokenLimit(tokens, limit))
+		}
+
+		if ctxLen <= 0 {
+			return "", false, fmt.Errorf("input after truncation exceeds maximum context length")
+		}
+		if len(tokens) <= ctxLen {
+			return text, false, nil
+		}
+
+		truncated, err := r.Detokenize(ctx, tokens[:ctxLen])
+		if err != nil {
+			return "", false, err
+		}
+		return truncated, true, nil
+	}
+
+	truncateInput := func(text string) (string, bool, error) {
+		return truncateInputToLimit(text, 0)
+	}
+
+	embedWithRetry := func(item embedInput) ([]float32, int, error) {
+		text := item.text
+		if req.Truncate != nil && !*req.Truncate {
+			tokens, ctxLen, err := inputTokensAndContext(text)
+			if err != nil {
+				return nil, 0, err
+			}
+			if ctxLen <= 0 {
+				return nil, 0, fmt.Errorf("input after truncation exceeds maximum context length")
+			}
+			if len(tokens) > ctxLen {
+				return nil, 0, api.StatusError{
+					StatusCode:   http.StatusBadRequest,
+					ErrorMessage: "the input length exceeds the context length",
+				}
+			}
+		} else {
+			var err error
+			text, _, err = truncateInput(text)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+
+		emb, tokCount, err := r.Embedding(ctx, text, item.media)
+		if err == nil {
+			return emb, tokCount, nil
+		}
+
+		// Only a runner 413 (input over context length) justifies a truncation
+		// retry. Everything else — 400 media validation, marker mismatches,
+		// malformed payloads — belongs to the caller unchanged.
+		var serr api.StatusError
+		if !errors.As(err, &serr) || serr.StatusCode != http.StatusRequestEntityTooLarge {
+			return nil, 0, err
+		}
+		if req.Truncate != nil && !*req.Truncate {
+			return nil, 0, err
+		}
+
+		truncated, ok, terr := truncateInputToLimit(text, opts.NumBatch)
+		if terr != nil {
+			return nil, 0, terr
+		}
+		if !ok {
+			// Nothing to truncate. For plain text that means the runner
+			// rejected input the server-side limit accepted (e.g. a
+			// physical-batch clamp), so keep the truncation-family error the
+			// API contract encodes. For media items the overflow came from
+			// media expansion past the text the truncator sees, so the
+			// runner's 413 is the honest error.
+			if len(item.media) == 0 {
+				return nil, 0, fmt.Errorf("input exceeds maximum context length and cannot be truncated further")
+			}
+			return nil, 0, err
+		}
+
+		return r.Embedding(ctx, truncated, item.media)
+	}
+
+	var g errgroup.Group
+	embeddings := make([][]float32, len(input))
+	var totalTokens uint64
+	for i, item := range input {
+		g.Go(func() error {
+			embedding, tokenCount, err := embedWithRetry(item)
+			if err != nil {
+				return err
+			}
+			// TODO: this first normalization should be done by the model
+			embedding, err = normalize(embedding)
+			if err != nil {
+				return err
+			}
+			if req.Dimensions > 0 {
+				if req.Dimensions > len(embedding) {
+					return fmt.Errorf("dimensions %d exceeds embedding length %d", req.Dimensions, len(embedding))
+				}
+				// If the runner declares a trained matryoshka set, restrict to it.
+				if ed, ok := r.(interface{ EmbeddingDimensions() []int }); ok {
+					if valid := ed.EmbeddingDimensions(); len(valid) > 0 && !slices.Contains(valid, req.Dimensions) {
+						return api.StatusError{
+							StatusCode:   http.StatusBadRequest,
+							ErrorMessage: fmt.Sprintf("dimensions %d not supported by this model; valid values are %v", req.Dimensions, valid),
+						}
+					}
+				}
+				if req.Dimensions < len(embedding) {
+					embedding, err = normalize(embedding[:req.Dimensions])
+					if err != nil {
+						return err
+					}
+				}
+			}
+			embeddings[i] = embedding
+			atomic.AddUint64(&totalTokens, uint64(tokenCount))
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		s.sched.expireRunnersForRuntimeOOM(m, err)
+		var serr api.StatusError
+		if errors.As(err, &serr) {
+			c.AbortWithStatusJSON(serr.StatusCode, gin.H{
+				"error": strings.TrimSpace(serr.ErrorMessage),
+			})
+			return
+		}
+
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+			"error": strings.TrimSpace(err.Error()),
+		})
+		return
+	}
+
+	resp := api.EmbedResponse{
+		Model:           req.Model,
+		Embeddings:      embeddings,
+		TotalDuration:   time.Since(checkpointStart),
+		LoadDuration:    checkpointLoaded.Sub(checkpointStart),
+		PromptEvalCount: int(totalTokens),
+	}
+	c.JSON(http.StatusOK, resp)
+}
+

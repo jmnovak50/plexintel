@@ -27,7 +27,7 @@ def configuration_error(call, *args, **kwargs):
 
 
 @router.get('')
-def register(search: str = Query('',max_length=200), side: Literal['','media','user'] = '',
+def register(search: str = Query('',max_length=200), side: Literal['','media','media_text','media_poster','user'] = '',
              status: str = '', sort: str = 'dimension', offset: int = Query(0,ge=0),
              limit: int = Query(50,ge=1,le=100), active_scope=Depends(scope)):
     if (status and status not in STATUS_FILTERS) or sort not in SORTS:

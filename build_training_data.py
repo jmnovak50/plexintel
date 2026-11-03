@@ -373,6 +373,9 @@ def add_leave_one_out_user_embedding(row, user_profiles):
 
 def build_training_data(diagnostic_samples=0, dry_run=False):
     if not dry_run:
+        from api.embedding_generation.runtime import assert_legacy_allowed
+        assert_legacy_allowed()
+    if not dry_run:
         ensure_app_schema()
     conn = connect()
     cur = conn.cursor(cursor_factory=RealDictCursor)

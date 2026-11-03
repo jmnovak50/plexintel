@@ -1,0 +1,56 @@
+{
+  "observed_at": "2026-11-03T19:05:06.826272+00:00",
+  "suite": "tests",
+  "result": "761 passed, 224 skipped, 1 warning, 89 subtests passed in 88.85s (0:01:28)",
+  "code_sha256": "75734976acbc95aa710a8f1f1ec459789c1d9afb06fa3af0eed4878bf6b6dfd4",
+  "focused_database_tests": "40 passed in 76.62s before final runbook/progress tests; final full suite includes both added tests",
+  "live_evidence": "independent-integration.json",
+  "real_ollama_requests": 23,
+  "live_summary": {
+    "media_text": {
+      "requests": 9,
+      "client_mean_seconds": 0.328637426001175,
+      "server_nonload_mean_seconds": 0.32399395477777776,
+      "server_nonload_median_seconds": 0.290010664,
+      "reported_load_total_seconds": 0.015442269,
+      "reported_load_max_seconds": 0.004561476,
+      "token_count_min": 271,
+      "token_count_max": 584
+    },
+    "media_poster": {
+      "requests": 9,
+      "client_mean_seconds": 6.683089865775805,
+      "server_nonload_mean_seconds": 6.638774803666667,
+      "server_nonload_median_seconds": 6.14099664,
+      "reported_load_total_seconds": 0.289904055,
+      "reported_load_max_seconds": 0.063767267,
+      "token_count_min": 604,
+      "token_count_max": 676
+    },
+    "watch": {
+      "requests": 5,
+      "client_mean_seconds": 0.3786220843961928,
+      "server_nonload_mean_seconds": 0.3752624654,
+      "server_nonload_median_seconds": 0.316588665,
+      "reported_load_total_seconds": 0.006241532,
+      "reported_load_max_seconds": 0.003545473,
+      "token_count_min": 304,
+      "token_count_max": 605
+    }
+  },
+  "runbook_parser_evidence": "manual-runbook-validation.json",
+  "runbook_commands": 46,
+  "frontend": "TypeScript and Vite production build passed; output /tmp/plexintel-independent-ui-dist, served frontend unchanged",
+  "git_diff_check": "passed",
+  "shell_syntax": "passed",
+  "production_backfill_executed": false,
+  "production_generation_activated": false,
+  "production_schema_installed": false,
+  "services_restarted": false,
+  "active_model_retrained": false,
+  "commit_created": false,
+  "next_gate": "Manual operator full shadow execution after review; promotion requires separate explicit approval",
+  "coverage_evidence": "independent-preflight.json",
+  "production_boundary_evidence": "production-boundary-check.json",
+  "historical_scope": "All existing eligible watch vectors and library-linked events; 274 unlinked events quarantined"
+}

@@ -1,0 +1,34 @@
+{
+  "observed_at": "2026-11-03T19:05:09.927438+00:00",
+  "host": "birch",
+  "read_only": true,
+  "schema_installed": null,
+  "production_counts": {
+    "media_embeddings": 8393,
+    "watch_embeddings": 9586,
+    "user_embeddings": 31,
+    "library": 8393,
+    "watch_history": 9860,
+    "training_data": 9313,
+    "recommendations": 223767
+  },
+  "protected_files_unchanged": {
+    ".env": true,
+    "xgb_model.pkl": true
+  },
+  "backend": {
+    "MainPID": "1637",
+    "NRestarts": "2",
+    "ActiveState": "active"
+  },
+  "markers": {
+    "installed.json": false,
+    "transition.json": false
+  },
+  "production_backfill_executed": false,
+  "active_model_retrained": false,
+  "production_generation_activated": false,
+  "services_restarted": false,
+  "scope_policy": "library-linked-unembedded-quarantine/1.0",
+  "full_shadow_execution": "Pending manual operator execution after review"
+}

@@ -39,6 +39,7 @@ TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled"}
 SCHEDULE_TERMINAL_STATUSES = {"success", "cancelled"}
 ACTIVE_SCHEDULE_STATUSES = {"started", "cancel_requested"}
 PIPELINE_PROCESS_MARKERS = (
+    "embeddinggemma2_migration.py",
     "fetch_tautulli_data.py",
     "build_user_embeddings.py",
     "build_training_data.py",
@@ -744,6 +745,9 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     """Ordered stages matching run_daily_pipeline.sh (single source for app runs)."""
     py = _python_executable()
     root = str(REPO_ROOT)
+    from api.embedding_generation.runtime import active_generation
+    if active_generation():
+        return [("embeddinggemma2_generation", [py, f"{root}/scripts/embeddinggemma2_migration.py", "daily", "--pipeline-lock-held"])]
     today = datetime.now().strftime("%Y-%m-%d")
     csv_path = str(REPO_ROOT / f"shap_labels_{today}.csv")
     labeling_enabled = get_setting_value("pipeline.labeling_enabled", default=True)

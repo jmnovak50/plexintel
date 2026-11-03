@@ -71,6 +71,15 @@ except Exception as e:
 PY
 
 # Run each script in sequence using the venv's python explicitly
+if "$PY" "$APP/scripts/embeddinggemma2_migration.py" active; then
+  exec "$PY" "$APP/scripts/embeddinggemma2_migration.py" daily --pipeline-lock-held
+else
+  generation_status=$?
+  if [ "$generation_status" -ne 3 ]; then
+    echo "Embedding generation control could not be verified; refusing legacy fallback." >&2
+    exit "$generation_status"
+  fi
+fi
 echo "📦 Syncing Tautulli incremental data..."
 "$PY" "$APP/fetch_tautulli_data.py" --mode incremental
 

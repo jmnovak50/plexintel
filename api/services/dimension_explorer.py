@@ -3,7 +3,7 @@ import os
 from contextlib import contextmanager, nullcontext
 from psycopg2.extras import RealDictCursor
 from api.db.connection import connect_db
-from api.services.dimension_config import get_active_config, identity
+from api.services.dimension_config import get_active_config, identity, feature_groups
 
 REPEATED_ATTEMPTS = max(1, int(os.getenv('DIMENSION_EXPLORER_REPEATED_ATTEMPTS', '3')))
 FREQUENT_SELECTIONS = max(1, int(os.getenv('DIMENSION_EXPLORER_FREQUENT_SELECTIONS', '10')))
@@ -88,6 +88,13 @@ def scope_cte(scope, config):
 
 def register_cte(scope, config):
     sql, params = scope_cte(scope, config)
+    inventory=[]
+    for group in feature_groups(config):
+        start=int(group['start']);end=start+int(group['width']);name=group['name']
+        prefix=name if config.get('feature_groups') else 'emb'
+        feature_index=f'(dimension-{start})' if config.get('feature_groups') else 'dimension'
+        inventory.append(f"SELECT dimension,'{name}'::text AS side,dimension-{start} AS local_index,'{prefix}_'||{feature_index} AS feature_name FROM generate_series({start},{end-1}) AS dimension")
+    sql+=', feature_inventory AS ('+' UNION ALL '.join(inventory)+')'
     sql += ''', running_dimensions AS MATERIALIZED (
         SELECT objid::integer AS dimension FROM pg_locks
         WHERE locktype='advisory' AND classid=184724 AND objsubid=2 AND granted
@@ -105,8 +112,7 @@ def register_cte(scope, config):
             COUNT(*) FILTER(WHERE group_name='semantic_themes') AS semantic_selected_count
         FROM selected CROSS JOIN LATERAL unnest(dimensions) AS dimension GROUP BY dimension
     ), register AS (
-        SELECT i.dimension,CASE WHEN i.dimension<%s THEN 'media' ELSE 'user' END AS side,
-            CASE WHEN i.dimension<%s THEN i.dimension ELSE i.dimension-%s END AS local_index,
+        SELECT i.dimension,i.side,i.local_index,i.feature_name,
             el.label,el.display_label,el.label_type,el.explainable,el.needs_review,el.label_row_count,
             EXISTS(SELECT 1 FROM running_dimensions rd WHERE rd.dimension=i.dimension) AS in_flight,
             el.updated_at,el.last_reviewed_at,COALESCE(el.review_attempt_count,0) AS review_attempt_count,
@@ -127,7 +133,7 @@ def register_cte(scope, config):
                     AND recent.result->>'label' NOT IN ('','UNCLEAR / MIXED SIGNAL')
                     AND COALESCE(recent.result->>'processing_error','false')!='true')) AS rejected_replacement,
             job.status AS job_status,COALESCE(job.error, CASE WHEN recent.result->>'processing_error'='true' THEN 'Labeling provider error' END) AS processing_error
-        FROM generate_series(0,%s-1) AS i(dimension)
+        FROM feature_inventory i
         LEFT JOIN LATERAL (SELECT saved.*,COUNT(*) OVER() AS label_row_count FROM embedding_labels saved
             WHERE saved.dimension=i.dimension ORDER BY saved.updated_at DESC NULLS LAST,
                 saved.created_at DESC NULLS LAST,saved.label LIMIT 1) el ON true
@@ -140,7 +146,7 @@ def register_cte(scope, config):
             WHERE q.config_id=%s AND q.dimension=i.dimension ORDER BY review_id DESC LIMIT 1) job ON true
     )'''
     media = config['media_dimensions']; cid = config['config_id']
-    params += [media,media,media,media+config['user_dimensions'],cid,cid,cid]
+    params += [cid,cid,cid]
     return sql, params
 
 
@@ -182,7 +188,7 @@ def get_register(scope, search='', side='', status='', sort='dimension', offset=
             FROM register'''
         where, extra = ['TRUE'], []
         if search:
-            where.append("(label ILIKE %s OR display_label ILIKE %s OR dimension::text=%s OR ('emb_'||dimension)=%s OR (side||':'||local_index)=%s)")
+            where.append("(label ILIKE %s OR display_label ILIKE %s OR dimension::text=%s OR feature_name=%s OR (side||':'||local_index)=%s)")
             pattern = '%' + search.replace('\\','\\\\').replace('%','\\%').replace('_','\\_') + '%'
             extra += [pattern,pattern,search,search,search]
         if side:
@@ -269,5 +275,11 @@ def get_prediction(username, rating_key, scored_at, model_version):
                 item.update(side='non-embedding / incompatible',local_index=None)
             contributions.append(item)
         cur.execute(sql + ' SELECT * FROM selected WHERE rating_key=%s',params+[rating_key])
-        return dict(prediction=dict(row),contributions=contributions,selected=[dict(r) for r in cur.fetchall()],
+        groups=[]
+        for group in feature_groups(config):
+            observed=[item['shap_value'] for item in contributions if item.get('side')==group['name'] and item['shap_value'] is not None]
+            groups.append(dict(group=group['name'],observed_dimensions=len(observed),
+                sum_shap=sum(observed),sum_abs_shap=sum(abs(v) for v in observed),
+                coverage='retained contributions only; missing dimensions are unknown'))
+        return dict(prediction=dict(row),contributions=contributions,group_contributions=groups,selected=[dict(r) for r in cur.fetchall()],
                     config=config,limitations=LIMITATIONS)

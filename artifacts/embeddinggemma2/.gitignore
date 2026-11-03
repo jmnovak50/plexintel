@@ -1,0 +1,7 @@
+posters/
+installed.json
+transition.json
+*.pkl
+*.npz
+__pycache__/
+deployment-backups/

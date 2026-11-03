@@ -642,6 +642,8 @@ def score_and_store(
     recommendations_table=RECOMMENDATIONS_TABLE,
     replace_existing=True,
 ):
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
     import shap
     print("📥 Loading model...")
     # Read one artifact snapshot so prospective provenance identifies the model actually loaded.
@@ -856,6 +858,9 @@ def get_all_users():
 
 if __name__ == "__main__":
     import argparse
+
+    from api.embedding_generation.runtime import assert_legacy_allowed
+    assert_legacy_allowed()
 
     ensure_app_schema()
     parser = argparse.ArgumentParser()

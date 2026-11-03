@@ -1,0 +1,2577 @@
+{
+  "started_at": "2026-11-03T14:47:58.981131+00:00",
+  "environment": {
+    "client_host": "birch",
+    "models": {
+      "production": {
+        "tag": {
+          "name": "embeddinggemma:latest",
+          "model": "embeddinggemma:latest",
+          "modified_at": "2026-10-08T10:47:07.476731334Z",
+          "size": 621875861,
+          "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+          "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "gemma-embedding",
+            "families": [
+              "gemma-embedding"
+            ],
+            "parameter_size": "307.58M",
+            "quantization_level": "BF16",
+            "context_length": 2048,
+            "embedding_length": 768,
+            "runner": "llamacpp"
+          },
+          "capabilities": [
+            "embedding"
+          ]
+        },
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "gemma-embedding",
+          "families": [
+            "gemma-embedding"
+          ],
+          "parameter_size": "307.58M",
+          "quantization_level": "BF16",
+          "runner": "llamacpp"
+        },
+        "capabilities": [
+          "embedding"
+        ],
+        "parameters": "num_batch                      2048\nnum_ctx                        2048",
+        "model_info": {
+          "gemma-embedding.attention.head_count": 3,
+          "gemma-embedding.attention.head_count_kv": 1,
+          "gemma-embedding.attention.key_length": 256,
+          "gemma-embedding.attention.layer_norm_rms_epsilon": 1e-06,
+          "gemma-embedding.attention.sliding_window": 512,
+          "gemma-embedding.attention.value_length": 256,
+          "gemma-embedding.block_count": 24,
+          "gemma-embedding.context_length": 2048,
+          "gemma-embedding.dense_2_feat_in": 768,
+          "gemma-embedding.dense_2_feat_out": 3072,
+          "gemma-embedding.dense_3_feat_in": 3072,
+          "gemma-embedding.dense_3_feat_out": 768,
+          "gemma-embedding.embedding_length": 768,
+          "gemma-embedding.feed_forward_length": 1152,
+          "gemma-embedding.pooling_type": 1,
+          "gemma-embedding.rope.freq_base": 1000000,
+          "gemma-embedding.rope.freq_base_swa": 10000,
+          "general.architecture": "gemma-embedding",
+          "general.basename": "embeddinggemma",
+          "general.file_type": 32,
+          "general.license": "gemma",
+          "general.parameter_count": 307581696,
+          "general.quantization_version": 2,
+          "general.size_label": "300M",
+          "general.tags": [
+            "sentence-transformers",
+            "sentence-similarity",
+            "feature-extraction",
+            "text-embeddings-inference",
+            "sentence-similarity"
+          ],
+          "general.type": "model",
+          "tokenizer.ggml.add_bos_token": true,
+          "tokenizer.ggml.add_eos_token": true,
+          "tokenizer.ggml.add_sep_token": false,
+          "tokenizer.ggml.add_space_prefix": false,
+          "tokenizer.ggml.bos_token_id": 2,
+          "tokenizer.ggml.eos_token_id": 1,
+          "tokenizer.ggml.model": "llama",
+          "tokenizer.ggml.padding_token_id": 0,
+          "tokenizer.ggml.pre": "default",
+          "tokenizer.ggml.scores": [],
+          "tokenizer.ggml.token_type": [],
+          "tokenizer.ggml.tokens": [],
+          "tokenizer.ggml.unknown_token_id": 3
+        },
+        "projector_info": null
+      },
+      "experimental": {
+        "tag": {
+          "name": "embeddinggemma-2:latest",
+          "model": "embeddinggemma-2:latest",
+          "modified_at": "2026-11-03T13:52:02.114536573Z",
+          "size": 1284852670,
+          "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+          "details": {
+            "parent_model": "embeddinggemma-2:740m-q8_0",
+            "format": "gguf",
+            "family": "gemma-embedding2",
+            "families": [
+              "gemma-embedding2"
+            ],
+            "parameter_size": "271.00M",
+            "quantization_level": "Q8_0",
+            "context_length": 262144,
+            "embedding_length": 512,
+            "runner": "llamacpp"
+          },
+          "capabilities": [
+            "embedding",
+            "vision",
+            "audio"
+          ]
+        },
+        "details": {
+          "parent_model": "embeddinggemma-2:740m-q8_0",
+          "format": "gguf",
+          "family": "gemma-embedding2",
+          "families": [
+            "gemma-embedding2"
+          ],
+          "parameter_size": "271.00M",
+          "quantization_level": "Q8_0",
+          "runner": "llamacpp"
+        },
+        "capabilities": [
+          "embedding",
+          "vision",
+          "audio"
+        ],
+        "parameters": null,
+        "model_info": {
+          "gemma-embedding2.attention.causal": false,
+          "gemma-embedding2.attention.head_count": 4,
+          "gemma-embedding2.attention.head_count_kv": [
+            2,
+            2,
+            2,
+            2,
+            2,
+            1,
+            2,
+            2,
+            2,
+            2,
+            2,
+            1,
+            2,
+            2,
+            2,
+            2,
+            2,
+            1,
+            2,
+            2,
+            2,
+            2,
+            2,
+            1
+          ],
+          "gemma-embedding2.attention.key_length": 512,
+          "gemma-embedding2.attention.key_length_swa": 256,
+          "gemma-embedding2.attention.layer_norm_rms_epsilon": 1e-06,
+          "gemma-embedding2.attention.shared_kv_layers": 0,
+          "gemma-embedding2.attention.sliding_window": 1024,
+          "gemma-embedding2.attention.sliding_window_pattern": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "gemma-embedding2.attention.value_length": 512,
+          "gemma-embedding2.attention.value_length_swa": 256,
+          "gemma-embedding2.block_count": 24,
+          "gemma-embedding2.context_length": 262144,
+          "gemma-embedding2.embedding_length": 512,
+          "gemma-embedding2.embedding_length_out": 768,
+          "gemma-embedding2.embedding_length_per_layer_input": 512,
+          "gemma-embedding2.feed_forward_length": 2048,
+          "gemma-embedding2.pooling_type": 1,
+          "gemma-embedding2.rope.dimension_count": 512,
+          "gemma-embedding2.rope.dimension_count_swa": 256,
+          "gemma-embedding2.rope.freq_base": 1000000,
+          "gemma-embedding2.rope.freq_base_swa": 10000,
+          "general.architecture": "gemma-embedding2",
+          "general.basename": "embeddinggemma",
+          "general.file_type": 7,
+          "general.languages": [
+            "multilingual"
+          ],
+          "general.license": "apache-2.0",
+          "general.parameter_count": 271002648,
+          "general.quantization_version": 2,
+          "general.size_label": "271M",
+          "general.tags": [
+            "embedding",
+            "feature-extraction",
+            "sentence-transformers",
+            "multimodal-embedding",
+            "multimodal",
+            "vision",
+            "audio",
+            "video",
+            "image-feature-extraction",
+            "audio-feature-extraction",
+            "video-feature-extraction",
+            "sentence-similarity",
+            "feature-extraction"
+          ],
+          "general.type": "model",
+          "general.version": "2",
+          "tokenizer.ggml.add_bos_token": true,
+          "tokenizer.ggml.add_eos_token": true,
+          "tokenizer.ggml.add_sep_token": false,
+          "tokenizer.ggml.add_space_prefix": false,
+          "tokenizer.ggml.bos_token_id": 2,
+          "tokenizer.ggml.eos_token_id": 1,
+          "tokenizer.ggml.mask_token_id": 4,
+          "tokenizer.ggml.merges": [],
+          "tokenizer.ggml.model": "gemma4",
+          "tokenizer.ggml.padding_token_id": 0,
+          "tokenizer.ggml.scores": [],
+          "tokenizer.ggml.token_type": [],
+          "tokenizer.ggml.tokens": [],
+          "tokenizer.ggml.unknown_token_id": 3
+        },
+        "projector_info": {
+          "clip.audio.attention.head_count": 8,
+          "clip.audio.attention.layer_norm_epsilon": 1e-06,
+          "clip.audio.block_count": 12,
+          "clip.audio.embedding_length": 1024,
+          "clip.audio.feed_forward_length": 4096,
+          "clip.audio.num_mel_bins": 128,
+          "clip.audio.projection_dim": 512,
+          "clip.audio.projector_type": "gemma4a",
+          "clip.has_audio_encoder": true,
+          "clip.has_vision_encoder": true,
+          "clip.vision.attention.head_count": 12,
+          "clip.vision.attention.layer_norm_epsilon": 1e-06,
+          "clip.vision.block_count": 16,
+          "clip.vision.embedding_length": 768,
+          "clip.vision.feed_forward_length": 3072,
+          "clip.vision.image_mean": [
+            0,
+            0,
+            0
+          ],
+          "clip.vision.image_size": 224,
+          "clip.vision.image_std": [
+            1,
+            1,
+            1
+          ],
+          "clip.vision.patch_size": 16,
+          "clip.vision.projection_dim": 512,
+          "clip.vision.projector_type": "gemma4v",
+          "general.architecture": "clip",
+          "general.basename": "embeddinggemma",
+          "general.file_type": 1,
+          "general.languages": [
+            "multilingual"
+          ],
+          "general.license": "apache-2.0",
+          "general.name": "Embeddinggemma 2",
+          "general.parameter_count": 473369344,
+          "general.quantization_version": 2,
+          "general.size_label": "473M",
+          "general.tags": [
+            "embedding",
+            "feature-extraction",
+            "sentence-transformers",
+            "multimodal-embedding",
+            "multimodal",
+            "vision",
+            "audio",
+            "video",
+            "image-feature-extraction",
+            "audio-feature-extraction",
+            "video-feature-extraction",
+            "sentence-similarity",
+            "feature-extraction"
+          ],
+          "general.type": "mmproj",
+          "general.version": "2"
+        }
+      }
+    },
+    "ollama_host": "http://192.168.1.123:31770",
+    "setting_sources": {
+      "ollama.host": "env_bootstrap",
+      "ollama.embedding_model": "env_bootstrap",
+      "ollama.threads": "env_bootstrap",
+      "ollama.timeout_s": "env_bootstrap",
+      "tautulli.api_url": "env_bootstrap",
+      "tautulli.api_key": "env_bootstrap",
+      "plex.client_id": "env_bootstrap",
+      "plex.product": "env_bootstrap",
+      "plex.version": "env_bootstrap"
+    },
+    "configured_production_model": "embeddinggemma",
+    "configured_thread_hint": 16,
+    "python": "3.13.5",
+    "ollama_version": "0.40.13",
+    "plex_credential_source": "Existing PlexIntel OAuth token, read-only users query; Tautulli PMS token redacted"
+  },
+  "benchmarks": {
+    "production": {
+      "model": "embeddinggemma:latest",
+      "input_kind": "string-list",
+      "status": "success",
+      "runs": [
+        {
+          "index": 0,
+          "phase": "first",
+          "http_status": 200,
+          "resident_before": false,
+          "client_elapsed_seconds": 0.8378851460001897,
+          "response_file": "raw-responses/production-0.json",
+          "ps_before": {
+            "models": []
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.266022587Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma:latest",
+            "total_duration": 834943270,
+            "load_duration": 794158347,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999934551509,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.040784923
+        },
+        {
+          "index": 1,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.03970069500792306,
+          "response_file": "raw-responses/production-1.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.266022587Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.311832999Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma:latest",
+            "total_duration": 37387823,
+            "load_duration": 525073,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999934551509,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.03686275
+        },
+        {
+          "index": 2,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.03980382399458904,
+          "response_file": "raw-responses/production-2.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.311832999Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.357356338Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma:latest",
+            "total_duration": 37260069,
+            "load_duration": 735714,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999934551509,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.036524355
+        },
+        {
+          "index": 3,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.0401315430062823,
+          "response_file": "raw-responses/production-3.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.357356338Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma:latest",
+            "total_duration": 36884647,
+            "load_duration": 548912,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999934551509,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.036335735
+        }
+      ],
+      "dimensions": 768,
+      "cold_load_seconds": 0.794158347,
+      "warm_inference_median_seconds": 0.036524355,
+      "warm_client_median_seconds": 0.03980382399458904,
+      "first_client_seconds": 0.8378851460001897,
+      "warm_client_range_seconds": [
+        0.03970069500792306,
+        0.0401315430062823
+      ]
+    },
+    "metadata": {
+      "model": "embeddinggemma-2:latest",
+      "input_kind": "string-list",
+      "status": "success",
+      "runs": [
+        {
+          "index": 0,
+          "phase": "first",
+          "http_status": 200,
+          "resident_before": false,
+          "client_elapsed_seconds": 2.0091890949988738,
+          "response_file": "raw-responses/metadata-0.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:02.423132263Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 2005852806,
+            "load_duration": 1582934601,
+            "prompt_eval_count": 580
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999998608028888,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.422918205
+        },
+        {
+          "index": 1,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.396715212991694,
+          "response_file": "raw-responses/metadata-1.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:02.423132263Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:02.82686864Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 394099762,
+            "load_duration": 631837,
+            "prompt_eval_count": 580
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999998608028888,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.393467925
+        },
+        {
+          "index": 2,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.3987057149934117,
+          "response_file": "raw-responses/metadata-2.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:02.82686864Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:03.232562337Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 396213781,
+            "load_duration": 645815,
+            "prompt_eval_count": 580
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999998608028888,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.395567966
+        },
+        {
+          "index": 3,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.395465392008191,
+          "response_file": "raw-responses/metadata-3.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:03.232562337Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:03.634471174Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 392732756,
+            "load_duration": 586226,
+            "prompt_eval_count": 580
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999998608028888,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.39214653
+        }
+      ],
+      "dimensions": 768,
+      "cold_load_seconds": 1.582934601,
+      "warm_inference_median_seconds": 0.393467925,
+      "warm_client_median_seconds": 0.396715212991694,
+      "first_client_seconds": 2.0091890949988738,
+      "warm_client_range_seconds": [
+        0.395465392008191,
+        0.3987057149934117
+      ]
+    },
+    "poster": {
+      "model": "embeddinggemma-2:latest",
+      "input_kind": "object",
+      "status": "success",
+      "runs": [
+        {
+          "index": 0,
+          "phase": "first",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.097035643993877,
+          "response_file": "raw-responses/poster-0.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:03.634471174Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:09.738637685Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6092367500,
+            "load_duration": 9623889,
+            "prompt_eval_count": 604
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000842350116,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.082743611
+        },
+        {
+          "index": 1,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.081501138003659,
+          "response_file": "raw-responses/poster-1.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:09.738637685Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:15.826745536Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6076660274,
+            "load_duration": 9477908,
+            "prompt_eval_count": 604
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000842350116,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.067182366
+        },
+        {
+          "index": 2,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.1078379940008745,
+          "response_file": "raw-responses/poster-2.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:15.826745536Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:21.94139169Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6102835732,
+            "load_duration": 9960035,
+            "prompt_eval_count": 604
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000842350116,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.092875697
+        },
+        {
+          "index": 3,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.052147070004139,
+          "response_file": "raw-responses/poster-3.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:21.94139169Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:28.000106867Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6047351218,
+            "load_duration": 9385839,
+            "prompt_eval_count": 604
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000842350116,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.037965379
+        }
+      ],
+      "dimensions": 768,
+      "cold_load_seconds": null,
+      "warm_inference_median_seconds": 6.067182366,
+      "warm_client_median_seconds": 6.081501138003659,
+      "first_client_seconds": 6.097035643993877,
+      "warm_client_range_seconds": [
+        6.052147070004139,
+        6.1078379940008745
+      ]
+    },
+    "combined": {
+      "model": "embeddinggemma-2:latest",
+      "input_kind": "object",
+      "status": "success",
+      "runs": [
+        {
+          "index": 0,
+          "phase": "first",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.541178264000337,
+          "response_file": "raw-responses/combined-0.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:28.000106867Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:34.551231815Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6534851933,
+            "load_duration": 8548745,
+            "prompt_eval_count": 1182
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999205190325,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.526303188
+        },
+        {
+          "index": 1,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.546378610000829,
+          "response_file": "raw-responses/combined-1.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:34.551231815Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:41.104364964Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6541371434,
+            "load_duration": 8179999,
+            "prompt_eval_count": 1182
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999205190325,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.533191435
+        },
+        {
+          "index": 2,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.513253003999125,
+          "response_file": "raw-responses/combined-2.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:41.104364964Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:47.62412919Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6508026578,
+            "load_duration": 8452276,
+            "prompt_eval_count": 1182
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999205190325,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.499574302
+        },
+        {
+          "index": 3,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 6.596530169001198,
+          "response_file": "raw-responses/combined-3.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:47.62412919Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.227505691Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 6591753051,
+            "load_duration": 8482595,
+            "prompt_eval_count": 1182
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 0.9999999205190325,
+            "valid": true
+          },
+          "server_nonload_seconds": 6.583270456
+        }
+      ],
+      "dimensions": 768,
+      "cold_load_seconds": null,
+      "warm_inference_median_seconds": 6.533191435,
+      "warm_client_median_seconds": 6.546378610000829,
+      "first_client_seconds": 6.541178264000337,
+      "warm_client_range_seconds": [
+        6.513253003999125,
+        6.596530169001198
+      ]
+    },
+    "production_text_control": {
+      "model": "embeddinggemma-2:latest",
+      "input_kind": "string-list",
+      "status": "success",
+      "runs": [
+        {
+          "index": 0,
+          "phase": "first",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.04181814599724021,
+          "response_file": "raw-responses/production_text_control-0.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.227505691Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.277649299Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 39432866,
+            "load_duration": 532409,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000357682908,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.038900457
+        },
+        {
+          "index": 1,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.040556324005592614,
+          "response_file": "raw-responses/production_text_control-1.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.277649299Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.325045442Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 38357669,
+            "load_duration": 637975,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000357682908,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.037719694
+        },
+        {
+          "index": 2,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.041053838009247556,
+          "response_file": "raw-responses/production_text_control-2.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.325045442Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.372697548Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 38605503,
+            "load_duration": 1050611,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000357682908,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.037554892
+        },
+        {
+          "index": 3,
+          "phase": "warm",
+          "http_status": 200,
+          "resident_before": true,
+          "client_elapsed_seconds": 0.04107691199169494,
+          "response_file": "raw-responses/production_text_control-3.json",
+          "ps_before": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.372697548Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "ps_after": {
+            "models": [
+              {
+                "name": "embeddinggemma-2:latest",
+                "model": "embeddinggemma-2:latest",
+                "size": 634461879,
+                "digest": "f4981a15b99858ad1f2e0729416e526be7b4f428291b40082b9e4f7b27b5f62f",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding2",
+                  "families": [
+                    "gemma-embedding2"
+                  ],
+                  "parameter_size": "271.00M",
+                  "quantization_level": "Q8_0"
+                },
+                "expires_at": "2026-11-03T15:03:54.421440851Z",
+                "size_vram": 0,
+                "context_length": 4096,
+                "runner": "llamacpp"
+              },
+              {
+                "name": "embeddinggemma:latest",
+                "model": "embeddinggemma:latest",
+                "size": 692993392,
+                "digest": "82f094e4c0e19bc4208c692996d4f1ecf14e82a8dee579ee1d2ca1175260058e",
+                "details": {
+                  "parent_model": "",
+                  "format": "gguf",
+                  "family": "gemma-embedding",
+                  "families": [
+                    "gemma-embedding"
+                  ],
+                  "parameter_size": "307.58M",
+                  "quantization_level": "BF16"
+                },
+                "expires_at": "2026-11-03T15:03:00.405235035Z",
+                "size_vram": 0,
+                "context_length": 2048,
+                "runner": "llamacpp"
+              }
+            ]
+          },
+          "peak_process_memory_bytes": null,
+          "memory_note": "/api/ps exposes model allocation snapshots, not process RSS or peak memory.",
+          "ollama": {
+            "model": "embeddinggemma-2:latest",
+            "total_duration": 38164299,
+            "load_duration": 600823,
+            "prompt_eval_count": 64
+          },
+          "vector": {
+            "shape": [
+              1,
+              768
+            ],
+            "expected_dimensions": 768,
+            "finite": true,
+            "norm": 1.0000000357682908,
+            "valid": true
+          },
+          "server_nonload_seconds": 0.037563476
+        }
+      ],
+      "dimensions": 768,
+      "cold_load_seconds": null,
+      "warm_inference_median_seconds": 0.037563476,
+      "warm_client_median_seconds": 0.041053838009247556,
+      "first_client_seconds": 0.04181814599724021,
+      "warm_client_range_seconds": [
+        0.040556324005592614,
+        0.04107691199169494
+      ]
+    }
+  },
+  "capability_verification": {
+    "version_matched_source": "https://raw.githubusercontent.com/ollama/ollama/v0.40.13/server/routes.go",
+    "source_sha256": "c72c7f751b4d70e18f2dc3a6100993737d8a5334206a59b64764d59265f9f708",
+    "handler_sha256": "8673be5a5897018369b97bc613a38fbe3bb584942ce462c421d9ceb4cbcb8a47",
+    "native_joint_format_supported": true,
+    "request_format": {
+      "model": "embeddinggemma-2:latest",
+      "input": {
+        "text": "<complete metadata>",
+        "image": "<base64 JPEG bytes>"
+      }
+    },
+    "explanation": "Version-matched handler parses one object and forwards text plus decoded media to one Embedding call.",
+    "alternatives": "Text-only /api/embed is supported. Direct Sentence Transformers/llama.cpp would require a separate runtime and was not executed. No captioning, averaging, or concatenation used."
+  },
+  "movie": {
+    "title": "101 Dalmatians 2: Patch's London Adventure",
+    "year": 2002,
+    "rating_key": 2,
+    "metadata_fields": [
+      "title",
+      "summary",
+      "year",
+      "originalTitle",
+      "tagline",
+      "studio",
+      "contentRating",
+      "originallyAvailableAt",
+      "duration",
+      "rating",
+      "audienceRating",
+      "Genre",
+      "Director",
+      "Writer",
+      "Role",
+      "Country",
+      "Rating"
+    ],
+    "production_fields": [
+      "title",
+      "summary"
+    ],
+    "poster_width": 960,
+    "poster_height": 1440,
+    "poster_bytes": 468172,
+    "poster_sha256": "91e7b011249628a0f25021b1a782c9a00617eed03b98a65c16fcb9d63257d2a8",
+    "metadata_sha256": "7513e25133574c129f38c6843b2aeaffd61412a6c04de729574913124dd67dee",
+    "production_text_sha256": "8a39970b2eec3429c80e527830146166218a0056c957df0721ad4986fac2cfe1",
+    "complete_text_sha256": "10359a31322537bd47d5a46844f4f22b7f142b2237f786d2ca5e9bf48d59b799",
+    "production_serializer_sha256": "f9e82818f98e2b16a55ca7df2185babf611dfc194ef272c89bbcde7bee01a543",
+    "production_text_characters": 234,
+    "complete_text_characters": 2314,
+    "plex_version": "1.43.5.11079-b3b13e506",
+    "plex_server_name": "habanero"
+  },
+  "comparisons": {
+    "metadata_combined_cosine": 0.9190708051164526,
+    "poster_combined_cosine": 0.9523380296955058,
+    "combined_over_metadata_warm_inference_ratio": 16.604127096255684,
+    "metadata_relative_client_throughput_vs_production": 0.1003334953918755,
+    "poster_relative_client_throughput_vs_production": 0.006545065616423648,
+    "combined_relative_client_throughput_vs_production": 0.006080281383936637,
+    "production_text_control_relative_client_throughput_vs_production": 0.9695518354611097
+  },
+  "recommendation": "GO"
+}
