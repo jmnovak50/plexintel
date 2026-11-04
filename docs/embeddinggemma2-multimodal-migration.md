@@ -56,7 +56,7 @@ Observed Ollama endpoint: `http://192.168.1.123:31770`, version **0.40.13**. Exi
 - Validated request reference: **`sha256:<digest>`**, not `name@sha256:...` (the latter was rejected by this server).
 - Advertised embedding/vision capabilities and projector identity are checked against the manifest. Model name, digest, variant, output dimensions and normalization policy are persisted. A validated reuse parent pins its encoder directly instead of resolving a possibly changed `latest` alias.
 
-Text requests to `/api/embed` use `input: {"text": "<canonical text>"}`. Poster requests use `input: {"image": "<base64 prepared PNG bytes>"}`. `Ollama.embed()` rejects both inputs together and rejects an empty request. Both request `dimensions: 768`, `truncate: false`, `keep_alive: "15m"`, and `options: {"num_ctx":8192,"num_thread":16,"num_batch":2048}`. Overlong inputs fail rather than silently truncating. Thread options are requested settings, not measured CPU utilization. Output must be a single finite, nonzero 768-vector; native text/image/watch norms are checked against the unit-norm policy. Equal width never permits cross-generation reuse.
+Text requests to `/api/embed` use `input: {"text": "<canonical text>"}`. Poster requests use `input: {"image": "<base64 prepared PNG bytes>"}`. `Ollama.embed()` rejects both inputs together and rejects an empty request. Both request `dimensions: 768`, `truncate: false`, `keep_alive: "15m"`, and pinned defaults `options: {"num_ctx":8192,"num_thread":16,"num_batch":2048}`. A separately validated poster-only `--num-thread` execution override leaves these original contract/hash anchors unchanged; see [operational CPU thread control](embeddinggemma2-thread-control.md). Overlong inputs fail rather than silently truncating. Thread options are requested settings, not measured CPU utilization. Output must be a single finite, nonzero 768-vector; native text/image/watch norms are checked against the unit-norm policy. Equal width never permits cross-generation reuse.
 
 | Contract | Version / dependency |
 |---|---|
@@ -194,6 +194,7 @@ Concise reference:
 | `install` | Optional additive production schema and installation marker; no activation | Idempotent; explicit approval; no restart |
 | `create` | New shadow snapshot/manifest, independent item seeds; no inference | Creates a new ID each time; resume using existing ID instead |
 | `metadata`, `posters` | Shadow preparation/cache; Plex retrieval only | Checkpointed; use refresh flags for source changes |
+| `recover-metadata` | Explicit recovery of failed historical metadata; verified Plex identities or stored fields; no inference | Checkpointed, requires a recorded reason; no restart |
 | `media-text`, `media-poster`, `watch` | Only the specified shadow modality's Ollama inference | Resume skips compatible completed outputs |
 | `users` | Shadow text-derived user means; no Ollama or classifier training | Compatible completed profiles skipped |
 | `refresh-source` | Atomic shadow inventory/history reconciliation | Repeat; preparation/inference remain separate |
@@ -247,6 +248,31 @@ plexenv/bin/python scripts/embeddinggemma2_migration.py status --generation "$GE
 plexenv/bin/python scripts/embeddinggemma2_migration.py review --generation "$GENERATION_ID" --gate text --reason 'Reviewed complete semantic inputs, text coverage and vector provenance' --approved-production-change
 ```
 
+#### If metadata preparation reports Plex HTTP 404
+
+`inspect` proves only that item's preparation state. The inference gate requires every expected metadata checkpoint. `status` reports `preparation_counts`, `preparation_errors` and retryable failures. A 404 may indicate a changed Plex rating key or content removed from Plex while PlexIntel retains its metadata/history. Retrying cannot restore a deleted identity.
+
+The operator approved **`verified-plex-or-stored-history/1.0`** for this case. The separate recovery command retries failed 404 records and previously attempted recovery failures; it does not rewrite successful checkpoints, invoke Ollama, prepare/download posters, drop records or alter production library/watch identities. It first tries the original identity, then an exact stable GUID of the same media type. A season may additionally match by a verified parent-show GUID plus season index. Ambiguous candidates, mismatched identities and transient API failures remain errors; titles alone never authorize a match.
+
+When content is genuinely gone, recovery uses the captured library title/synopsis/year/runtime/hierarchy and read-only stored genre, ordered cast and director associations. Previously captured rich canonical fields are retained when available. Unrecorded fields remain null/empty; stored associations can contain prior importer inheritance or stale tags, which is explicitly attributed. TV children retain recorded parent context, using verified current parent metadata when available or attributed stored parent fields otherwise. Current artwork from a verified same show can be used by the existing TV hierarchy; inaccessible artwork still follows the explicit missing-art policy and acceptance gate.
+
+For generation `070e323c-b2ee-40c9-aaed-931d8fa58f8d`, read-only diagnosis found **8,315 successful + 78 failed metadata records**: Love Island USA (one show, two seasons, 73 episodes), one The Pitt episode and one Lioness episode. All 78 have existing media vectors and their history includes **110 existing watch vectors**. These are preserved in the rebuild; the approved quarantine for 274 previously unembedded unlinked events is unchanged. Love Island USA's old show key `33211` now resolves by the same stable GUID to `38511`, whose current library has just one episode. Remapping the show therefore cannot restore all old episode metadata.
+
+Run recovery manually, inspect status/origins, then retry text inference only after metadata is complete:
+
+```bash
+plexenv/bin/python scripts/embeddinggemma2_migration.py recover-metadata --generation "$GENERATION_ID" --reason 'Approved verified Plex identity recovery and attributed stored metadata for removed historical titles; preserve all existing vectors and history' --approved-production-change
+plexenv/bin/python scripts/embeddinggemma2_migration.py status --generation "$GENERATION_ID"
+plexenv/bin/python scripts/embeddinggemma2_migration.py inspect --generation "$GENERATION_ID" --item-key 33213 --output artifacts/embeddinggemma2/operator-recovered-33213.json
+plexenv/bin/python scripts/embeddinggemma2_migration.py media-text --generation "$GENERATION_ID" --approved-production-change
+```
+
+Recovery records the policy, operator reason/time, original/resolved keys, stable identity evidence, per-component metadata sources and a hashed input snapshot. `inspect` exposes `metadata_origin` and `metadata_recovery`; `status.metadata_sources` summarizes recovered sources. Final validation reserializes attributed inputs and checks their hashes, policy and identities. The serializer remains `plexintel-media/2.1` because its format is unchanged; recovery is a separately versioned source policy, not a silent serializer change. Metadata/poster hashes remain independent.
+
+Rerunning `recover-metadata` skips completed recoveries. Later explicit metadata refreshes and validated-parent incremental generations retain the approved recovery policy, retry current Plex resolution, and invalidate vectors only when actual semantic/art inputs change. New, unapproved historical failures still require the separate manual recovery command. Successful preparatory recovery does not itself generate or verify replacement vectors. Continue with the text review gate after text inference, then poster preparation/inference and the remaining independent stages.
+
+Recovery follow-up validation: **769 passed, 224 skipped, 89 subtests passed, one existing warning, in 91.98 s**; **50 focused generation/database tests passed**. All **50 documented commands** passed parser checks. A private two-record real Plex fixture verified GUID replacement, historical fallback and zero-request resume, with zero image or embedding requests. A read-only preview of six actual failed records found four verified replacement identities (including The Pitt and Lioness episodes) and two historical fallbacks. Evidence is in `metadata-recovery-integration.json`, `metadata-recovery-preview.json`, `metadata-recovery-validation.json` and `metadata-recovery-boundary.json` under `artifacts/embeddinggemma2/`. The operator generation remains at 8,315 successful / 78 failed preparations until the operator runs the new command. Recovery preserves historical representations; catalog cleanup or changes to scoring eligibility are separate decisions.
+
 ### 4. Prepare posters, generate only images, then review
 
 ```bash
@@ -257,6 +283,18 @@ plexenv/bin/python scripts/embeddinggemma2_migration.py status --generation "$GE
 ```
 
 Inspect hierarchy, source/content hashes, decoded dimensions, cache provenance, successes, failures and explicit missing artwork. Missing rows count separately from successful native image vectors. Zero is the default exception budget. If legitimate exceptions are accepted, set `MISSING_ART_LIMIT` to the reviewed maximum and make the reason specific. Do not classify temporary failure as valid missing art without reviewing the retrieval evidence.
+
+For the current generation's overheating investigation, a bounded one-poster comparison validated 8 and 6 requested threads without changing any saved vectors. **Eight is the recommended first reduced setting**, with unmeasured thermal benefit; full evidence and receipt requirements are in [thread control](embeddinggemma2-thread-control.md). Keep the same generation ID and include the execution flag on every resumed command:
+
+```bash
+plexenv/bin/python scripts/embeddinggemma2_migration.py media-poster --generation "$GENERATION_ID" --num-thread 8 --approved-production-change
+```
+
+The existing receipt is already present for `070e323c-b2ee-40c9-aaed-931d8fa58f8d`. For another generation or a deliberately repeated comparison, pause inference first and separately run the bounded benchmark. It does not advance any checkpoint or overwrite any embedding:
+
+```bash
+plexenv/bin/python scripts/embeddinggemma2_migration.py benchmark-threads --generation "$GENERATION_ID" --item-key 103 --approved-production-change
+```
 
 ```bash
 plexenv/bin/python scripts/embeddinggemma2_migration.py review --generation "$GENERATION_ID" --gate poster --missing-art-limit "$MISSING_ART_LIMIT" --reason 'Reviewed image coverage, cache identities and explicit missing-art exceptions' --approved-production-change

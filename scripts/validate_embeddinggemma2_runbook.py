@@ -34,8 +34,12 @@ def check(path=ROOT/'docs/embeddinggemma2-multimodal-migration.md'):
                 if not namespace.gate or not namespace.reason:raise ValueError('Review requires gate/reason')
                 if namespace.gate=='quality' and not namespace.quality_go:raise ValueError('Quality review lacks explicit GO')
                 gates.add(namespace.gate)
+            if namespace.operation=='recover-metadata' and not namespace.reason:
+                raise ValueError('Historical metadata recovery requires an explicit source-policy reason')
+            if namespace.num_thread is not None and namespace.operation!='media-poster':
+                raise ValueError('Thread overrides are restricted to poster inference')
     required={'preflight','coverage','install','create','metadata','posters','media-text','media-poster','watch','users',
-        'refresh-source','train','score','validate','promote','verify','rollback','recover-transition','status','inspect','export'}
+        'benchmark-threads','recover-metadata','refresh-source','train','score','validate','promote','verify','rollback','recover-transition','status','inspect','export'}
     if required-set(operations):raise ValueError('Runbook lacks stages: '+str(sorted(required-set(operations))))
     if gates!={'text','poster','profiles','quality'}:raise ValueError('Runbook lacks required human review gates')
     if 'media' in operations:raise ValueError('Combined media operation must not be documented')
