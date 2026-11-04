@@ -41,3 +41,7 @@ xgb_model.pkl
 artifacts/seerr-exploration/
 .env.*
 !.env.example
+
+# Local embedding migration outputs and operator notes
+/artifacts/embeddinggemma2/*.json
+/docs/embeddinggemma2-thread-control.md

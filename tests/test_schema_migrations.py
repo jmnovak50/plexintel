@@ -135,7 +135,10 @@ def test_embedding_entrypoint_initializes_schema_without_running_embeddings(migr
         pass
     # The real __main__ guard calls ensure_app_schema before main's connection.
     # Stop at that connection, before reading history or generating any embeddings.
-    with patch('api.db.connection.connect_db', side_effect=StopBeforeEmbeddingWork), \
+    # This legacy-bootstrap unit test must not depend on the operator's real
+    # optional-schema marker. Generation guard behavior has separate coverage.
+    with patch('api.embedding_generation.runtime.assert_legacy_allowed'), \
+         patch('api.db.connection.connect_db', side_effect=StopBeforeEmbeddingWork), \
          patch('api.services.app_settings.get_setting_value', return_value=0.5):
         with pytest.raises(StopBeforeEmbeddingWork):
             runpy.run_path(str(REPO_ROOT / 'build_user_embeddings.py'), run_name='__main__')

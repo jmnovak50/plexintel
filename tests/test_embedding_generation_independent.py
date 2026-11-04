@@ -167,7 +167,8 @@ def test_failed_metadata_prevents_downstream_cli_from_starting(store,encoder,tmp
     make_plex=Mock();monkeypatch.setattr(cli.source,'plex',make_plex)
     for operation in ('posters','media-text'):
         args=cli.argument_parser().parse_args([operation,'--generation',gid,'--approved-production-change'])
-        with pytest.raises(ContractError,match='preparation is incomplete'):cli.dispatch_stage(store,gid,args,{})
+        with pytest.raises(ContractError,match='expected=2, succeeded=1, failed=1, pending=0'):
+            cli.dispatch_stage(store,gid,args,{})
     make_plex.assert_not_called();assert client.calls==[]
 
 

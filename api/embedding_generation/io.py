@@ -92,8 +92,16 @@ class Plex:
         An absent updatedAt is unknown and never authorizes cache reuse. Source
         thumb identities and parent revisions are included by prepare_metadata.
         """
-        sections=call(self.session,'GET',self.base+'/library/sections',headers=self.headers).json().get('MediaContainer',{}).get('Directory',[])
         result={}
+        for raw in self.catalog():
+            if raw.get('updatedAt') is not None:
+                result[str(raw['ratingKey'])]=fingerprint({k:raw.get(k) for k in (
+                    'updatedAt','thumb','parentThumb','grandparentThumb','parentRatingKey','grandparentRatingKey')})
+        return result
+
+    def catalog(self):
+        """Read the complete current catalog; stable GUIDs identify replacements."""
+        sections=call(self.session,'GET',self.base+'/library/sections',headers=self.headers).json().get('MediaContainer',{}).get('Directory',[])
         for section in sections:
             types=(1,) if section.get('type')=='movie' else (2,3,4) if section.get('type')=='show' else ()
             for kind in types:
@@ -103,16 +111,12 @@ class Plex:
                         headers={**self.headers,'X-Plex-Container-Start':str(offset),'X-Plex-Container-Size':'500'},
                         params={'type':kind}).json().get('MediaContainer',{})
                     records=container.get('Metadata',[])
-                    for raw in records:
-                        if raw.get('updatedAt') is not None:
-                            result[str(raw['ratingKey'])]=fingerprint({k:raw.get(k) for k in (
-                                'updatedAt','thumb','parentThumb','grandparentThumb','parentRatingKey','grandparentRatingKey')})
+                    yield from records
                     offset+=len(records)
                     total=container.get('totalSize')
                     if total is not None and offset>=int(total) or total is None and len(records)<500:break
                     if not records:raise SourceError('truncated_plex_revision_scan')
                 else:raise SourceError('plex_revision_page_limit')
-        return result
 
     def metadata(self, key):
         key = int(key)
@@ -227,12 +231,19 @@ class Plex:
 
 
 class Ollama:
-    def __init__(self, host, encoder=None, session=None, timeout=300):
+    def __init__(self, host, encoder=None, session=None, timeout=300,*,num_thread=None,inference_attempts=3):
         self.host=host.rstrip('/')
         self.encoder=encoder
         self.session=session or requests.Session()
         self.timeout=timeout
         self.before_request=lambda:None
+        if num_thread is not None and (type(num_thread) is not int or not encoder or not 1<=num_thread<=encoder.num_thread):
+            raise ContractError('Execution thread override must be an integer reduction of the pinned default')
+        if type(inference_attempts) is not int or not 1<=inference_attempts<=3:
+            raise ContractError('Inference retry bound must be 1..3')
+        self.num_thread_override=num_thread
+        self.inference_attempts=inference_attempts
+        self.execution_validation=None
 
     def resolve(self, threads=16):
         tags=call(self.session,'GET',self.host+'/api/tags').json()['models']
@@ -271,9 +282,10 @@ class Ollama:
             item['image']=base64.b64encode(poster).decode()
         payload=dict(model=self.encoder.reference, input=item, dimensions=768, truncate=False,
             keep_alive='15m', options={'num_ctx':self.encoder.num_ctx,
-                'num_thread':self.encoder.num_thread,'num_batch':self.encoder.num_batch})
+                'num_thread':self.num_thread_override if self.num_thread_override is not None else self.encoder.num_thread,
+                'num_batch':self.encoder.num_batch})
         start=time.perf_counter()
-        response=call(self.session,'POST',self.host+'/api/embed',json=payload,timeout=(5,self.timeout))
+        response=call(self.session,'POST',self.host+'/api/embed',json=payload,timeout=(5,self.timeout),attempts=self.inference_attempts)
         elapsed=time.perf_counter()-start
         data=response.json()
         if data.get('model') != self.encoder.reference:
@@ -288,6 +300,10 @@ class Ollama:
         stats['output_dimensions']=768
         stats['output_norm']=sum(v*v for v in result)**.5
         stats['output_finite']=True
+        stats['execution']=dict(policy='ollama-cpu-threads/1.0',requested_num_thread=payload['options']['num_thread'],
+            manifest_num_thread=self.encoder.num_thread,source='operator-override' if self.num_thread_override is not None else 'manifest-default',
+            semantic_encoder_hash=self.encoder.semantic_identity)
+        if self.execution_validation:stats['execution']['validation']=self.execution_validation
         if 'total_duration' in stats and 'load_duration' in stats:
             stats['server_nonload_seconds']=(stats['total_duration']-stats['load_duration'])/1e9
         return result, stats

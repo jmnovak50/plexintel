@@ -61,6 +61,9 @@ def validate_generation(store,gid,*,quality_go=False,missing_art_limit=0,progres
                 prep=store.preparation(gid,key,'metadata')
                 if not prep or prep['status']!='succeeded' or prep['content_hash']!=row['semantic_hash'] or row['semantic_hash']!=fingerprint(row['source']['metadata']):
                     raise ContractError('Metadata preparation provenance mismatch')
+                if row['source'].get('_metadata_recovery'):
+                    from .recovery import validate_origin
+                    validate_origin(row['source'],key)
                 expected_hash=embedding_input_hash(spec,kind,metadata=row['source']['metadata'])
             elif kind=='media_poster':
                 prep=store.preparation(gid,key,'poster')

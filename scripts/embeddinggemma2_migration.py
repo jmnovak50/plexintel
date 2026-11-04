@@ -139,6 +139,8 @@ def report(store,gid):
         watch_coverage=coverage_report(generation['snapshot']),
         missing_art=sum(r['status']=='missing' for r in store.items(gid,'media_poster')),
         validation=generation['validation'],
+        metadata_sources=[dict(r) for r in store.query(sql.SQL("SELECT source->'metadata_origin'->'components'->'media'->>'source' AS source,count(*) AS records FROM {} WHERE generation_id=%s AND kind='media_text' AND source ? '_metadata_recovery' GROUP BY 1 ORDER BY 1")
+            .format(store.table('items')),(gid,),many=True)],
         preparation_errors=[dict(r) for r in store.query(sql.SQL("SELECT stage,item_key,provenance->>'error' AS error FROM {} WHERE generation_id=%s AND status='failed' ORDER BY stage,item_key LIMIT 20")
             .format(store.table('preparations')),(gid,),many=True)],
         errors=[dict(r) for r in store.query(sql.SQL("SELECT kind,CASE WHEN kind='user' THEN '<user profile>' ELSE item_key END AS item_key,error FROM {} WHERE generation_id=%s AND status='failed' ORDER BY kind,item_key LIMIT 20")
@@ -217,8 +219,8 @@ def execute_stages(store,gid,ollama,plex,cache,progress=print):
 
 def argument_parser():
     parser=argparse.ArgumentParser(description='Manual staged migration: no stage automatically starts the next. Inference, promotion and rollback are separate commands.')
-    parser.add_argument('operation',choices=['preflight','coverage','inspect','export','install','create','metadata','posters','media-text','media-poster',
-        'watch','users','refresh-source','review','train','score','validate','status','verify','promote','rollback','recover-transition','smoke','daily','active'])
+    parser.add_argument('operation',choices=['preflight','coverage','inspect','export','install','create','metadata','recover-metadata','posters','media-text','media-poster',
+        'watch','users','refresh-source','review','train','score','validate','status','verify','promote','rollback','recover-transition','benchmark-threads','smoke','daily','active'])
     parser.add_argument('--generation')
     parser.add_argument('--reuse-generation',help='Reuse only matching per-modality contracts from a validated independent generation')
     parser.add_argument('--approved-production-change',action='store_true',help='Explicit operator authorization for THIS stage only')
@@ -234,6 +236,8 @@ def argument_parser():
     parser.add_argument('--item-key',help='Media identity for read-only input/vector inspection')
     parser.add_argument('--artifact',choices=['dataset.json','evaluation.json','scoring.json','dimensions.json','daily-performance.json'])
     parser.add_argument('--pipeline-lock-held',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--num-thread',type=int,help='Validated operational CPU thread reduction for media-poster only; preserves the generation contract')
+    parser.add_argument('--thread-validation',type=Path,help='Optional benchmark receipt path; defaults to this generation\'s local thread-benchmark artifact')
     return parser
 
 
@@ -287,6 +291,10 @@ def verify(store,gid=None,*,live_schema='public'):
 def dispatch_stage(store,gid,args,config):
     """Exactly one manual stage. Real dependency reviews never invoke producers."""
     operation=args.operation
+    if args.num_thread is not None and operation!='media-poster':
+        raise ContractError('--num-thread is supported only for media-poster')
+    if operation=='recover-metadata' and not args.reason:
+        raise ContractError('recover-metadata requires --reason recording the historical-source decision')
     if operation in ('posters','media-text'):require_preparation(store,gid,'metadata')
     if operation=='media-poster':require_preparation(store,gid,'poster')
     if operation=='review':
@@ -301,14 +309,22 @@ def dispatch_stage(store,gid,args,config):
         watch=store.counts(gid)['watch']
         if watch['succeeded']!=watch['expected'] or watch['failed']:raise ContractError('Watch stage is incomplete')
     if operation in ('media-text','media-poster','watch'):
-        ollama=Ollama(config['ollama.host'],Encoder(**g['contract']['encoder']),timeout=config['ollama.timeout_s'])
+        execution={}
+        if args.num_thread is not None:
+            from api.embedding_generation.execution import authorize
+            execution=authorize(store,gid,config['ollama.host'],args.num_thread,CACHE,path=args.thread_validation)
+        ollama=Ollama(config['ollama.host'],Encoder(**g['contract']['encoder']),timeout=config['ollama.timeout_s'],num_thread=args.num_thread)
+        if execution:ollama.execution_validation=execution
         if not args.pipeline_lock_held:ollama.before_request=yield_to_existing_pipeline
-    if operation in ('metadata','posters'):
+    if operation in ('metadata','recover-metadata','posters'):
         plex=source.plex(config,CACHE)
     kind={'media-text':'media_text','media-poster':'media_poster','watch':'watch','users':'user'}.get(operation)
-    prep={'metadata':'metadata','posters':'poster'}.get(operation)
+    prep={'metadata':'metadata','recover-metadata':'metadata','posters':'poster'}.get(operation)
     with StageProgress(store,gid,operation,kind=kind,preparation=prep,rescan=bool((args.refresh or args.force_poster_check) and prep)) as progress:
         if operation=='metadata':backfill.prepare_metadata(store,gid,plex,refresh=args.refresh,progress=progress)
+        elif operation=='recover-metadata':
+            from api.embedding_generation.recovery import prepare
+            prepare(store,gid,plex,reason=args.reason,progress=progress)
         elif operation=='posters':backfill.prepare_posters(store,gid,plex,refresh=args.refresh,force=args.force_poster_check,progress=progress)
         elif operation=='media-text':backfill.run_media_text(store,gid,ollama,progress=progress)
         elif operation=='media-poster':backfill.run_media_poster(store,gid,CACHE,ollama,progress=progress)
@@ -326,13 +342,16 @@ def dispatch_stage(store,gid,args,config):
 
 def main(argv=None):
     parser=argument_parser();args=parser.parse_args(argv)
+    if args.num_thread is not None and args.operation!='media-poster':parser.error('--num-thread is supported only for media-poster')
+    if args.thread_validation is not None and (args.operation!='media-poster' or args.num_thread is None):
+        parser.error('--thread-validation requires media-poster --num-thread')
     if args.operation=='active':raise SystemExit(0 if active_generation() else 3)
     read_only={'preflight','coverage','status','verify','inspect','export'}
     if args.operation not in read_only|{'smoke','daily'} and not args.approved_production_change:
         parser.error('THIS stage requires operator approval and --approved-production-change')
     conn=connect_db()
     try:
-        if args.operation in read_only:conn.set_session(readonly=True)
+        if args.operation in read_only|{'benchmark-threads'}:conn.set_session(readonly=True)
         if args.operation=='coverage':
             conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
             generation=Store(conn).generation(args.generation) if args.generation else None
@@ -356,6 +375,19 @@ def main(argv=None):
             if args.output:args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(result,indent=2))
             print(canonical(result));return
         store=Store(conn)
+        if args.operation=='benchmark-threads':
+            from api.embedding_generation.execution import benchmark,receipt_path
+            if not args.generation:parser.error('--generation is required')
+            result=benchmark(store,args.generation,config,CACHE,item_key=args.item_key,publication_lock=publication_lock())
+            target=args.output or receipt_path(CACHE,args.generation)
+            target.parent.mkdir(parents=True,exist_ok=True)
+            from tempfile import NamedTemporaryFile
+            with NamedTemporaryFile(mode='w',dir=target.parent,delete=False) as handle:
+                json.dump(result,handle,indent=2);handle.flush();os.fsync(handle.fileno());temporary=Path(handle.name)
+            temporary.replace(target)
+            print(canonical(dict(receipt=str(target),**result)))
+            if result['recommended_threads'] is None:raise ContractError('No reduced thread setting passed vector compatibility; resume override remains blocked')
+            return
         if args.operation=='daily':daily(store,config,pipeline_lock_held=args.pipeline_lock_held);return
         if args.operation=='create':
             started=time.monotonic();last=[-100.]
@@ -400,7 +432,11 @@ def main(argv=None):
                 result['modalities'][kind]=dict(status=row['status'],input_hash=row['input_hash'],
                     modality_contract_hash=row['modality_contract_hash'],provenance=row['provenance'],
                     output_dimensions=len(values) if values else None,norm=sum(v*v for v in values)**.5 if values else None,error=row['error'])
+                result['modalities'][kind]['execution']=(row['timing'] or {}).get('execution')
                 if kind=='media_text':result['canonical_text']=media_text(row['source']['metadata']) if row['source'].get('metadata') else None
+                if kind=='media_text':
+                    result['metadata_origin']=row['source'].get('metadata_origin')
+                    result['metadata_recovery']=row['source'].get('_metadata_recovery')
                 else:result['poster']=row['poster']
             if args.output:args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(result,indent=2))
             print(canonical(result));return

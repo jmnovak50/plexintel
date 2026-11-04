@@ -170,7 +170,19 @@ class Encoder:
 
     @property
     def identity(self):
+        # Historical manifest hash; retain unchanged for existing generations.
         return fingerprint(asdict(self))
+
+    @property
+    def semantic_identity(self):
+        """Model/input identity independent of the CPU execution thread count.
+
+        Existing generation/modality hashes remain frozen legacy anchors. This
+        separate identity binds operational validation without rewriting them.
+        Context, batch, projector, dimensions and normalization stay pinned.
+        """
+        value=asdict(self);value.pop('num_thread')
+        return fingerprint(value)
 
 
 def contract(encoder, profile_threshold=0.5):

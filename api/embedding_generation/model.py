@@ -48,7 +48,7 @@ def dataset(store,gid,*,progress=lambda value:None):
         hasher.update(canonical(serialized).encode());hasher.update(b'\n')
     summary=dict(rows=len(rows),skips=skips,feature_version=FEATURE_VERSION,label_version=LABEL_VERSION,
         dataset_hash=hasher.hexdigest(),hash_format='canonical-rows-jsonl/1.0',watch_coverage=g['snapshot']['watch_coverage'],
-        retrospective_metadata_assumption='Current descriptive metadata; point-in-time metadata snapshots do not exist. Mutable ratings/popularity/outcomes are excluded.')
+        retrospective_metadata_assumption='Captured descriptive metadata (current Plex or explicitly approved stored history); point-in-time metadata snapshots do not exist. Mutable ratings/popularity/outcomes are excluded.')
     store.artifact(gid,'dataset.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
     return rows,summary
 

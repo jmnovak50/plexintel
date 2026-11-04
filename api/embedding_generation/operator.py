@@ -13,7 +13,11 @@ def require_preparation(store,gid,stage):
     counts={r['status']:r['n'] for r in rows}
     expected=store.generation(gid,include_snapshot=False)['expected']['media_text']
     if counts.get('succeeded',0)!=expected or counts.get('failed',0):
-        raise ContractError(stage+' preparation is incomplete; finish/retry that stage before proceeding')
+        succeeded=counts.get('succeeded',0);failed=counts.get('failed',0)
+        pending=max(0,expected-succeeded-failed)
+        raise ContractError(f'{stage} preparation is incomplete: expected={expected}, succeeded={succeeded}, failed={failed}, pending={pending}. '
+            f'Run status --generation {gid} and inspect preparation_errors before retrying. '
+            'Successful preparation of one item does not establish generation-wide completeness.')
 
 
 def review_state(store,gid,gate,*,missing_art_limit=0):

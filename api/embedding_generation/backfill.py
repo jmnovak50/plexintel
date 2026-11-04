@@ -38,6 +38,16 @@ def generation_writer(function):
     return run
 
 
+def checkpoint_metadata(store,gid,row,source,value,*,provenance,timing):
+    """Shared checkpoint/invalidation for strict and explicitly recovered inputs."""
+    store.upsert_source(gid,'media_text',row['item_key'],source,semantic_hash=fingerprint(value))
+    if row['source'].get('poster_reference')!=source['poster_reference']:
+        store.query(sql.SQL("DELETE FROM {} WHERE generation_id=%s AND item_key=%s AND stage='poster'")
+            .format(store.table('preparations')),(gid,row['item_key']))
+    store.preparation(gid,row['item_key'],'metadata',status='succeeded',content_hash=fingerprint(value),
+        provenance=provenance,timing=timing)
+
+
 @generation_writer
 def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
     """Independent metadata checkpoints, with no poster retrieval or inference."""
@@ -45,8 +55,8 @@ def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
     if generation['contract']['media_serializer']!=MEDIA_VERSION or generation['contract']['poster_hierarchy']!=POSTER_HIERARCHY:
         raise ContractError('Generation metadata/hierarchy version differs from this implementation')
     if refresh and hasattr(plex,'metadata_cache'):plex.metadata_cache.clear()
-    revisions=plex.revisions()
-    for row in store.items(gid,'media_text'):
+    revisions=plex.revisions();rows=store.items(gid,'media_text');recovery_resolver=None
+    for row in rows:
         prepared=store.preparation(gid,row['item_key'],'metadata')
         if prepared and prepared['status']=='succeeded' and not refresh:continue
         started=time.perf_counter()
@@ -62,7 +72,21 @@ def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
             parent_contract=(store.generation(generation['parent_id'],include_snapshot=False)['contract'] if generation['parent_id'] else generation['contract'])
             source_compatible=all(parent_contract.get(k)==generation['contract'].get(k) for k in ('media_serializer','poster_hierarchy'))
             reused=bool(source_compatible and revision and prior['source'].get('_plex_revision')==revision and 'metadata' in prior['source'])
-            if reused:
+            approval=row['source'].get('_metadata_recovery') or prior['source'].get('_metadata_recovery')
+            provenance=dict(source='Plex')
+            if approval:
+                from .recovery import Resolver,POLICY,load_associations
+                if approval.get('policy')!=POLICY or not approval.get('reason'):
+                    raise ContractError('Unknown/unapproved historical metadata recovery policy')
+                if recovery_resolver is None:
+                    recovery_resolver=Resolver(plex,{r['item_key']:r['source'] for r in rows},load_associations(store.conn,[r['item_key'] for r in rows]))
+                recovery_resolver.sources[row['item_key']]={**prior['source'],**row['source']}
+                value,reference,origin=recovery_resolver.payload(row['source'])
+                source={**row['source'],'metadata':value,'poster_reference':reference,'_plex_revision':revision,
+                    '_metadata_recovery':approval,'metadata_origin':origin}
+                provenance=dict(source='explicit-recovery',**approval,components=origin['components'],raw_inputs_hash=origin['raw_inputs_hash'])
+                reused=False
+            elif reused:
                 source={**row['source'],'metadata':prior['source']['metadata'],
                     'poster_reference':prior['source']['poster_reference'],'_plex_revision':revision}
                 value=source['metadata']
@@ -74,14 +98,8 @@ def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
                 if raw['type']=='season':sources=[raw,plex.metadata(raw['parentRatingKey'])]
                 if raw['type']=='episode':sources=[plex.metadata(raw['grandparentRatingKey']),plex.metadata(raw['parentRatingKey']),raw]
                 source['poster_reference']['_poster_sources']=[{k:r.get(k) for k in ('type','ratingKey','thumb')} for r in sources]
-            store.upsert_source(gid,'media_text',row['item_key'],source,semantic_hash=fingerprint(value))
-            if row['source'].get('poster_reference')!=source['poster_reference']:
-                # Re-prepare changed references, retaining the old image vector
-                # until actual prepared pixels establish whether it changed.
-                store.query(sql.SQL("DELETE FROM {} WHERE generation_id=%s AND item_key=%s AND stage='poster'")
-                    .format(store.table('preparations')),(gid,row['item_key']))
-            store.preparation(gid,row['item_key'],'metadata',status='succeeded',content_hash=fingerprint(value),
-                provenance=dict(source='Plex',fields_present=sorted(k for k,v in value.items() if v)),
+            checkpoint_metadata(store,gid,row,source,value,
+                provenance=dict(**provenance,fields_present=sorted(k for k,v in value.items() if v)),
                 timing=dict(metadata_seconds=time.perf_counter()-started,revision_cache_hit=reused))
             store.conn.commit()
         except Exception as exc:
@@ -142,6 +160,11 @@ def _run_modality(store,gid,kind,cache,ollama,*,batch_size,progress):
         or kind=='media_poster' and generation['contract']['image']!=IMAGE_VERSION):
         raise ContractError('Modality serializer/preprocessing version differs from this implementation')
     if asdict(ollama.encoder)!=generation['contract']['encoder']:raise ContractError('Worker encoder differs from pinned generation')
+    override=getattr(ollama,'num_thread_override',None)
+    if override is not None:
+        evidence=getattr(ollama,'execution_validation',None) or {}
+        if kind!='media_poster' or evidence.get('validated_num_thread')!=override or not evidence.get('receipt_sha256'):
+            raise ContractError('Poster thread override requires compatible benchmark evidence; no inputs were invalidated')
     with store.writer('ollama:'+ollama.encoder.digest),store.writer(gid):
         for row in (r for batch in store.batches(gid,kind,size=batch_size,pending=True) for r in batch):
             key=row['item_key'];error=None;attempted=False;timing=None;request_start=None;inherited=None
@@ -190,6 +213,8 @@ def run_watches(store,gid,ollama,*,progress=lambda x:None):
         raise ContractError('Behavioral/media serializer version differs from this implementation')
     if asdict(ollama.encoder)!=generation['contract']['encoder']:
         raise ContractError('Watch encoder differs from generation')
+    if getattr(ollama,'num_thread_override',None) is not None:
+        raise ContractError('Watch thread overrides require separate validation; the poster policy does not apply')
     if store.counts(gid)['media_text']['succeeded']!=generation['expected']['media_text']:
         raise ContractError('Complete and validate media before watch generation')
     media={r['item_key']:r for r in store.items(gid,'media_text')}
