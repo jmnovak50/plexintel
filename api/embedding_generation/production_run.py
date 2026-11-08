@@ -159,6 +159,8 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
     from .operator import approve_review,require_preparation
     from .model import score
     from .promotion import promote
+    from .progress import Reporter
+    monitor=Reporter(progress);progress=monitor
     overall_started=time.perf_counter()
     production=load_production(durable)
     if production is None:raise ContractError('Canonical text-only production must be active')
@@ -174,11 +176,19 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
             durable.query(sql.SQL("INSERT INTO {}(run_id,generation_id,base_model_sha256,status,summary) VALUES(%s,%s,%s,'running',%s)").format(durable.table('production_runs')),
                           (run_id,gid,state['model_sha256'],Json(dict(before=baseline(durable)))))
             durable.conn.commit();run=durable.query(sql.SQL('SELECT * FROM {} WHERE run_id=%s').format(durable.table('production_runs')),(run_id,))
+        monitor.bind(run_id)
         progress(dict(stage='production-run',run_id=run_id,generation_id=gid,resumed=bool(pending)))
         stages=dict(run['stages']);summary=dict(run['summary'] or {});started=time.perf_counter()
         def phase(name,operation):
-            if name in stages:return
-            t=time.perf_counter();operation();stages[name]=time.perf_counter()-t
+            from contextlib import nullcontext
+            logical={'source_sync':'source_sync','watch':'watch','users':'users'}.get(name)
+            if name in stages:
+                if logical:monitor.skip(logical,previous_seconds=stages[name])
+                return
+            t=time.perf_counter()
+            with monitor.span(logical) if logical else nullcontext():operation()
+            if logical:monitor.done(logical)
+            stages[name]=time.perf_counter()-t
             durable.query(sql.SQL("UPDATE {} SET stages=%s,status='running',error=NULL WHERE run_id=%s").format(durable.table('production_runs')),(Json(stages),run_id));durable.conn.commit()
             progress(dict(stage=name,run_id=run_id,seconds=stages[name]))
         try:
@@ -192,41 +202,69 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
                 log=ROOT/'logs'/('production-sync-'+run_id+'.log');log.write_text(text);log.chmod(0o600)
                 if p.returncode:raise ContractError('Source synchronization failed; private sanitized stage log retained')
             phase('source_sync',sync)
-            context_started=time.perf_counter()
-            if run['snapshot'] is None:
-                snapshot=collect(config,progress=progress)
-                old={r['item_key']:r['record'] for r in durable.query(sql.SQL("SELECT * FROM {} WHERE kind='watch'").format(durable.table('production_inputs')),many=True)}
-                for event in snapshot['events']:
-                    row=old.get(str(event['watch_id']))
-                    if row and fingerprint({k:v for k,v in event.items() if k!='observed_at'})==row['semantic_hash']:event['observed_at']=row['source'].get('observed_at',event['observed_at'])
-                durable.query(sql.SQL('UPDATE {} SET snapshot=%s WHERE run_id=%s').format(durable.table('production_runs')),(Json(snapshot),run_id));durable.conn.commit()
-            else:snapshot=run['snapshot']
-            work=ProductionRun(durable,run_id);work.install_work();work.hydrate(state,snapshot)
-            stages['context']=stages.get('context',0)+time.perf_counter()-context_started
-            client=Ollama(config['ollama.host'],Encoder(**state['contract']['encoder']),timeout=config['ollama.timeout_s']);client.verify_pinned()
-            plex=plex_factory(config,cache)
-            def metadata_stage():
-                prepare_metadata(work,gid,plex,refresh=True,progress=progress)
+            with monitor.span('media_text'):
+                context_started=time.perf_counter()
+                if run['snapshot'] is None:
+                    snapshot=collect(config,progress=progress)
+                    old={r['item_key']:r['record'] for r in durable.query(sql.SQL("SELECT * FROM {} WHERE kind='watch'").format(durable.table('production_inputs')),many=True)}
+                    for event in snapshot['events']:
+                        row=old.get(str(event['watch_id']))
+                        if row and fingerprint({k:v for k,v in event.items() if k!='observed_at'})==row['semantic_hash']:event['observed_at']=row['source'].get('observed_at',event['observed_at'])
+                    durable.query(sql.SQL('UPDATE {} SET snapshot=%s WHERE run_id=%s').format(durable.table('production_runs')),(Json(snapshot),run_id));durable.conn.commit()
+                else:snapshot=run['snapshot']
+                work=ProductionRun(durable,run_id);work.install_work();work.hydrate(state,snapshot)
+                stages['context']=stages.get('context',0)+time.perf_counter()-context_started
+                client=Ollama(config['ollama.host'],Encoder(**state['contract']['encoder']),timeout=config['ollama.timeout_s']);client.verify_pinned()
+                plex=plex_factory(config,cache)
+                def metadata_stage():
+                    prepare_metadata(work,gid,plex,refresh=True,progress=progress)
+                    require_preparation(work,gid,'metadata')
+                def vectors_stage(kind,operation):
+                    operation();count=work.counts(gid)[kind]
+                    if count['succeeded']!=count['expected'] or count['failed'] or count['pending']:
+                        raise ContractError('Production '+kind+' stage is incomplete; resume this run')
+                phase('metadata',metadata_stage)
                 require_preparation(work,gid,'metadata')
-            def vectors_stage(kind,operation):
-                operation();count=work.counts(gid)[kind]
-                if count['succeeded']!=count['expected'] or count['failed'] or count['pending']:
-                    raise ContractError('Production '+kind+' stage is incomplete; resume this run')
-            phase('metadata',metadata_stage)
-            require_preparation(work,gid,'metadata')
-            phase('media_text',lambda:vectors_stage('media_text',lambda:run_media_text(work,gid,client,progress=progress)))
+                phase('media_text',lambda:vectors_stage('media_text',lambda:run_media_text(work,gid,client,progress=progress)))
             phase('watch',lambda:vectors_stage('watch',lambda:run_watches(work,gid,client,progress=progress)))
             phase('users',lambda:vectors_stage('user',lambda:run_users(work,gid,progress=progress)))
+            requests_now=durable.query(sql.SQL('SELECT kind,item_key,status,stats FROM {} WHERE run_id=%s').format(durable.table('production_run_requests')),(run_id,),many=True)
+            for kind,key in [('media_text','media_text'),('watch','watch'),('user','users')]:
+                counts=work.counts(gid)[kind]
+                inferred=len({r['item_key'] for r in requests_now if r['kind']==kind and r['status']=='succeeded'})
+                metrics=dict(expected=counts['expected'],completed=counts['succeeded'],succeeded=counts['succeeded'],failed=counts['failed'],pending=counts['pending'])
+                if kind=='user':
+                    rebuilt=sum((r.get('timing') or {}).get('rebuilt',False) for r in work.items(gid,'user'))
+                    metrics.update(rebuilt=rebuilt,reused=counts['succeeded']-rebuilt)
+                else:metrics.update(inferred=inferred,requests=sum(r['kind']==kind for r in requests_now),reused=counts['succeeded']-inferred,inference_seconds=sum(r['stats'].get('client_seconds',0) for r in requests_now if r['kind']==kind))
+                if kind in ('media_text','watch'):
+                    old_keys=set(summary['before']['media_embedding_keys' if kind=='media_text' else 'watch_embedding_keys'])
+                    success_keys={r['item_key'] for r in requests_now if r['kind']==kind and r['status']=='succeeded'}
+                    metrics.update(new=len(success_keys-old_keys),regenerated=len(success_keys&old_keys))
+                if kind=='media_text':metrics.update(metadata_seconds=stages.get('metadata',0),context_seconds=stages['context'])
+                monitor.done(key,**metrics)
+            before=summary['before']
+            monitor.done('source_sync',new_media=len({str(r['rating_key']) for r in snapshot['media']}-set(before['media_keys'])),new_watch_events=snapshot['watch_coverage'].get('source_watch_events',len(before['watch_ids']))-len(before['watch_ids']),quarantined=snapshot['watch_coverage'].get('quarantined_watch_events',0))
             for gate in ('text','profiles'):approve_review(work,gid,gate,'Approved canonical text-only production run; no poster dependency')
-            phase('training',lambda:train_text(work,gid,progress=progress))
-            evaluation=json.loads(bytes(work.artifact(gid,'evaluation.json')['data']))
-            if (evaluation['chronological']['balanced_accuracy']<.5
-                or evaluation['chronological']['average_precision']<state['evaluation']['chronological']['average_precision']-.05
-                or evaluation['show_grouped']['metrics']['balanced_accuracy']<.5):raise ContractError('Production text refit failed the existing quality gates')
-            approve_review(work,gid,'quality','Normal daily text refit passed chronological/show-heldout gates; prior B remains archived',quality_go=True)
-            phase('scoring',lambda:score(work,gid,progress=progress))
+            if 'training' in stages:
+                monitor.skip('training_data')
+                monitor.skip('train_model',previous_seconds=stages['training'])
+            phase('training',lambda:train_text(work,gid,progress=progress,monitor=monitor))
+            with monitor.span('train_model'):
+                evaluation=json.loads(bytes(work.artifact(gid,'evaluation.json')['data']))
+                monitor.emit('train_model','started',chronological_balanced_accuracy=evaluation['chronological']['balanced_accuracy'],chronological_average_precision=evaluation['chronological']['average_precision'],show_balanced_accuracy=evaluation['show_grouped']['metrics']['balanced_accuracy'])
+                if (evaluation['chronological']['balanced_accuracy']<.5
+                    or evaluation['chronological']['average_precision']<state['evaluation']['chronological']['average_precision']-.05
+                    or evaluation['show_grouped']['metrics']['balanced_accuracy']<.5):raise ContractError('Production text refit failed the existing quality gates')
+                approve_review(work,gid,'quality','Normal daily text refit passed chronological/show-heldout gates; prior B remains archived',quality_go=True)
+            monitor.done('train_model',quality_passed=True,chronological_balanced_accuracy=evaluation['chronological']['balanced_accuracy'],chronological_average_precision=evaluation['chronological']['average_precision'],show_balanced_accuracy=evaluation['show_grouped']['metrics']['balanced_accuracy'])
+            if 'scoring' in stages:
+                monitor.skip('score_model',previous_seconds=stages['scoring'])
+                monitor.skip('shap')
+            phase('scoring',lambda:score(work,gid,progress=progress,monitor=monitor))
             stages.pop('validation',None)  # Revalidate reconstructed temporary context on resume.
-            phase('validation',lambda:work.validate(gid,quality_go=True,progress=progress))
+            with monitor.span('publication'):
+                phase('validation',lambda:work.validate(gid,quality_go=True,progress=progress))
             after=baseline(durable)
             requests=durable.query(sql.SQL('SELECT kind,item_key,status,stats FROM {} WHERE run_id=%s').format(durable.table('production_run_requests')),(run_id,),many=True)
             media_success={r['item_key'] for r in requests if r['kind']=='media_text' and r['status']=='succeeded'}
@@ -250,7 +288,18 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
                 elapsed_seconds=time.perf_counter()-overall_started,no_new_shadow_generation=True)
             durable.query(sql.SQL('UPDATE {} SET summary=%s WHERE run_id=%s').format(durable.table('production_runs')),(Json(summary),run_id));durable.conn.commit()
             deployed=durable.query(sql.SQL('SELECT deployed_code_sha256 FROM {} WHERE singleton').format(durable.table('control')))['deployed_code_sha256']
-            result=promote(work,gid,approved=True,deployed_code=deployed)
+            with monitor.span('publication'):
+                result=promote(work,gid,approved=True,deployed_code=deployed)
+            monitor.done('publication',message='Committed publication '+result['promotion_id'])
+            with monitor.span('verification'):
+                verified=verify_current_production(durable)
+                if (verified['publication_id']!=result['promotion_id'] or verified['generation_id']!=gid
+                    or verified['model_sha256']!=summary['model_after']):
+                    raise ContractError('Published generation/model changed before final verification')
+            monitor.done('verification',verified_vectors=sum(v['succeeded'] for v in verified['counts'].values()),poster_requests=0)
+            summary['stage_details']=monitor.details
+            summary['elapsed_seconds_total']=time.perf_counter()-overall_started
+            durable.query(sql.SQL('UPDATE {} SET summary=%s,finished_at=clock_timestamp() WHERE run_id=%s').format(durable.table('production_runs')),(Json(summary),run_id));durable.conn.commit()
             return dict(run_id=run_id,**result,summary=summary)
         except BaseException as exc:
             durable.conn.rollback();durable.query(sql.SQL("UPDATE {} SET status='failed',error=%s WHERE run_id=%s").format(durable.table('production_runs')),(safe_error(exc),run_id));durable.conn.commit();raise

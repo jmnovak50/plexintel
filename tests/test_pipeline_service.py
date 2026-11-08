@@ -242,8 +242,8 @@ class PipelineRefreshStatusTests(unittest.TestCase):
         self.assertTrue(pipeline_service.fetch_score_model_refresh_status(cur))
 
         executed_sql = " ".join(sql for sql, _params in conn.executed)
-        self.assertIn("current_stage_key = %s", executed_sql)
-        self.assertEqual(conn.executed[0][1], ("score_model",))
+        self.assertIn("current_stage_key IN", executed_sql)
+        self.assertEqual(conn.executed[0][1], ("score_model", "shap", "publication", "verification"))
 
     def test_is_score_model_refreshing_closes_owned_connection(self):
         conn = FakeConnection([{"is_refreshing": False}])

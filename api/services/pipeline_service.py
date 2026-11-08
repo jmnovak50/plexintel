@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import pwd
 import signal
@@ -20,6 +21,7 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
+from api.embedding_generation.progress import EVENT, STAGES, STAGE_NAMES, EventReader, clean_metrics, event_details
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENV_PYTHON = REPO_ROOT / "plexenv" / "bin" / "python"
@@ -161,11 +163,11 @@ def fetch_score_model_refresh_status(cur) -> bool:
         SELECT EXISTS (
             SELECT 1
             FROM public.pipeline_runs
-            WHERE current_stage_key = %s
+            WHERE current_stage_key IN (%s, %s, %s, %s)
               AND status NOT IN ('success', 'failed', 'cancelled')
         ) AS is_refreshing
         """,
-        ("score_model",),
+        ("score_model", "shap", "publication", "verification"),
     )
     row = cur.fetchone()
     return bool(_row_value(row, "is_refreshing"))
@@ -647,6 +649,59 @@ def _signal_process_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
         proc.kill()
 
 
+class PipelineStageObserver:
+    """Observe one existing worker; never launch, cancel or publish anything."""
+    def __init__(self, run_id):
+        self.run_id = run_id
+        self.events = {}
+        self.initialized = False
+        self.current_key = 'embeddinggemma2_generation'
+
+    def accept(self, event):
+        if event.get('event') != EVENT or event.get('stage_key') not in STAGE_NAMES:return
+        key = event['stage_key']
+        if event.get('status') not in {'started','success','failed','cancelled','pending','skipped','not_recorded'}:return
+        try:
+            at = datetime.fromisoformat(event['at'])
+            if at.tzinfo is None:return
+            seconds = float(event['elapsed_seconds'])
+            if not 0 <= seconds < 1e9:return
+        except (KeyError, ValueError, TypeError):return
+        event = dict(event, metrics=clean_metrics(event.get('metrics') or {}))
+        # EventReader accepts only known stages/statuses; keep a bounded payload.
+        payload = json.dumps(event, allow_nan=False)
+        if len(payload) > LOG_TAIL_MAX:return
+        status = event['status']
+        with _pipeline_connection() as conn:
+            with conn.cursor() as cur:
+                if not self.initialized:
+                    for stage, _ in STAGES:
+                        cur.execute("""INSERT INTO public.pipeline_run_stages(run_id,stage_key,status)
+                            VALUES(%s,%s,'pending')""", (self.run_id, stage))
+                cur.execute("""UPDATE public.pipeline_run_stages SET status=%s,stdout_tail=%s,
+                    started_at=CASE WHEN status='pending' THEN %s ELSE started_at END,
+                    completed_at=CASE WHEN %s='started' THEN NULL ELSE COALESCE(completed_at,%s) END
+                    WHERE run_id=%s AND stage_key=%s""",
+                    (status, payload, at, status, at, self.run_id, key))
+        self.initialized = True
+        self.events[key] = event
+        if status == 'started':self.current_key = key
+
+    def finish(self, *, cancelled, returncode):
+        from datetime import timezone
+        if not self.initialized:return
+        for key, _ in STAGES:
+            old = self.events.get(key, {})
+            if old.get('status') in ('success', 'failed', 'cancelled', 'skipped'):continue
+            active = old.get('status') == 'started'
+            status = ('cancelled' if cancelled else 'failed') if active and (cancelled or returncode) else (
+                'skipped' if cancelled or returncode else 'not_recorded')
+            self.accept(dict(event=EVENT, stage_key=key, status=status,
+                at=datetime.now(timezone.utc).isoformat(), elapsed_seconds=old.get('elapsed_seconds', 0.),
+                metrics=old.get('metrics', {}), message='Worker cancelled' if cancelled else (
+                    'Worker exited before stage completed' if active else 'Stage not reached or not recorded')))
+
+
 def _run_stage_process(
     *,
     run_id: int,
@@ -681,6 +736,23 @@ def _run_stage_process(
                 close_fds=True,
             )
             cancelled = False
+            observer = PipelineStageObserver(run_id) if stage_key == 'embeddinggemma2_generation' else None
+            reader = EventReader(stdout_file) if observer else None
+            observation_failed = False
+
+            def observe(*, drain=False):
+                nonlocal observation_failed
+                if not reader or observation_failed:return
+                try:
+                    while True:
+                        events, more = reader.read()
+                        for event in events:observer.accept(event)
+                        if not drain or not more:break
+                except Exception as exc:
+                    # Monitoring must not strand a running child or bypass cancellation.
+                    observation_failed = True
+                    _log_run_event(run_id, 'Stage observation unavailable: '+type(exc).__name__)
+
             _update_run_heartbeat_short(run_id=run_id, stage_key=stage_key, pid=proc.pid)
             _log_run_event(
                 run_id,
@@ -689,6 +761,7 @@ def _run_stage_process(
             )
 
             while proc.poll() is None:
+                observe()
                 if _read_pipeline_cancel_requested(run_id):
                     cancelled = True
                     _signal_process_group(proc, signal.SIGTERM)
@@ -705,12 +778,17 @@ def _run_stage_process(
                 if proc.poll() is None:
                     _update_run_heartbeat_short(
                         run_id=run_id,
-                        stage_key=stage_key,
+                        stage_key=observer.current_key if observer and not observation_failed else stage_key,
                         pid=proc.pid,
                     )
 
             if proc.poll() is None:
                 proc.wait()
+
+            observe(drain=True)
+            if observer and not observation_failed:
+                try:observer.finish(cancelled=cancelled, returncode=proc.returncode)
+                except Exception as exc:_log_run_event(run_id, 'Stage observation incomplete: '+type(exc).__name__)
 
             elapsed_seconds = time.monotonic() - started_monotonic
             completed_at = datetime.now().astimezone()
@@ -1164,6 +1242,10 @@ def get_pipeline_runs(*, limit: int = 50) -> dict[str, Any]:
             rd["stages"] = stages_by_run.get(rd["run_id"], [])
             out_runs.append(rd)
 
+        from api.services.pipeline_visibility import enrich_runs
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            enrich_runs(cur, out_runs)
+
         return {"runs": out_runs}
     finally:
         conn.close()
@@ -1261,6 +1343,9 @@ def get_pipeline_run(run_id: int) -> dict[str, Any] | None:
             stages = list(cur.fetchall() or [])
         rdict = dict(run)
         rdict["stages"] = [dict(s) for s in stages]
+        from api.services.pipeline_visibility import enrich_runs
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            enrich_runs(cur, [rdict])
         return rdict
     finally:
         conn.close()

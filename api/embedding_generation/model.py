@@ -283,51 +283,60 @@ def load_bundle(store,gid):
 
 
 @generation_writer
-def score(store,gid,*,batch_size=128,shap_items_per_user=750,progress=lambda value:None):
+def score(store,gid,*,batch_size=128,shap_items_per_user=750,progress=lambda value:None,monitor=None):
     import xgboost as xgb
     started=time.perf_counter();g,media,watches,posters=populations(store,gid);bundle,vocab=load_bundle(store,gid)
     as_of=utc(g['snapshot']['as_of'])+timedelta(microseconds=1)
     feedback={(r['username'],str(r['rating_key'])):r for r in g['snapshot']['feedback']}
     owners=[r['item_key'] for r in store.items(gid,'user')]
     store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table('predictions')),(gid,))
-    total=0;skipped=0
+    from contextlib import nullcontext
+    total=0;skipped=0;contexts=0;contributions=0
     for owner_index,owner in enumerate(owners):
         progress(dict(stage='shadow-scoring',expected=len(owners),completed=owner_index,failed=0))
-        events=[e for e in g['snapshot']['events'] if e['username']==owner]
-        context=ProfileContext(g,media,watches,events,owner,as_of);by_key=defaultdict(list)
-        for event in events:by_key[str(event['rating_key'])].append(event)
-        rows=[]
-        for key,parent in media.items():
-            if parent['source']['metadata']['media_type'] not in ('movie','episode'):continue
-            f=feedback.get((owner,key))
-            if f and f.get('suppress') and f.get('feedback')!='interested':continue
-            runtime=runtime_seconds(parent);watched=False
-            for event in by_key[key]:
-                percent=event.get('percent_complete');ratio=(percent/100 if percent>=1 else percent) if percent is not None else 0
-                if ratio>=.5 or runtime and event.get('played_seconds') is not None and event['played_seconds']/runtime>=.5:
-                    watched=True;break
-            if watched:continue
-            row=feature_row(g,media,watches,events,owner,key,as_of,posters=posters,context=context)
-            if row is None:skipped+=1;continue
-            rows.append(row)
-        predictions=[]
-        for start in range(0,len(rows),batch_size):
-            part=rows[start:start+batch_size];probability=bundle['model'].predict_proba(vocab.transform(part))[:,1]
-            predictions.extend(zip(part,map(float,probability)))
-            progress(dict(stage='shadow-scoring',expected=len(owners),completed=owner_index,failed=0,
-                phase=f'candidate batch {start+len(part)}/{len(rows)}'))
-        predictions.sort(key=lambda pair:(-pair[1],int(pair[0]['media_key'])))
-        for index,(row,probability) in enumerate(predictions):
-            shap=[]
-            if index<shap_items_per_user:
-                values=bundle['model'].get_booster().predict(xgb.DMatrix(vocab.transform([row]),feature_names=vocab.names,nthread=2),pred_contribs=True)[0][:-1]
-                shap=[[i,float(values[i])] for i in sorted(range(sum(bundle['dimensions'])),key=lambda i:abs(values[i]),reverse=True)[:40]]
-            store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s)').format(store.table('predictions')),
-                (gid,owner,row['media_key'],probability,cosine(row['embedding'][:768],row['embedding'][-768:]),index+1,Json(shap)))
+        with monitor.span('score_model') if monitor else nullcontext():
+            events=[e for e in g['snapshot']['events'] if e['username']==owner]
+            context=ProfileContext(g,media,watches,events,owner,as_of);by_key=defaultdict(list)
+            for event in events:by_key[str(event['rating_key'])].append(event)
+            rows=[]
+            for key,parent in media.items():
+                if parent['source']['metadata']['media_type'] not in ('movie','episode'):continue
+                f=feedback.get((owner,key))
+                if f and f.get('suppress') and f.get('feedback')!='interested':continue
+                runtime=runtime_seconds(parent);watched=False
+                for event in by_key[key]:
+                    percent=event.get('percent_complete');ratio=(percent/100 if percent>=1 else percent) if percent is not None else 0
+                    if ratio>=.5 or runtime and event.get('played_seconds') is not None and event['played_seconds']/runtime>=.5:
+                        watched=True;break
+                if watched:continue
+                row=feature_row(g,media,watches,events,owner,key,as_of,posters=posters,context=context)
+                if row is None:skipped+=1;continue
+                rows.append(row)
+            predictions=[]
+            for start in range(0,len(rows),batch_size):
+                part=rows[start:start+batch_size];probability=bundle['model'].predict_proba(vocab.transform(part))[:,1]
+                predictions.extend(zip(part,map(float,probability)))
+                progress(dict(stage='shadow-scoring',expected=len(owners),completed=owner_index,failed=0,
+                    phase=f'candidate batch {start+len(part)}/{len(rows)}'))
+            predictions.sort(key=lambda pair:(-pair[1],int(pair[0]['media_key'])))
+        with monitor.span('shap') if monitor else nullcontext():
+            for index,(row,probability) in enumerate(predictions):
+                shap=[]
+                if index<shap_items_per_user:
+                    values=bundle['model'].get_booster().predict(xgb.DMatrix(vocab.transform([row]),feature_names=vocab.names,nthread=2),pred_contribs=True)[0][:-1]
+                    shap=[[i,float(values[i])] for i in sorted(range(sum(bundle['dimensions'])),key=lambda i:abs(values[i]),reverse=True)[:40]]
+                    contexts+=1;contributions+=len(shap)
+                    if index%32==0:progress(dict(stage='shap',completed=contexts,contexts=contexts,contributions=contributions))
+                store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s)').format(store.table('predictions')),
+                    (gid,owner,row['media_key'],probability,cosine(row['embedding'][:768],row['embedding'][-768:]),index+1,Json(shap)))
         total+=len(predictions)
     summary=dict(predictions=total,users=len(owners),limited_history_skips=skipped,generation_id=gid,
         contract_hash=g['contract_hash'],model_sha256=store.artifact(gid,'model.pkl')['sha256'],
         total_scoring_seconds=time.perf_counter()-started,
+        shap_contexts=contexts,shap_contributions=contributions,
         shap_dimensions=('text 0:768, semantic user 768:1536; raw margin' if text_only(g['contract']) else 'text 0:768, poster 768:1536, semantic user 1536:2304; raw margin; no legacy labels reused'))
     store.artifact(gid,'scoring.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
+    if monitor:
+        monitor.done('score_model',users=len(owners),predictions=total,limited_history_skips=skipped)
+        monitor.done('shap',contexts=contexts,contributions=contributions)
     progress(dict(stage='shadow-scoring',expected=len(owners),completed=len(owners),failed=0));return summary

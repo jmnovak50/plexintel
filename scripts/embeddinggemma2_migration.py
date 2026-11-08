@@ -520,7 +520,9 @@ def daily(store,config,*,pipeline_lock_held=False):
     print(canonical(dict(run_id=result['run_id'],generation_id=result['generation_id'],promotion_id=result['promotion_id'],
         counts=summary['counts'],inference=summary['inference'],poster_inference_requests=0,
         scoring=summary['scoring'],stages=summary['stages'],model_before=summary['model_before'],model_after=summary['model_after'],
-        no_new_shadow_generation=True,elapsed_seconds=summary['elapsed_seconds'])))
+        no_new_shadow_generation=True,elapsed_seconds=summary['elapsed_seconds'],
+        total_elapsed_seconds=summary.get('elapsed_seconds_total',summary['elapsed_seconds']),
+        semantic_labeling='disabled; incompatible legacy dimension labeler')))
 
 
 def yield_to_existing_pipeline():

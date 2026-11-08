@@ -27,6 +27,9 @@ def _serialize_run(row: dict[str, Any]) -> dict[str, Any]:
     stages = out.get("stages")
     if isinstance(stages, list):
         out["stages"] = [_serialize_stage(s) for s in stages]
+    details = out.get("stage_details")
+    if isinstance(details, list):
+        out["stage_details"] = [_serialize_stage(s) for s in details]
     return out
 
 

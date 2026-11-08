@@ -3,6 +3,7 @@ import { CircleStop, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import AppShell from "../components/AppShell";
 import { ErrorBanner, SuccessBanner } from "../components/StatusBanner";
+import { stageLabels, stageMetrics, stageDuration } from "../utils/pipelineStages";
 
 interface AdminMe {
   username: string;
@@ -12,7 +13,7 @@ interface AdminMe {
 }
 
 interface PipelineStage {
-  stage_id: number;
+  stage_id: number | string;
   run_id: number;
   stage_key: string;
   status: string;
@@ -21,6 +22,13 @@ interface PipelineStage {
   stderr_tail: string | null;
   started_at: string | null;
   completed_at: string | null;
+  label?: string;
+  duration_seconds?: number | null;
+  metrics?: Record<string, number | boolean>;
+  message?: string | null;
+  detail_source?: string;
+  observed_at?: string;
+  timing_active?: boolean;
 }
 
 interface PipelineRun {
@@ -38,6 +46,11 @@ interface PipelineRun {
   started_at: string | null;
   completed_at: string | null;
   stages: PipelineStage[];
+  stage_details?: PipelineStage[];
+  stage_detail_note?: string;
+  production_run_id?: string;
+  publication_id?: string;
+  semantic_labeling?: { status: string; reason: string };
 }
 
 function formatDate(value: string | null) {
@@ -64,6 +77,7 @@ function statusChip(status: string) {
     case "failed":
       return "recs-status-red";
     case "cancelled":
+    case "skipped":
       return "recs-status-slate-muted";
     case "cancel_requested":
       return "recs-status-orange";
@@ -383,7 +397,7 @@ export default function AdminPipeline() {
                             </span>
                             {isActiveRun(run.status) && run.current_stage_key && (
                               <div className="mt-1 max-w-[180px] truncate text-xs text-slate-500" title={run.current_stage_key}>
-                                {run.current_stage_key}
+                                {stageLabels[run.current_stage_key] || run.current_stage_key}
                               </div>
                             )}
                           </td>
@@ -432,11 +446,18 @@ export default function AdminPipeline() {
                                   {run.notes}
                                 </p>
                               )}
+                              {run.semantic_labeling && (
+                                <p className="mb-3 text-sm text-slate-600">
+                                  Semantic dimension labeling: {run.semantic_labeling.status}. {run.semantic_labeling.reason}
+                                </p>
+                              )}
+                              {run.publication_id && <p className="mb-3 break-all text-xs text-slate-600">Publication: {run.publication_id}</p>}
+                              {run.stage_detail_note && <p className="mb-3 text-sm text-slate-600">{run.stage_detail_note}</p>}
                               <div className="space-y-3">
-                                {(run.stages || []).map((st) => (
+                                {(run.stage_details || run.stages || []).map((st) => (
                                   <div key={st.stage_id} className="recs-surface-muted p-3">
                                     <div className="flex flex-wrap items-center gap-2 text-sm">
-                                      <span className="font-mono font-medium text-slate-900">{st.stage_key}</span>
+                                      <span className="font-medium text-slate-900">{st.label || stageLabels[st.stage_key] || st.stage_key}</span>
                                       <span
                                         className={`inline-flex rounded-full border px-2 py-0.5 text-xs ${statusChip(st.status)}`}
                                       >
@@ -446,18 +467,33 @@ export default function AdminPipeline() {
                                         <span className="text-xs text-slate-500">exit {st.exit_code}</span>
                                       )}
                                       <span className="text-xs text-slate-500">
-                                        {durationMs(st.started_at, st.completed_at)}
+                                        {stageDuration(st.duration_seconds, st.status, st.started_at, st.completed_at, st.observed_at, st.timing_active)}
                                       </span>
                                     </div>
+                                    {st.message && <p className="mt-2 text-sm text-slate-600">{st.message}</p>}
+                                    {st.metrics && (
+                                      <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-xs">
+                                        {stageMetrics(st.metrics).map(metric => (
+                                          <div key={metric.key}><dt className="text-slate-500">{metric.label}</dt><dd className="font-medium text-slate-800">{metric.value}</dd></div>
+                                        ))}
+                                      </dl>
+                                    )}
                                     {(st.stderr_tail || st.stdout_tail) && (
-                                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-900/90 p-3 text-xs text-slate-100">
+                                      <details className="mt-2"><summary className="cursor-pointer text-xs text-slate-600">Stage log</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-900/90 p-3 text-xs text-slate-100">
                                         {st.stderr_tail ? `stderr:\n${st.stderr_tail}\n\n` : ""}
                                         {st.stdout_tail ? `stdout:\n${st.stdout_tail}` : ""}
-                                      </pre>
+                                      </pre></details>
                                     )}
                                   </div>
                                 ))}
                               </div>
+                              {run.stage_details && (
+                                <details className="mt-4"><summary className="cursor-pointer text-sm text-slate-600">Worker logs and original execution records</summary>
+                                  {run.stages.filter(st => st.stage_key === "embeddinggemma2_generation").map(st => (
+                                    <pre key={st.stage_id} className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900 p-3 text-xs text-slate-100">{st.stderr_tail || ""}{"\n"}{st.stdout_tail || ""}</pre>
+                                  ))}
+                                </details>
+                              )}
                             </td>
                           </tr>
                         )}

@@ -67,6 +67,16 @@ def test_full_b_adoption_physical_publication_failure_rollback_and_incremental_r
     approve_review(store,gid,'profiles','Compatible watch/user coverage')
     approve_review(store,gid,'quality','Selected B with independent quality review',quality_go=True)
     scoring=score(store,gid);assert scoring['predictions']>0
+    from psycopg2 import sql
+    from api.embedding_generation.progress import Reporter
+    prediction_query=sql.SQL('SELECT owner,media_key,probability,rank,shap FROM {} WHERE generation_id=%s ORDER BY owner,media_key').format(store.table('predictions'))
+    unobserved=store.query(prediction_query,(gid,),many=True)
+    monitor=Reporter(lambda event:None)
+    observed=score(store,gid,monitor=monitor)
+    assert store.query(prediction_query,(gid,),many=True)==unobserved
+    assert monitor.details['score_model']['status']=='success'
+    assert monitor.details['shap']['status']=='success'
+    assert observed['shap_contexts']>0 and observed['shap_contributions']>0
     store.validate(gid,quality_go=True)
     assert {t:digest_rows(store,t,'pg_temp') for t in TABLES}==before
     def failure(point):
@@ -267,9 +277,9 @@ def test_canonical_run_orchestration_resumes_without_new_shadow_or_duplicate_syn
     contract=text_contract(__import__('api.embedding_generation.contracts',fromlist=['contract']).contract(encoder))
     state=dict(generation_id='existing',model_sha256='before',contract=contract,evaluation=dict(chronological=dict(average_precision=.9)))
     monkeypatch.setattr(text_production,'load_production',lambda store:(state,{},None))
-    monkeypatch.setattr(text_production,'verify_current_production',lambda store:{'verified':True})
+    monkeypatch.setattr(text_production,'verify_current_production',lambda store:{'verified':True,'counts':{'media_text':{'succeeded':1}},'generation_id':'existing','publication_id':'published','model_sha256':'after'})
     base=dict(library_counts={'movie':1},media_keys=['1'],watch_ids=['1'],media_embedding_keys=['1'],watch_embedding_keys=['1'])
-    snapshot=dict(_db_hash='source',events=[],watch_coverage={})
+    snapshot=dict(_db_hash='source',media=[{'rating_key':1}],events=[],watch_coverage={})
     completed={k:1 for k in ('source_sync','metadata','media_text','watch','users','training','scoring')} if resumed else {}
     run=dict(run_id='resume',base_model_sha256='before',stages=completed,summary={'before':base},snapshot=snapshot)
     def query(statement,*args,**kwargs):

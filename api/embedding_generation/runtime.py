@@ -58,7 +58,7 @@ def publication_barrier():
 
 def code_hash():
     paths=sorted((ROOT/'api/embedding_generation').glob('*.py'))
-    paths+=[ROOT/'scripts/embeddinggemma2_migration.py',ROOT/'scripts/register_dimension_config.py',ROOT/'api/services/pipeline_service.py',ROOT/'api/routes/admin_routes.py',ROOT/'run_daily_pipeline.sh',
+    paths+=[ROOT/'scripts/embeddinggemma2_migration.py',ROOT/'scripts/register_dimension_config.py',ROOT/'api/services/pipeline_service.py',ROOT/'api/services/pipeline_visibility.py',ROOT/'api/routes/pipeline_admin_routes.py',ROOT/'api/routes/admin_routes.py',ROOT/'run_daily_pipeline.sh',
             *sorted((ROOT/'api/db/migrations/optional/embedding_generation').glob('*.sql')),
             *[ROOT/path for path in ('api/services/dimension_config.py','api/services/dimension_explorer.py',
                 'api/services/recommendation_query_service.py','api/routes/dimension_admin_routes.py',

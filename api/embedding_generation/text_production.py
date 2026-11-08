@@ -116,42 +116,46 @@ def physical_verification(store,gid,live_schema='public'):
     return result
 
 
-def train_text(store,gid,*,progress=lambda value:None):
+def train_text(store,gid,*,progress=lambda value:None,monitor=None):
     """Future text-only refits; no posterior/artwork dependencies or legacy controls."""
     from .model import populations,fit,fit_compare
     from .features import Vocabulary,chronological_split,feature_row
     from .contracts import utc
-    g,media,watches,_=populations(store,gid)
-    rows,summary=dataset(store,gid,progress=progress)
-    train,test,boundary=chronological_split(rows)
-    chronological=fit_compare(train,test,include_poster=False,progress=progress)
-    groups=sorted({r['show_key'] for r in rows},key=lambda k:hashlib.sha256(k.encode()).hexdigest())
-    heldout=set(groups[:max(1,len(groups)//5)])
-    excluded={k for k,m in media.items() if str(m['source'].get('show_rating_key') or k) in heldout}
-    a=[];b=[]
-    for row in rows:
-        is_test=row['show_key'] in heldout and utc(row['prediction_at'])>=boundary
-        is_train=row['show_key'] not in heldout and utc(row['prediction_at'])<boundary and utc(row['label_available_at'])<boundary
-        if not(is_test or is_train):continue
-        value=feature_row(g,media,watches,g['snapshot']['events'],row['owner'],row['media_key'],row['prediction_at'],excluded_keys=excluded)
-        if value is None:continue
-        value.update({k:row[k] for k in ('label','sample_weight','prediction_at','label_available_at')})
-        (b if is_test else a).append(value)
-    grouped=fit_compare(a,b,include_poster=False,progress=progress)
-    vocab=Vocabulary.fit(rows,include_poster=False);model=fit(rows,vocab,progress=progress)
-    bundle=dict(generation_id=gid,contract_hash=g['contract_hash'],encoder=g['contract']['encoder'],variant='text_only',
-        feature_version=g['contract']['features'],label_version=LABEL_VERSION,dimensions=[768,768],ordering='media_text,user',
-        vocabulary=vocab.specification(),feature_names=vocab.names,model=model,dataset_hash=summary['dataset_hash'],
-        media_serializer=g['contract']['media_serializer'])
-    out=io.BytesIO();joblib.dump(bundle,out)
-    sha=store.artifact(gid,'model.pkl',out.getvalue(),{k:v for k,v in bundle.items() if k!='model'})
-    evaluation=dict(chronological=chronological,show_grouped=dict(metrics=grouped),
-        ablations=dict(B_text_only=dict(chronological=chronological,show_grouped=grouped)),
-        feature_policy=g['contract']['features'],label_policy=LABEL_VERSION,model_sha256=sha,
-        comparison='Text-only prospective chronological and show-heldout validation. No new image ablation.')
-    store.artifact(gid,'evaluation.json',canonical(evaluation).encode(),dict(contract_hash=g['contract_hash']))
-    store.artifact(gid,'dimensions.json',canonical(dimensions(bundle,sha)).encode(),dict(contract_hash=g['contract_hash']))
-    store.conn.commit();return evaluation
+    from contextlib import nullcontext
+    with monitor.span('training_data') if monitor else nullcontext():
+        g,media,watches,_=populations(store,gid)
+        rows,summary=dataset(store,gid,progress=progress)
+    if monitor:monitor.done('training_data',rows=summary['rows'],label_policy_skips=summary['skips'].get('label_policy',0),limited_history_skips=summary['skips'].get('limited_history',0))
+    with monitor.span('train_model') if monitor else nullcontext():
+        train,test,boundary=chronological_split(rows)
+        chronological=fit_compare(train,test,include_poster=False,progress=progress)
+        groups=sorted({r['show_key'] for r in rows},key=lambda k:hashlib.sha256(k.encode()).hexdigest())
+        heldout=set(groups[:max(1,len(groups)//5)])
+        excluded={k for k,m in media.items() if str(m['source'].get('show_rating_key') or k) in heldout}
+        a=[];b=[]
+        for row in rows:
+            is_test=row['show_key'] in heldout and utc(row['prediction_at'])>=boundary
+            is_train=row['show_key'] not in heldout and utc(row['prediction_at'])<boundary and utc(row['label_available_at'])<boundary
+            if not(is_test or is_train):continue
+            value=feature_row(g,media,watches,g['snapshot']['events'],row['owner'],row['media_key'],row['prediction_at'],excluded_keys=excluded)
+            if value is None:continue
+            value.update({k:row[k] for k in ('label','sample_weight','prediction_at','label_available_at')})
+            (b if is_test else a).append(value)
+        grouped=fit_compare(a,b,include_poster=False,progress=progress)
+        vocab=Vocabulary.fit(rows,include_poster=False);model=fit(rows,vocab,progress=progress)
+        bundle=dict(generation_id=gid,contract_hash=g['contract_hash'],encoder=g['contract']['encoder'],variant='text_only',
+            feature_version=g['contract']['features'],label_version=LABEL_VERSION,dimensions=[768,768],ordering='media_text,user',
+            vocabulary=vocab.specification(),feature_names=vocab.names,model=model,dataset_hash=summary['dataset_hash'],
+            media_serializer=g['contract']['media_serializer'])
+        out=io.BytesIO();joblib.dump(bundle,out)
+        sha=store.artifact(gid,'model.pkl',out.getvalue(),{k:v for k,v in bundle.items() if k!='model'})
+        evaluation=dict(chronological=chronological,show_grouped=dict(metrics=grouped),
+            ablations=dict(B_text_only=dict(chronological=chronological,show_grouped=grouped)),
+            feature_policy=g['contract']['features'],label_policy=LABEL_VERSION,model_sha256=sha,
+            comparison='Text-only prospective chronological and show-heldout validation. No new image ablation.')
+        store.artifact(gid,'evaluation.json',canonical(evaluation).encode(),dict(contract_hash=g['contract_hash']))
+        store.artifact(gid,'dimensions.json',canonical(dimensions(bundle,sha)).encode(),dict(contract_hash=g['contract_hash']))
+        store.conn.commit();return evaluation
 
 
 def archive_runtime(store,publication,control):
