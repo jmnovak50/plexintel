@@ -10,7 +10,7 @@ import numpy as np
 from pgvector import Vector
 from psycopg2 import sql
 from psycopg2.extras import Json
-from .contracts import ContractError,FEATURE_VERSION,LABEL_VERSION,canonical,cosine,fingerprint,utc
+from .contracts import ContractError,FEATURE_VERSION,LABEL_VERSION,canonical,cosine,fingerprint,utc,text_only,TEXT_FEATURE_VERSION
 from .features import Vocabulary,ProfileContext,chronological_split,feature_row,training_rows
 from .backfill import runtime_seconds,generation_writer
 from .evaluation import evaluate
@@ -18,7 +18,7 @@ from .evaluation import evaluate
 
 def populations(store,gid):
     g=store.mutable(gid);counts=store.counts(gid)
-    if g['contract']['features']!=FEATURE_VERSION or g['contract']['labels']!=LABEL_VERSION:
+    if g['contract']['features']!=(TEXT_FEATURE_VERSION if text_only(g['contract']) else FEATURE_VERSION) or g['contract']['labels']!=LABEL_VERSION:
         raise ContractError('Feature/label contract differs from this implementation')
     for kind,r in counts.items():
         if r['expected']!=r['succeeded']+(r['missing'] if kind=='media_poster' else 0) or r['failed'] or r['pending']:
@@ -31,22 +31,29 @@ def dataset(store,gid,*,progress=lambda value:None):
     g,media,watches,posters=populations(store,gid)
     rows,skips=training_rows(g,media,watches,posters,progress=progress)
     if not rows:raise ContractError('No leakage-safe examples; no fallback to legacy training rows')
-    store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table('modality_training_rows')),(gid,))
+    text_mode=text_only(g['contract'])
+    table='text_training_rows' if text_mode else 'modality_training_rows'
+    store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table(table)),(gid,))
     for i,row in enumerate(rows,1):
         if row['dependencies']['generation_id']!=gid or row['dependencies']['contract_hash']!=g['contract_hash']:
             raise ContractError('Training dependency provenance mismatch')
         fields={k:v for k,v in row.items() if k not in ('embedding','dependencies')}
         values=row['embedding']
-        store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(store.table('modality_training_rows')),
-            (gid,row['owner'],row['media_key'],row['prediction_at'],row['label_available_at'],row['label'],
-             Vector(values[:768]),None if row['poster_missing'] else Vector(values[768:1536]),Vector(values[1536:]),Json(fields),Json(row['dependencies'])))
+        if text_mode:
+            store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(store.table(table)),
+                (gid,row['owner'],row['media_key'],row['prediction_at'],row['label_available_at'],row['label'],
+                 Vector(values),Json({k:v for k,v in fields.items() if k!='poster_missing'}),Json(row['dependencies'])))
+        else:
+            store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(store.table('modality_training_rows')),
+                (gid,row['owner'],row['media_key'],row['prediction_at'],row['label_available_at'],row['label'],
+                 Vector(values[:768]),None if row['poster_missing'] else Vector(values[768:1536]),Vector(values[1536:]),Json(fields),Json(row['dependencies'])))
         if i%32==0 or i==len(rows):progress(dict(stage='training-dataset',expected=len(rows),completed=i,failed=0))
     hasher=hashlib.sha256()
     for row in rows:
         serialized={**{k:v for k,v in row.items() if k!='embedding'},
             'embedding':[float(v) if np.isfinite(v) else None for v in row['embedding']]}
         hasher.update(canonical(serialized).encode());hasher.update(b'\n')
-    summary=dict(rows=len(rows),skips=skips,feature_version=FEATURE_VERSION,label_version=LABEL_VERSION,
+    summary=dict(rows=len(rows),skips=skips,feature_version=g['contract']['features'],label_version=LABEL_VERSION,
         dataset_hash=hasher.hexdigest(),hash_format='canonical-rows-jsonl/1.0',watch_coverage=g['snapshot']['watch_coverage'],
         retrospective_metadata_assumption='Captured descriptive metadata (current Plex or explicitly approved stored history); point-in-time metadata snapshots do not exist. Mutable ratings/popularity/outcomes are excluded.')
     store.artifact(gid,'dataset.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
@@ -88,6 +95,9 @@ def fit_compare(train_rows,test_rows,*,include_poster,progress=lambda value:None
 
 @generation_writer
 def train(store,gid,*,legacy_populations=None,progress=lambda value:None):
+    if text_only(store.generation(gid,include_snapshot=False)['contract']):
+        from .text_production import train_text
+        return train_text(store,gid,progress=progress)
     started=time.perf_counter();g,media,watches,posters=populations(store,gid)
     store.query(sql.SQL("DELETE FROM {} WHERE generation_id=%s AND name IN ('model.pkl','text_model.pkl','evaluation.json','scoring.json','dimensions.json')").format(store.table('artifacts')),(gid,))
     store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table('predictions')),(gid,));store.conn.commit()
@@ -244,21 +254,32 @@ def paired_controls(g,media,watches,posters,legacy,boundary,*,progress=lambda va
 
 
 
+def verify_bundle(bundle, specification, contract_hash, *, gid=None):
+    text_mode=text_only(specification)
+    expected_dimensions=[768,768] if text_mode else [768,768,768]
+    ordering='media_text,user' if text_mode else 'media_text,media_poster,user'
+    if (gid is not None and bundle['generation_id']!=gid or bundle['contract_hash']!=contract_hash
+        or bundle['encoder']!=specification['encoder'] or bundle['feature_version']!=specification['features']
+        or bundle['label_version']!=LABEL_VERSION or bundle['variant']!=('text_only' if text_mode else 'text_poster')
+        or bundle['ordering']!=ordering or bundle['dimensions']!=expected_dimensions):
+        raise ContractError('Model generation/feature/encoder/modality contract mismatch')
+    vocabulary=Vocabulary(**bundle['vocabulary'])
+    if vocabulary.include_poster==text_mode or bundle['feature_names']!=vocabulary.names or bundle['model'].get_booster().feature_names!=vocabulary.names:
+        raise ContractError('Model feature names/order differ from serving preprocessing')
+    if bundle['model'].get_booster().num_features()!=len(vocabulary.names):raise ContractError('Model feature width mismatch')
+    expected=[f'{group}_{i}' for group in ordering.split(',') for i in range(768)]
+    if vocabulary.names[:sum(expected_dimensions)]!=expected or text_mode and any(n.startswith('media_poster_') or n=='poster_missing' for n in vocabulary.names):
+        raise ContractError('Invalid production embedding feature ordering')
+    return bundle,vocabulary
+
+
 def load_bundle(store,gid):
     g=store.generation(gid);artifact=store.artifact(gid,'model.pkl')
     bundle=joblib.load(io.BytesIO(bytes(artifact['data'])))
-    if (bundle['generation_id']!=gid or bundle['contract_hash']!=g['contract_hash']
-        or bundle['encoder']!=g['contract']['encoder'] or bundle['feature_version']!=FEATURE_VERSION
-        or bundle['label_version']!=LABEL_VERSION or bundle['variant']!='text_poster'
-        or bundle['ordering']!='media_text,media_poster,user' or bundle['dimensions']!=[768,768,768]):
-        raise ContractError('Model generation/feature/encoder/modality contract mismatch')
-    vocabulary=Vocabulary(**bundle['vocabulary'])
-    if not vocabulary.include_poster or bundle['feature_names']!=vocabulary.names or bundle['model'].get_booster().feature_names!=vocabulary.names:
-        raise ContractError('Model feature names/order differ from serving preprocessing')
-    if bundle['model'].get_booster().num_features()!=len(vocabulary.names):raise ContractError('Model feature width mismatch')
+    result=verify_bundle(bundle,g['contract'],g['contract_hash'],gid=gid)
     data=json.loads(bytes(store.artifact(gid,'dataset.json')['data']))
     if data['dataset_hash']!=bundle['dataset_hash']:raise ContractError('Model dataset provenance mismatch')
-    return bundle,vocabulary
+    return result
 
 
 @generation_writer
@@ -299,14 +320,14 @@ def score(store,gid,*,batch_size=128,shap_items_per_user=750,progress=lambda val
         for index,(row,probability) in enumerate(predictions):
             shap=[]
             if index<shap_items_per_user:
-                values=bundle['model'].get_booster().predict(xgb.DMatrix(vocab.transform([row]),feature_names=vocab.names),pred_contribs=True)[0][:-1]
-                shap=[[i,float(values[i])] for i in sorted(range(2304),key=lambda i:abs(values[i]),reverse=True)[:40]]
+                values=bundle['model'].get_booster().predict(xgb.DMatrix(vocab.transform([row]),feature_names=vocab.names,nthread=2),pred_contribs=True)[0][:-1]
+                shap=[[i,float(values[i])] for i in sorted(range(sum(bundle['dimensions'])),key=lambda i:abs(values[i]),reverse=True)[:40]]
             store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s)').format(store.table('predictions')),
-                (gid,owner,row['media_key'],probability,cosine(row['embedding'][:768],row['embedding'][1536:]),index+1,Json(shap)))
+                (gid,owner,row['media_key'],probability,cosine(row['embedding'][:768],row['embedding'][-768:]),index+1,Json(shap)))
         total+=len(predictions)
     summary=dict(predictions=total,users=len(owners),limited_history_skips=skipped,generation_id=gid,
         contract_hash=g['contract_hash'],model_sha256=store.artifact(gid,'model.pkl')['sha256'],
         total_scoring_seconds=time.perf_counter()-started,
-        shap_dimensions='text 0:768, poster 768:1536, semantic user 1536:2304; raw margin; no legacy labels reused')
+        shap_dimensions=('text 0:768, semantic user 768:1536; raw margin' if text_only(g['contract']) else 'text 0:768, poster 768:1536, semantic user 1536:2304; raw margin; no legacy labels reused'))
     store.artifact(gid,'scoring.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
     progress(dict(stage='shadow-scoring',expected=len(owners),completed=len(owners),failed=0));return summary

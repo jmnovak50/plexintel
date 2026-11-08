@@ -146,7 +146,7 @@ export default function AdminDimensions() {
       .catch(err => { if (!controller.signal.aborted) { setError(String(err.message)); setLoading(false); } }), 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [query, dimension, prediction, refresh]);
-  useEffect(() => { setReason(''); setAction(data?.config.ordering === 'media_text,media_poster,user' ? 'investigate' : 'review'); setMessage(''); }, [dimension, data?.config.ordering]);
+  useEffect(() => { setReason(''); setAction(data?.config.feature_groups ? 'investigate' : 'review'); setMessage(''); }, [dimension, data?.config.feature_groups]);
   const pending = data?.rows?.some(row => row.in_flight || ['queued', 'running'].includes(row.job_status || ''));
   useEffect(() => {
     if (!pending) return;

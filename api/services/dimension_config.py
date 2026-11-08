@@ -46,7 +46,9 @@ def feature_groups(config):
         return [dict(name='media',start=0,width=config['media_dimensions']),
                 dict(name='user',start=config['media_dimensions'],width=config['user_dimensions'])]
     expected=[dict(name='media_text',start=0,width=768),dict(name='media_poster',start=768,width=768),dict(name='user',start=1536,width=768)]
-    if groups!=expected or config.get('ordering')!='media_text,media_poster,user':
+    if config.get('ordering')=='media_text,user':
+        expected=[dict(name='media_text',start=0,width=768),dict(name='user',start=768,width=768)]
+    if groups!=expected or config.get('ordering') not in ('media_text,media_poster,user','media_text,user'):
         raise ValueError('Unsupported modality feature inventory')
     return groups
 
@@ -62,3 +64,17 @@ def build_independent_metadata(feature_names,model_sha256,*,generation_id,contra
         model_sha256=model_sha256,feature_names=list(feature_names),embedding_features=expected,feature_groups=groups,
         user_profile='semantic-text-mean; no independently learned visual preference',visual_user_profile=None,
         missing_poster='null vector; NaN XGBoost slots and poster_missing=1',shap_output='raw margin (log-odds)')
+
+
+def build_text_metadata(feature_names,model_sha256,*,generation_id,contract_hash,encoder_digest,serializer):
+    groups=[dict(name='media_text',start=0,width=768),dict(name='user',start=768,width=768)]
+    expected=[f"{g['name']}_{i}" for g in groups for i in range(g['width'])]
+    if list(feature_names[:1536])!=expected or any(n.startswith('media_poster_') or n=='poster_missing' for n in feature_names):
+        raise ValueError('Text production must retain all native text/user dimensions and no poster features')
+    config_id=hashlib.sha256(json.dumps(dict(contract_hash=contract_hash,ordering='media_text,user'),sort_keys=True).encode()).hexdigest()[:24]
+    return dict(config_id=config_id,generation_id=generation_id,contract_hash=contract_hash,
+        media_dimensions=768,user_dimensions=768,embedding_dimensions=1536,ordering='media_text,user',
+        embedding_model='embeddinggemma-2',encoder_digest=encoder_digest,serializer=serializer,
+        model_sha256=model_sha256,feature_names=list(feature_names),embedding_features=expected,feature_groups=groups,
+        user_profile='semantic-text-mean; no independently learned visual preference',visual_user_profile=None,
+        poster_inference='disabled/1.0',shap_output='raw margin (log-odds)')

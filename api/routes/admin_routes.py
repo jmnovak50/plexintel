@@ -139,9 +139,36 @@ def require_admin(user=Depends(get_current_user)):
 
 @router.get("/admin/embedding-generation/status")
 def embedding_generation_deployment_status(admin_user=Depends(require_admin)):
-    from api.embedding_generation.runtime import active_generation
-    return {"generation_api": 1, "deployed_code_sha256": _EMBEDDING_GENERATION_DEPLOYED_HASH,
+    from api.embedding_generation.runtime import active_generation,MARKER
+    result={"generation_api": 1, "text_production_api": 1, "deployed_code_sha256": _EMBEDDING_GENERATION_DEPLOYED_HASH,
             "active_generation": active_generation()}
+    if not MARKER.is_file():return result
+    conn=connect_db()
+    conn.set_session(readonly=True,isolation_level="REPEATABLE READ")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('embedding_v2.control')")
+            if cur.fetchone()[0] is not None:
+                cur.execute("SELECT active_generation FROM embedding_v2.control WHERE singleton")
+                control=cur.fetchone()
+                result["active_generation"]=control[0] if control else None
+            cur.execute("SELECT to_regclass('embedding_v2.production_state')")
+            installed=cur.fetchone()[0] is not None
+        if installed:
+            from api.embedding_generation.store import Store
+            from api.embedding_generation.text_production import load_production
+            production=load_production(Store(conn))
+            if production:
+                state,bundle,_=production
+                if state['generation_id']!=result['active_generation']:
+                    raise HTTPException(status_code=503,detail='Production model/control mismatch')
+                result.update(model_variant=bundle['variant'],model_sha256=state['model_sha256'],publication_id=state.get('publication_id'),
+                    encoder_digest=bundle['encoder']['digest'],feature_version=bundle['feature_version'],
+                    ordering=bundle['ordering'],embedding_dimensions=sum(bundle['dimensions']),
+                    classifier_feature_count=len(bundle['feature_names']),poster_inference='disabled/1.0',
+                    vector_storage='physical production tables',model_storage='canonical production state')
+    finally:conn.rollback();conn.close()
+    return result
 
 
 @router.get("/admin/me")

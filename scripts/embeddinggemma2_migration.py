@@ -18,7 +18,7 @@ sys.dont_write_bytecode=True
 from dotenv import load_dotenv
 load_dotenv(ROOT/'.env',override=False)
 
-from api.embedding_generation.contracts import ContractError, Encoder, canonical, contract, fingerprint,media_text,vector
+from api.embedding_generation.contracts import ContractError, Encoder, canonical, contract, fingerprint,media_text,vector,text_only
 from api.embedding_generation.io import Ollama
 from api.embedding_generation.store import Store
 from api.embedding_generation import backfill, source
@@ -110,7 +110,10 @@ def report(store,gid):
     stages=store.query(sql.SQL('SELECT stage,status,count(*) AS n,sum((timing->>\'metadata_seconds\')::numeric) AS metadata_seconds,sum((timing->>\'retrieval_seconds\')::numeric) AS retrieval_seconds,sum((timing->>\'preprocessing_seconds\')::numeric) AS preprocessing_seconds FROM {} WHERE generation_id=%s GROUP BY stage,status')
         .format(store.table('preparations')),(gid,),many=True)
     stages=[{k:float(v) if k.endswith('_seconds') and v is not None else v for k,v in dict(r).items()} for r in stages]
-    stage_counts={s:dict(expected=generation['expected']['media_text'],succeeded=0,failed=0,pending=generation['expected']['media_text']) for s in ('metadata','poster')}
+    stage_counts={}
+    for stage in ('metadata','poster'):
+        expected=0 if stage=='poster' and text_only(generation['contract']) else generation['expected']['media_text']
+        stage_counts[stage]=dict(expected=expected,succeeded=0,failed=0,pending=expected)
     for row in stages:
         stage_counts[row['stage']][row['status']]=row['n'];stage_counts[row['stage']]['pending']-=row['n']
     history=store.query(sql.SQL("""SELECT stage,status,count(*) AS attempts,
@@ -176,7 +179,7 @@ def refresh_source(store,gid,config,*,progress=lambda value:None):
             key=str(row['rating_key']);old=old_media.get(key)
             merged={**(old['source'] if old else {}),**row}
             store.upsert_source(gid,'media_text',key,merged,semantic_hash=old['semantic_hash'] if old else None)
-            if old is None:store.upsert_source(gid,'media_poster',key,dict(rating_key=row['rating_key']))
+            if old is None and not text_only(generation['contract']):store.upsert_source(gid,'media_poster',key,dict(rating_key=row['rating_key']))
             completed+=1
             if completed%32==0:progress(dict(expected=total,completed=completed,failed=0,phase='atomic source reconciliation',persist=False))
         old_watches={r['item_key']:r for r in store.items(gid,'watch')}
@@ -191,11 +194,11 @@ def refresh_source(store,gid,config,*,progress=lambda value:None):
         # not. Profiles are cheap and explicitly rebuilt after a source refresh.
         store.query(sql.SQL("DELETE FROM {} WHERE generation_id=%s AND child_kind='user'").format(store.table('dependencies')),(gid,))
         store.query(sql.SQL("DELETE FROM {} WHERE generation_id=%s AND kind='user'").format(store.table('items')),(gid,))
-        for table in ('artifacts','modality_training_rows','predictions'):
+        for table in ('artifacts','modality_training_rows','text_training_rows','predictions'):
             store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table(table)),(gid,))
         profiles=store.profile_sources(snapshot,generation['contract']['profile_threshold'])
         for owner,profile in profiles.items():store.upsert_source(gid,'user',owner,profile,owner=owner)
-        expected=dict(media_text=len(snapshot['media']),media_poster=len(snapshot['media']),watch=len(snapshot['events']),user=len(profiles))
+        expected=dict(media_text=len(snapshot['media']),media_poster=0 if text_only(generation['contract']) else len(snapshot['media']),watch=len(snapshot['events']),user=len(profiles))
         store.query(sql.SQL('UPDATE {} SET snapshot=%s,source_hash=%s,expected=%s WHERE generation_id=%s')
             .format(store.table('generations')),(Json(snapshot),snapshot['_db_hash'],Json(expected),gid))
         store.conn.commit()
@@ -220,7 +223,7 @@ def execute_stages(store,gid,ollama,plex,cache,progress=print):
 def argument_parser():
     parser=argparse.ArgumentParser(description='Manual staged migration: no stage automatically starts the next. Inference, promotion and rollback are separate commands.')
     parser.add_argument('operation',choices=['preflight','coverage','inspect','export','install','create','metadata','recover-metadata','posters','media-text','media-poster',
-        'watch','users','refresh-source','review','train','score','validate','status','verify','promote','rollback','recover-transition','benchmark-threads','smoke','daily','active'])
+        'watch','users','refresh-source','adopt-text','review','train','score','validate','status','verify','promote','rollback','recover-transition','benchmark-threads','smoke','daily','active'])
     parser.add_argument('--generation')
     parser.add_argument('--reuse-generation',help='Reuse only matching per-modality contracts from a validated independent generation')
     parser.add_argument('--approved-production-change',action='store_true',help='Explicit operator authorization for THIS stage only')
@@ -269,10 +272,15 @@ def verify(store,gid=None,*,live_schema='public'):
     control=store.query(sql.SQL('SELECT active_generation FROM {} WHERE singleton').format(store.table('control')))
     active=control['active_generation']
     if not active or gid and active!=gid:raise ContractError('Requested independent generation is not active')
+    from api.embedding_generation.text_production import load_production,verify_current_production
+    current=load_production(store)
+    if current and current[0]['generation_id']==active:return verify_current_production(store,live_schema=live_schema)
     generation=store.generation(active)
     if generation['status']!='active':raise ContractError('Active generation status mismatch')
     from api.embedding_generation.model import load_bundle
     bundle,_=load_bundle(store,active)
+    from api.embedding_generation.text_production import physical_verification
+    physical=physical_verification(store,active,live_schema)
     for kind,table in [('media_text','media_embeddings'),('watch','watch_embeddings'),('user','user_embeddings')]:
         actual=store.query(sql.SQL('SELECT count(*) AS n FROM {}').format(sql.Identifier(live_schema,table)))['n']
         if actual!=generation['expected'][kind]:raise ContractError('Active materialization count mismatch')
@@ -284,7 +292,13 @@ def verify(store,gid=None,*,live_schema='public'):
         if count['succeeded']+(count['missing'] if kind=='media_poster' else 0)!=count['expected'] or count['failed'] or count['pending']:
             raise ContractError('Active modality population is incomplete')
     result=report(store,active)
-    result.update(verified=True,feature_order=bundle['ordering'],embedding_dimensions=sum(bundle['dimensions']))
+    result.update(verified=True,feature_order=bundle['ordering'],embedding_dimensions=sum(bundle['dimensions']),physical_vectors=physical)
+    if text_only(generation['contract']):
+        from api.embedding_generation.text_production import load_production
+        production=load_production(store)
+        if not production or production[0]['generation_id']!=active:raise ContractError('Canonical production model is not active')
+        result['canonical_model_sha256']=production[0]['model_sha256']
+        result['poster_inference']='disabled/1.0'
     return result
 
 
@@ -295,13 +309,17 @@ def dispatch_stage(store,gid,args,config):
         raise ContractError('--num-thread is supported only for media-poster')
     if operation=='recover-metadata' and not args.reason:
         raise ContractError('recover-metadata requires --reason recording the historical-source decision')
+    selected=store.generation(gid,include_snapshot=False)['contract']
+    if text_only(selected) and operation in ('posters','media-poster'):
+        raise ContractError('Poster preparation and inference are disabled by the text production contract')
     if operation in ('posters','media-text'):require_preparation(store,gid,'metadata')
     if operation=='media-poster':require_preparation(store,gid,'poster')
     if operation=='review':
         if not args.gate or not args.reason:raise ContractError('review requires --gate and --reason')
         return approve_review(store,gid,args.gate,args.reason,missing_art_limit=args.missing_art_limit,quality_go=args.quality_go)
     if operation in ('watch','users','train','score','validate'):
-        require_review(store,gid,'text');require_review(store,gid,'poster')
+        require_review(store,gid,'text')
+        if not text_only(selected):require_review(store,gid,'poster')
     if operation in ('train','score','validate'):require_review(store,gid,'profiles')
     if operation in ('score','validate'):require_review(store,gid,'quality')
     g=store.generation(gid)
@@ -419,13 +437,33 @@ def main(argv=None):
             return
         if not args.generation:parser.error('--generation is required')
         gid=args.generation
-        if args.operation=='status':print(canonical(report(store,gid)));return
+        if args.operation=='status':
+            from api.embedding_generation.text_production import load_production,verify_current_production
+            current=load_production(store)
+            if current and current[0]['generation_id']==gid:print(canonical(verify_current_production(store)))
+            else:print(canonical(report(store,gid)))
+            return
         if args.operation=='inspect':
             if not args.item_key:parser.error('--item-key is required')
+            from api.embedding_generation.text_production import load_production
+            current=load_production(store)
+            if current and current[0]['generation_id']==gid:
+                record=store.query(sql.SQL("SELECT record FROM {} WHERE kind='media_text' AND item_key=%s").format(store.table('production_inputs')),(args.item_key,))
+                if not record:raise ContractError('Unknown production media identity')
+                values=store.query('SELECT embedding FROM public.media_embeddings WHERE rating_key=%s',(int(args.item_key),))
+                native=vector(values['embedding'],unit=True);record=record['record']
+                result=dict(generation_id=gid,publication_id=current[0].get('publication_id'),item_key=args.item_key,
+                    canonical_text=media_text(record['source']['metadata']),provenance=record['provenance'],
+                    input_hash=record['input_hash'],origin_generation=record['origin_generation'],
+                    output_dimensions=len(native),norm=sum(v*v for v in native)**.5,
+                    poster_inference='disabled/1.0',model_sha256=current[0]['model_sha256'])
+                if args.output:args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(result,indent=2))
+                print(canonical(result));return
             result=dict(generation_id=gid,item_key=args.item_key,modalities={})
             result['preparations']=[dict(r) for r in store.query(sql.SQL("SELECT stage,status,content_hash,provenance->>'error' AS error,timing FROM {} WHERE generation_id=%s AND item_key=%s ORDER BY stage")
                 .format(store.table('preparations')),(gid,args.item_key),many=True)]
-            for kind in ('media_text','media_poster'):
+            kinds=('media_text',) if text_only(store.generation(gid,include_snapshot=False)['contract']) else ('media_text','media_poster')
+            for kind in kinds:
                 row=store.query(sql.SQL('SELECT * FROM {} WHERE generation_id=%s AND kind=%s AND item_key=%s').format(store.table('items')),(gid,kind,args.item_key))
                 if not row:raise ContractError('Unknown media identity')
                 values=vector(row['embedding']) if row['embedding'] is not None else None
@@ -444,10 +482,16 @@ def main(argv=None):
             if not args.artifact or not args.output:parser.error('export requires --artifact and --output')
             artifact=store.artifact(gid,args.artifact);args.output.parent.mkdir(parents=True,exist_ok=True)
             args.output.write_bytes(bytes(artifact['data']));print(canonical(dict(artifact=args.artifact,sha256=artifact['sha256'],output=str(args.output))));return
-        if args.operation=='promote':
+        if args.operation=='adopt-text':
+            from api.embedding_generation.text_production import adopt
+            with publication_lock(args.pipeline_lock_held):
+                result=adopt(store,gid,reason=args.reason,progress=lambda value:print(canonical(value),flush=True))
+        elif args.operation=='promote':
             if not args.deployment_receipt:parser.error('--deployment-receipt is required')
             receipt=json.loads(args.deployment_receipt.read_text())
             if receipt.get('generation_api')!=1:raise ContractError('Backend deployment receipt incompatible')
+            if text_only(store.generation(gid,include_snapshot=False)['contract']) and receipt.get('text_production_api')!=1:
+                raise ContractError('Backend lacks physical text production support; deploy reviewed code before promotion')
             with publication_lock(args.pipeline_lock_held):result=promote(store,gid,approved=True,deployed_code=receipt['deployed_code_sha256'])
         else:result=dispatch_stage(store,gid,args,config)
         print(canonical(result))
@@ -468,35 +512,15 @@ def publication_lock(already_held=False):
 
 
 def daily(store,config,*,pipeline_lock_held=False):
-    """Only after initial approved activation. New daily generation stays shadow
-    until complete; failed refresh/training leaves the last good generation active.
-    """
-    started=time.perf_counter()
-    parent=active_generation()
-    if not parent:raise ContractError('Daily v2 pipeline requires approved initial promotion')
-    with publication_lock(pipeline_lock_held):
-        import subprocess
-        subprocess.run([sys.executable,str(ROOT/'fetch_tautulli_data.py'),'--mode','incremental','--no-embeddings'],check=True,cwd=ROOT)
-        gid,ollama=create(store,config,parent=parent,require_parent_contract=True)
-        print(canonical(dict(generation_id=gid,stage='created')),flush=True)
-        plex=source.plex(config,CACHE)
-        execute_stages(store,gid,ollama,plex,CACHE,progress=lambda d:print(canonical(d),flush=True))
-        allowance=store.generation(parent)['validation']['missing_art']
-        for gate in ('text','poster','profiles'):approve_review(store,gid,gate,'Approved post-cutover daily policy',missing_art_limit=allowance)
-        evaluation=train(store,gid)
-        prior=json.loads(bytes(store.artifact(parent,'evaluation.json')['data']))
-        for key in ('chronological',):
-            if evaluation[key]['balanced_accuracy']<.5 or evaluation[key]['average_precision']<prior[key]['average_precision']-.05:
-                raise ContractError('Daily quality gate failed; prior generation retained')
-        if evaluation['show_grouped']['metrics']['balanced_accuracy']<.5:
-            raise ContractError('Daily show-grouped gate failed; prior generation retained')
-        approve_review(store,gid,'quality','Approved daily quality gates passed',missing_art_limit=allowance,quality_go=True)
-        score(store,gid)
-        summary=report(store,gid);summary['total_daily_seconds']=time.perf_counter()-started
-        store.artifact(gid,'daily-performance.json',canonical(summary).encode())
-        store.validate(gid,quality_go=True,missing_art_limit=allowance)
-        deployed=store.query(sql.SQL('SELECT deployed_code_sha256 FROM {} WHERE singleton').format(store.table('control')))['deployed_code_sha256']
-        print(canonical(promote(store,gid,approved=True,deployed_code=deployed)))
+    from api.embedding_generation.text_production import daily as text_daily
+    result=text_daily(store,config,collect=collect,plex_factory=source.plex,cache=CACHE,
+        publication_lock=publication_lock,pipeline_lock_held=pipeline_lock_held,
+        progress=lambda value:print(canonical(value),flush=True))
+    summary=result['summary']
+    print(canonical(dict(run_id=result['run_id'],generation_id=result['generation_id'],promotion_id=result['promotion_id'],
+        counts=summary['counts'],inference=summary['inference'],poster_inference_requests=0,
+        scoring=summary['scoring'],stages=summary['stages'],model_before=summary['model_before'],model_after=summary['model_after'],
+        no_new_shadow_generation=True,elapsed_seconds=summary['elapsed_seconds'])))
 
 
 def yield_to_existing_pipeline():

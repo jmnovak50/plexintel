@@ -5,7 +5,7 @@ import numpy as np
 
 from .backfill import qualifying_profiles, runtime_seconds
 from .contracts import (ContractError, FEATURE_VERSION, LABEL_VERSION, cosine,
-                        fingerprint, utc, vector, modality_contract)
+                        fingerprint, utc, vector, modality_contract, text_only)
 
 
 def available(event):
@@ -86,20 +86,26 @@ def feature_row(generation,media,watches,events,owner,target,cutoff,*,posters=No
     watch_sim=cosine((context.watch_sum-removed[0])/count,parent['embedding']) if count else 0.
     used_events=[value for key,value in context.watch_events if key!=target]
     description=parent['source']['metadata']
-    poster=posters.get(target) if posters is not None else None
-    if poster is None:raise ContractError('Explicit poster availability row is required')
-    compatible(poster,generation,'media_poster',allow_missing=True)
-    missing=poster['status']=='missing'
-    if missing and poster['embedding'] is not None:raise ContractError('Missing poster must not contain an image vector')
-    image=np.full(768,np.nan) if missing else np.asarray(vector(poster['embedding']))
-    fused=np.concatenate([vector(parent['embedding']),image,mean]).astype(np.float32)
-    if fused.shape!=(2304,) or not np.isfinite(fused[:768]).all() or not np.isfinite(fused[1536:]).all():
-        raise ContractError('Invalid text/poster/semantic-user feature layout')
+    if text_only(generation['contract']):
+        fused=np.concatenate([vector(parent['embedding']),mean]).astype(np.float32)
+        if fused.shape!=(1536,) or not np.isfinite(fused).all():raise ContractError('Invalid text/user feature layout')
+        poster_dependencies={}
+        missing=False
+    else:
+        poster=posters.get(target) if posters is not None else None
+        if poster is None:raise ContractError('Explicit poster availability row is required')
+        compatible(poster,generation,'media_poster',allow_missing=True)
+        missing=poster['status']=='missing'
+        if missing and poster['embedding'] is not None:raise ContractError('Missing poster must not contain an image vector')
+        image=np.full(768,np.nan) if missing else np.asarray(vector(poster['embedding']))
+        fused=np.concatenate([vector(parent['embedding']),image,mean]).astype(np.float32)
+        if fused.shape!=(2304,) or not np.isfinite(fused[:768]).all() or not np.isfinite(fused[1536:]).all():
+            raise ContractError('Invalid text/poster/semantic-user feature layout')
+        poster_dependencies=dict(media_poster_hash=poster['input_hash'])
     dependencies=dict(generation_id=gid,contract_hash=generation['contract_hash'],cutoff=utc(cutoff).isoformat(),
-        target_excluded=target,profile_keys=keys,
-        media_text_hash=parent['input_hash'],media_poster_hash=poster['input_hash'],
-        profile_hashes=[[k,media[k]['input_hash']] for k in keys],
-        watch_events=used_events,feature_version=FEATURE_VERSION)
+        target_excluded=target,profile_keys=keys,media_text_hash=parent['input_hash'],
+        profile_hashes=[[k,media[k]['input_hash']] for k in keys], watch_events=used_events,
+        feature_version=generation['contract']['features'],**poster_dependencies)
     return dict(owner=owner,media_key=target,embedding=fused,
         genres=description['genres'] or (description.get('show_context') or {}).get('genres',[]),
         directors=description['directors'],year=description['year'],
@@ -211,12 +217,16 @@ class Vocabulary:
     def transform(self,rows):
         values=[]
         for r in rows:
-            if len(r['embedding'])!=2304:raise ContractError('Feature width mismatch')
             data=np.asarray(r['embedding'],dtype=np.float32)
-            if (not np.isfinite(data[:768]).all() or not np.isfinite(data[1536:]).all()
-                or (not np.isnan(data[768:1536]).all() if r['poster_missing'] else not np.isfinite(data[768:1536]).all())):
-                raise ContractError('Invalid missing-modality feature policy')
-            embedding=list(data if self.include_poster else np.concatenate([data[:768],data[1536:]]))
+            if data.shape==(1536,) and not self.include_poster:
+                if not np.isfinite(data).all():raise ContractError('Invalid text feature policy')
+                embedding=list(data)
+            elif data.shape==(2304,):
+                if (not np.isfinite(data[:768]).all() or not np.isfinite(data[1536:]).all()
+                    or (not np.isnan(data[768:1536]).all() if r['poster_missing'] else not np.isfinite(data[768:1536]).all())):
+                    raise ContractError('Invalid missing-modality feature policy')
+                embedding=list(data if self.include_poster else np.concatenate([data[:768],data[1536:]]))
+            else:raise ContractError('Feature width mismatch')
             decade=int(r['year'])//10*10 if r['year'] is not None else None
             values.append(embedding+[int(g in r['genres']) for g in self.genres]
                 +[int(d in r['directors']) for d in self.directors]+[int(decade==d) for d in self.decades]+[r['watch_sim']]

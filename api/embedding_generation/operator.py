@@ -4,7 +4,7 @@ import time
 from uuid import uuid4
 from psycopg2 import sql
 from psycopg2.extras import Json
-from .contracts import ContractError,fingerprint
+from .contracts import ContractError,fingerprint,text_only
 
 
 def require_preparation(store,gid,stage):
@@ -23,6 +23,9 @@ def require_preparation(store,gid,stage):
 def review_state(store,gid,gate,*,missing_art_limit=0):
     g=store.generation(gid);kinds={'text':['media_text'],'poster':['media_poster'],
         'profiles':['media_text','media_poster','watch','user'],'quality':['media_text','media_poster','watch','user']}[gate]
+    if text_only(g['contract']):
+        if gate=='poster':raise ContractError('Poster inference is disabled by the text production contract')
+        kinds=[k for k in kinds if k!='media_poster']
     state={};counts=store.counts(gid)
     for kind in kinds:
         count=counts[kind]
@@ -37,7 +40,8 @@ def review_state(store,gid,gate,*,missing_art_limit=0):
         if len(preps)!=g['expected']['media_text'] or any(r['status']!='succeeded' for r in preps):raise ContractError('Preparation checkpoint incomplete')
         state['preparations']=[dict(r) for r in preps]
     if gate=='quality':
-        state['artifacts']={name:store.artifact(gid,name)['sha256'] for name in ('dataset.json','evaluation.json','model.pkl','text_model.pkl','dimensions.json')}
+        names=('dataset.json','evaluation.json','model.pkl','dimensions.json') if text_only(g['contract']) else ('dataset.json','evaluation.json','model.pkl','text_model.pkl','dimensions.json')
+        state['artifacts']={name:store.artifact(gid,name)['sha256'] for name in names}
     return fingerprint(dict(contract=g['contract_hash'],gate=gate,state=state))
 
 

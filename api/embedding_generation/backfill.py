@@ -11,7 +11,7 @@ from psycopg2 import sql
 from psycopg2.extras import Json
 
 from .contracts import (ContractError, Encoder, contract, fingerprint, metadata, media_text,
-                        watch_text, vector, utc, embedding_input_hash,MEDIA_VERSION,WATCH_VERSION,IMAGE_VERSION,PROFILE_VERSION,POSTER_HIERARCHY)
+                        watch_text, vector, utc, embedding_input_hash,MEDIA_VERSION,WATCH_VERSION,IMAGE_VERSION,PROFILE_VERSION,POSTER_HIERARCHY,text_only)
 from .io import Ollama, Poster, SourceError
 from .store import Store
 
@@ -55,7 +55,8 @@ def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
     if generation['contract']['media_serializer']!=MEDIA_VERSION or generation['contract']['poster_hierarchy']!=POSTER_HIERARCHY:
         raise ContractError('Generation metadata/hierarchy version differs from this implementation')
     if refresh and hasattr(plex,'metadata_cache'):plex.metadata_cache.clear()
-    revisions=plex.revisions();rows=store.items(gid,'media_text');recovery_resolver=None
+    revisions=plex.revisions(include_art=False) if text_only(generation['contract']) else plex.revisions()
+    rows=store.items(gid,'media_text');recovery_resolver=None
     for row in rows:
         prepared=store.preparation(gid,row['item_key'],'metadata')
         if prepared and prepared['status']=='succeeded' and not refresh:continue
@@ -66,7 +67,7 @@ def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
             if row['source'].get('parent_rating_key'):relevant.add(str(row['source']['parent_rating_key']))
             revision=fingerprint({k:revisions[k] for k in sorted(relevant)}) if relevant.issubset(revisions) else None
             prior=row
-            if generation['parent_id']:
+            if generation['parent_id'] and 'metadata' not in row['source']:
                 prior=store.query(sql.SQL("SELECT * FROM {} WHERE generation_id=%s AND kind='media_text' AND item_key=%s")
                     .format(store.table('items')),(generation['parent_id'],row['item_key'])) or row
             parent_contract=(store.generation(generation['parent_id'],include_snapshot=False)['contract'] if generation['parent_id'] else generation['contract'])
@@ -114,6 +115,7 @@ def prepare_metadata(store,gid,plex,*,refresh=False,progress=lambda x:None):
 def prepare_posters(store,gid,plex,*,refresh=False,force=False,only_keys=None,progress=lambda x:None):
     """Independent retrieval checkpoint; metadata text vectors are untouched."""
     generation=store.mutable(gid)
+    if text_only(generation['contract']):raise ContractError('Poster preparation is disabled')
     if generation['contract']['image']!=IMAGE_VERSION:raise ContractError('Image preparation version differs from this implementation')
     checked=set()
     with store.writer(gid):
@@ -155,6 +157,7 @@ def run_media_poster(store,gid,cache,ollama,*,batch_size=16,progress=lambda x:No
 
 def _run_modality(store,gid,kind,cache,ollama,*,batch_size,progress):
     generation=store.mutable(gid)
+    if kind=='media_poster' and text_only(generation['contract']):raise ContractError('Poster inference is disabled')
     if not 1<=batch_size<=128:raise ContractError('Batch bound must be 1..128')
     if (kind=='media_text' and generation['contract']['media_serializer']!=MEDIA_VERSION
         or kind=='media_poster' and generation['contract']['image']!=IMAGE_VERSION):

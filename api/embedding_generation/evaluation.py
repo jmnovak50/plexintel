@@ -57,7 +57,7 @@ def evaluate(classifier,vocabulary,rows,*,training_keys=()):
         result['segments'][name]=probability_metrics([rows[i] for i in indices],p[indices])
     result['zero_history_users']='Not scored: no semantic profile. Excluded counts appear in dataset/scoring coverage.'
     import xgboost as xgb
-    values=classifier.get_booster().predict(xgb.DMatrix(vocabulary.transform(rows),feature_names=vocabulary.names),pred_contribs=True)[:,:-1]
+    values=classifier.get_booster().predict(xgb.DMatrix(vocabulary.transform(rows),feature_names=vocabulary.names,nthread=2),pred_contribs=True)[:,:-1]
     gain=classifier.get_booster().get_score(importance_type='gain');groups=defaultdict(list)
     for i,name in enumerate(vocabulary.names):
         group=next((prefix for prefix in ('media_text','media_poster','user','genre','director','decade') if name.startswith(prefix+'_')),name)

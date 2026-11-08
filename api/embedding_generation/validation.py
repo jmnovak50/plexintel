@@ -5,7 +5,7 @@ from psycopg2 import sql
 from psycopg2.extras import Json
 
 from .contracts import (ContractError,KINDS,REPRESENTATION,canonical,fingerprint,
-                        vector,watch_text,modality_contract,embedding_input_hash)
+                        vector,watch_text,modality_contract,embedding_input_hash,text_only)
 from .history_scope import partition_history
 
 
@@ -18,11 +18,11 @@ def validate_generation(store,gid,*,quality_go=False,missing_art_limit=0,progres
     if generation['scope']=='full' and not snapshot['watch_coverage']['existing_vector_coverage_verified']:
         raise ContractError('Existing watch-vector coverage is not verified')
     rows={kind:{r['item_key']:r for r in store.items(gid,kind)} for kind in KINDS}
-    media=rows['media_text'];posters=rows['media_poster']
+    media=rows['media_text'];posters=rows['media_poster'];text_mode=text_only(spec)
     expected_media={str(r['rating_key']) for r in snapshot['media']}
     expected_watch={str(e['watch_id']) for e in snapshot['events']}
     events={str(e['watch_id']):e for e in snapshot['events']}
-    if set(media)!=expected_media or set(posters)!=expected_media or set(rows['watch'])!=expected_watch:
+    if set(media)!=expected_media or set(posters)!=(set() if text_mode else expected_media) or set(rows['watch'])!=expected_watch:
         raise ContractError('Eligible media/watch identities are not completely rebuilt')
     if not {str(k) for k in snapshot.get('legacy_watch_ids',[])}.issubset(rows['watch']):
         raise ContractError('Existing watch-vector identity omitted')
@@ -104,17 +104,23 @@ def validate_generation(store,gid,*,quality_go=False,missing_art_limit=0,progres
     if missing>missing_art_limit:raise ContractError('Explicit missing-art allowance required')
     bundle,_=load_bundle(store,gid)
     dimensions=json.loads(bytes(store.artifact(gid,'dimensions.json')['data']))
-    if dimensions['embedding_features']!=bundle['feature_names'][:2304] or dimensions['model_sha256']!=store.artifact(gid,'model.pkl')['sha256']:
+    if dimensions['embedding_features']!=bundle['feature_names'][:sum(bundle['dimensions'])] or dimensions['model_sha256']!=store.artifact(gid,'model.pkl')['sha256']:
         raise ContractError('Dimension metadata belongs to a different model/layout')
     quality=store.artifact(gid,'evaluation.json');evaluation=json.loads(bytes(quality['data']))
     if not {'chronological','show_grouped','ablations'}.issubset(evaluation):raise ContractError('Corrected and modality-ablation evaluation required')
-    for split in ('chronological','show_grouped'):
-        try:
-            a=evaluation['ablations']['B_text_only'][split];b=evaluation['ablations']['C_text_poster'][split]
-            if a['cohort_hash']!=b['cohort_hash'] or a['rows']!=b['rows']:raise ContractError('Text/image ablations use different evaluation cohorts')
-        except KeyError:raise ContractError('Complete text-only and text-plus-poster ablations are required') from None
-    if generation['base_generation'] is None and 'paired_controls' not in evaluation:
-        raise ContractError('Initial migration requires separate legacy/correction controls')
+    if not text_mode:
+        for split in ('chronological','show_grouped'):
+            try:
+                a=evaluation['ablations']['B_text_only'][split];b=evaluation['ablations']['C_text_poster'][split]
+                if a['cohort_hash']!=b['cohort_hash'] or a['rows']!=b['rows']:raise ContractError('Text/image ablations use different evaluation cohorts')
+            except KeyError:raise ContractError('Complete text-only and text-plus-poster ablations are required') from None
+        if generation['base_generation'] is None and 'paired_controls' not in evaluation:
+            raise ContractError('Initial migration requires separate legacy/correction controls')
+    else:
+        if evaluation.get('model_sha256')!=store.artifact(gid,'model.pkl')['sha256']:
+            raise ContractError('Text quality approval/model hash mismatch')
+        if bundle.get('adopted_from') and not evaluation.get('selection',{}).get('exact_feature_label_parity'):
+            raise ContractError('Adopted B classifier requires exact training feature parity evidence')
     scoring=store.artifact(gid,'scoring.json')
     actual=store.query(sql.SQL('SELECT count(*) AS n FROM {} WHERE generation_id=%s').format(store.table('predictions')),(gid,))['n']
     if json.loads(bytes(scoring['data']))['predictions']!=actual:raise ContractError('Prediction coverage mismatch')

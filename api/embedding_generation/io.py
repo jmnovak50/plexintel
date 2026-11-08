@@ -86,7 +86,7 @@ class Plex:
         self.session = session or requests.Session()
         self.metadata_cache = {}
 
-    def revisions(self):
+    def revisions(self,*,include_art=True):
         """Cheap paginated revision scan; detailed reads only for changed keys.
 
         An absent updatedAt is unknown and never authorizes cache reuse. Source
@@ -95,8 +95,9 @@ class Plex:
         result={}
         for raw in self.catalog():
             if raw.get('updatedAt') is not None:
-                result[str(raw['ratingKey'])]=fingerprint({k:raw.get(k) for k in (
-                    'updatedAt','thumb','parentThumb','grandparentThumb','parentRatingKey','grandparentRatingKey')})
+                fields=('updatedAt','parentRatingKey','grandparentRatingKey')
+                if include_art:fields+=('thumb','parentThumb','grandparentThumb')
+                result[str(raw['ratingKey'])]=fingerprint({k:raw.get(k) for k in fields})
         return result
 
     def catalog(self):

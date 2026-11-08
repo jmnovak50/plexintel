@@ -15,6 +15,19 @@ WATCH_VERSION = 'plexintel-watch/2.0'
 WATCH_SCOPE_VERSION = 'library-linked-unembedded-quarantine/1.0'
 PROFILE_VERSION = 'rating-key-text-mean/2.0'
 FEATURE_VERSION = 'independent-text-poster-user-prospective/3.0'
+TEXT_FEATURE_VERSION = 'semantic-text-user-prospective/1.0'
+POSTERS_DISABLED = 'disabled/1.0'
+
+
+def text_only(specification):
+    return specification.get('poster_inference') == POSTERS_DISABLED
+
+
+def text_contract(specification):
+    value = dict(specification, features=TEXT_FEATURE_VERSION, poster_inference=POSTERS_DISABLED,
+                 ordering='media_text,user', embedding_dimensions=1536)
+    value['production_contract'] = 'physical-text-production/1.0'
+    return value
 LABEL_VERSION = 'legacy-engagement-060/1.0'
 IMAGE_VERSION = 'exif-rgb-png-max1536/1.0'
 DIMENSIONS = 768

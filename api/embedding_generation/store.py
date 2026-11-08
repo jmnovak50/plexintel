@@ -11,7 +11,7 @@ from psycopg2 import sql
 from psycopg2.extras import Json, RealDictCursor
 
 from .contracts import (ContractError, canonical, fingerprint, vector, KINDS,
-                        REPRESENTATION, modality_contract, embedding_input_hash)
+                        REPRESENTATION, modality_contract, embedding_input_hash, text_only)
 
 
 class Store:
@@ -81,17 +81,18 @@ class Store:
                 raise ContractError('Reuse requires a fully validated independent EmbeddingGemma 2 parent')
         gid=gid or str(uuid4())
         profiles=self.profile_sources(snapshot,specification['profile_threshold'])
-        expected=dict(media_text=len(snapshot['media']),media_poster=len(snapshot['media']),watch=len(snapshot['events']),user=len(profiles))
+        expected=dict(media_text=len(snapshot['media']),media_poster=0 if text_only(specification) else len(snapshot['media']),watch=len(snapshot['events']),user=len(profiles))
         base=self.query(sql.SQL('SELECT active_generation FROM {} WHERE singleton').format(self.table('control')))
         self.query(sql.SQL('''INSERT INTO {}(generation_id,contract,contract_hash,scope,parent_id,base_generation,source_hash,snapshot,expected)
             VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)''').format(self.table('generations')),
             (gid,Json(specification),fingerprint(specification),scope,parent,base['active_generation'],source_hash,Json(snapshot),Json(expected)))
-        total=2*len(snapshot['media'])+len(snapshot['events'])+len(profiles);completed=0
+        media_steps=1 if text_only(specification) else 2
+        total=media_steps*len(snapshot['media'])+len(snapshot['events'])+len(profiles);completed=0
         progress(dict(generation_id=gid,expected=total,completed=0,failed=0))
         for row in snapshot['media']:
             self.upsert_source(gid,'media_text',str(row['rating_key']),row)
-            self.upsert_source(gid,'media_poster',str(row['rating_key']),dict(rating_key=row['rating_key']))
-            completed+=2
+            if not text_only(specification):self.upsert_source(gid,'media_poster',str(row['rating_key']),dict(rating_key=row['rating_key']))
+            completed+=media_steps
             if completed%32==0:progress(dict(generation_id=gid,expected=total,completed=completed,failed=0))
         for row in snapshot['events']:
             self.upsert_source(gid,'watch',str(row['watch_id']),row,owner=row['username'],media_key=str(row['rating_key']),
@@ -133,7 +134,7 @@ class Store:
         digest=semantic_hash or fingerprint(source)
         old=self.query(sql.SQL('SELECT semantic_hash FROM {} WHERE generation_id=%s AND kind=%s AND item_key=%s')
             .format(self.table('items')),(gid,kind,key))
-        self.query(sql.SQL('''INSERT INTO {}(generation_id,kind,item_key,owner,media_key,source,semantic_hash)
+        self.query(sql.SQL('''INSERT INTO {} AS items(generation_id,kind,item_key,owner,media_key,source,semantic_hash)
             VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(generation_id,kind,item_key) DO UPDATE SET
             source=EXCLUDED.source,semantic_hash=EXCLUDED.semantic_hash,owner=EXCLUDED.owner,media_key=EXCLUDED.media_key,
             status=CASE WHEN {}.semantic_hash=EXCLUDED.semantic_hash THEN {}.status ELSE 'pending' END,
@@ -154,7 +155,7 @@ class Store:
             self.query(sql.SQL("UPDATE {} SET status='pending',embedding=NULL WHERE generation_id=%s AND kind=%s AND item_key=%s")
                 .format(self.table('items')),(gid,row['child_kind'],row['child_key']))
             self.invalidate_children(gid,row['child_kind'],row['child_key'])
-        for name in ('artifacts','modality_training_rows','predictions'):
+        for name in ('artifacts','modality_training_rows','text_training_rows','predictions'):
             self.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(self.table(name)),(gid,))
 
     def complete(self, gid, kind, key, values, input_hash, *, poster=None, timing=None, dependencies=(), origin=None):

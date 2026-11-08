@@ -13,7 +13,7 @@ from functools import wraps
 from psycopg2 import sql
 from psycopg2.extras import Json
 
-from .contracts import ContractError, fingerprint
+from .contracts import ContractError, fingerprint,text_only
 from .model import load_bundle
 from .runtime import ROOT, code_hash, publication_barrier
 from .source import read_snapshot
@@ -75,7 +75,12 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
     if not approved or generation['scope']!='full' or generation['status']!='validated':
         raise ContractError('Explicit GO/approval and a fully validated FULL generation are required')
     if deployed_code!=code_hash():raise ContractError('Approved deployed code hash differs from implementation')
+    if (generation['validation']['contract_hash']!=generation['contract_hash']
+        or generation['validation']['model_sha256']!=store.artifact(gid,'model.pkl')['sha256']
+        or generation['validation']['evaluation_sha256']!=store.artifact(gid,'evaluation.json')['sha256']):
+        raise ContractError('Validated production model/evaluation contract changed')
     bundle,vocab=load_bundle(store,gid)
+    text_mode=text_only(generation['contract'])
     legacy_model=Path(legacy_model or ROOT/'xgb_model.pkl')
     legacy_sha=hashlib.sha256(legacy_model.read_bytes()).hexdigest()
     publication=str(uuid4())
@@ -103,6 +108,9 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
             counts,hashes=archive(store,publication,live_schema)
             store.query(sql.SQL('INSERT INTO {}(promotion_id,generation_id,previous_generation,archive_counts,archive_hashes,legacy_model_sha256) VALUES(%s,%s,%s,%s,%s,%s)')
                 .format(store.table('promotions')),(publication,gid,control['active_generation'],Json(counts),Json(hashes),legacy_sha))
+            if text_mode:
+                from .text_production import archive_runtime
+                archive_runtime(store,publication,control)
             for kind,table,key in [('media','media_embeddings','rating_key'),('watch','watch_embeddings','watch_id'),('user','user_embeddings','username')]:
                 cur.execute(sql.SQL('INSERT INTO {} SELECT %s,%s,{}::text,embedding FROM {}')
                     .format(store.table('retained_vectors'),sql.Identifier(key),live_table(table,live_schema)),(publication,kind))
@@ -116,25 +124,40 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
                 cur.execute(sql.SQL('INSERT INTO {}({},embedding) SELECT {},embedding FROM {} WHERE generation_id=%s AND kind=%s AND status=\'succeeded\'')
                     .format(live_table(table,live_schema),sql.Identifier(key),cast,store.table('items')),(gid,kind))
             cur.execute(sql.SQL('DELETE FROM {}').format(live_table('training_data',live_schema)))
-            cur.execute(sql.SQL('''INSERT INTO {}(username,rating_key,label,embedding,genre_tags,actor_tags,director_tags,
-                release_year,played_duration,media_duration,engagement_ratio,season_number,episode_number,
-                watch_sim,sample_weight,label_source,feedback_value)
-                SELECT t.owner,t.media_key::integer,t.label,t.media_text || t.user_embedding,
-                (SELECT string_agg(value,',') FROM jsonb_array_elements_text(t.features->'genres')),'',
-                (SELECT string_agg(value,',') FROM jsonb_array_elements_text(t.features->'directors')),
-                (t.features->>'year')::integer,(t.features->>'played_duration')::integer,
-                (t.features->>'media_duration')::integer,(t.features->>'engagement_ratio')::double precision,
-                (t.features->>'season_number')::integer,(t.features->>'episode_number')::integer,
-                (t.features->>'watch_sim')::double precision,(t.features->>'sample_weight')::double precision,
-                t.features->>'label_source',t.features->>'feedback_value' FROM {} t WHERE generation_id=%s''')
-                .format(live_table('training_data',live_schema),store.table('modality_training_rows')),(gid,))
+            if text_mode:
+                cur.execute(sql.SQL('''INSERT INTO {}(username,rating_key,label,embedding,genre_tags,actor_tags,director_tags,
+                    release_year,played_duration,media_duration,engagement_ratio,season_number,episode_number,
+                    watch_sim,sample_weight,label_source,feedback_value)
+                    SELECT t.owner,t.media_key::integer,t.label,t.embedding,
+                    (SELECT string_agg(value,',') FROM jsonb_array_elements_text(t.features->'genres')),'',
+                    (SELECT string_agg(value,',') FROM jsonb_array_elements_text(t.features->'directors')),
+                    (t.features->>'year')::integer,(t.features->>'played_duration')::integer,
+                    (t.features->>'media_duration')::integer,(t.features->>'engagement_ratio')::double precision,
+                    (t.features->>'season_number')::integer,(t.features->>'episode_number')::integer,
+                    (t.features->>'watch_sim')::double precision,(t.features->>'sample_weight')::double precision,
+                    t.features->>'label_source',t.features->>'feedback_value' FROM {} t WHERE generation_id=%s''')
+                    .format(live_table('training_data',live_schema),store.table('text_training_rows')),(gid,))
+            else:
+                cur.execute(sql.SQL('''INSERT INTO {}(username,rating_key,label,embedding,genre_tags,actor_tags,director_tags,
+                    release_year,played_duration,media_duration,engagement_ratio,season_number,episode_number,
+                    watch_sim,sample_weight,label_source,feedback_value)
+                    SELECT t.owner,t.media_key::integer,t.label,t.media_text || t.user_embedding,
+                    (SELECT string_agg(value,',') FROM jsonb_array_elements_text(t.features->'genres')),'',
+                    (SELECT string_agg(value,',') FROM jsonb_array_elements_text(t.features->'directors')),
+                    (t.features->>'year')::integer,(t.features->>'played_duration')::integer,
+                    (t.features->>'media_duration')::integer,(t.features->>'engagement_ratio')::double precision,
+                    (t.features->>'season_number')::integer,(t.features->>'episode_number')::integer,
+                    (t.features->>'watch_sim')::double precision,(t.features->>'sample_weight')::double precision,
+                    t.features->>'label_source',t.features->>'feedback_value' FROM {} t WHERE generation_id=%s''')
+                    .format(live_table('training_data',live_schema),store.table('modality_training_rows')),(gid,))
             cur.execute(sql.SQL('DELETE FROM {}').format(live_table('recommendations',live_schema)))
             cur.execute(sql.SQL('''INSERT INTO {}(username,rating_key,predicted_probability,model_name,scored_at,rank,cosine_similarity,explanation)
                 SELECT owner,media_key::integer,probability,%s,%s::timestamptz,rank,cosine,''
                 FROM {} WHERE generation_id=%s''').format(live_table('recommendations',live_schema),store.table('predictions')),
                 ('embeddinggemma2:'+gid,generation['snapshot']['as_of'],gid))
-            from api.services.dimension_config import build_independent_metadata
-            config=build_independent_metadata(vocab.names,generation['validation']['model_sha256'],
+            from api.services.dimension_config import build_independent_metadata,build_text_metadata
+            build_metadata=build_text_metadata if text_mode else build_independent_metadata
+            config=build_metadata(vocab.names,generation['validation']['model_sha256'],
                 generation_id=gid,contract_hash=generation['contract_hash'],encoder_digest=generation['contract']['encoder']['digest'],serializer=generation['contract']['media_serializer'])
             if json.loads(bytes(store.artifact(gid,'dimensions.json')['data']))!=config:
                 raise ContractError('Reviewed shadow dimension configuration differs from publication')
@@ -167,6 +190,10 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
                 cur.execute(sql.SQL('''INSERT INTO {}(key,raw_value,source) VALUES(%s,%s,'admin_ui')
                     ON CONFLICT(key) DO UPDATE SET raw_value=EXCLUDED.raw_value,source=EXCLUDED.source''')
                     .format(live_table('app_settings',live_schema)),(key,value))
+            if text_mode:
+                from .text_production import publish_runtime,physical_verification
+                publish_runtime(store,gid,publication_id=publication)
+                physical_verification(store,gid,live_schema)
             if failpoint:failpoint('materialized')
             store.query(sql.SQL("UPDATE {} SET status='retired' WHERE status='active'").format(store.table('generations')))
             store.query(sql.SQL("UPDATE {} SET status='active' WHERE generation_id=%s").format(store.table('generations')),(gid,))
@@ -176,6 +203,8 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
             for kind,table in [('media_text','media_embeddings'),('watch','watch_embeddings'),('user','user_embeddings')]:
                 count=store.query(sql.SQL('SELECT count(*) AS n FROM {}').format(live_table(table,live_schema)))['n']
                 if count!=generation['expected'][kind]:raise ContractError('Materialized vector count mismatch')
+        if getattr(store,'run_id',None):
+            store.query(sql.SQL("UPDATE {} SET status='succeeded',promotion_id=%s,finished_at=now(),error=NULL WHERE run_id=%s").format(store.table('production_runs')),(publication,store.run_id))
         store.conn.commit()
         return dict(promotion_id=publication,generation_id=gid,rollback_archive_counts=counts)
     except Exception:
@@ -194,6 +223,9 @@ def rollback(store,promotion_id,*,approved=False,live_schema='public',legacy_mod
             cur.execute('SELECT pg_advisory_xact_lock(184725,42)')
             record=store.query(sql.SQL('SELECT * FROM {} WHERE promotion_id=%s FOR UPDATE').format(store.table('promotions')),(promotion_id,))
             control=store.query(sql.SQL('SELECT * FROM {} WHERE singleton FOR UPDATE').format(store.table('control')))
+            current=store.query(sql.SQL('SELECT publication_id FROM {} WHERE singleton').format(store.table('production_state')))
+            if current and current['publication_id'] and current['publication_id']!=promotion_id:
+                raise ContractError('Rollback must target the current production revision first')
             if not record or record['rolled_back_at'] or control['active_generation']!=record['generation_id']:
                 raise ContractError('Rollback is not the active publication')
             if hashlib.sha256(model.read_bytes()).hexdigest()!=record['legacy_model_sha256']:
@@ -222,6 +254,8 @@ def rollback(store,promotion_id,*,approved=False,live_schema='public',legacy_mod
                 store.query(sql.SQL("UPDATE {} SET status='active' WHERE generation_id=%s").format(store.table('generations')),(record['previous_generation'],))
             store.query(sql.SQL('UPDATE {} SET active_generation=%s,previous_generation=NULL,updated_at=now() WHERE singleton')
                 .format(store.table('control')),(record['previous_generation'],))
+            from .text_production import restore_runtime
+            restore_runtime(store,promotion_id)
             store.query(sql.SQL('UPDATE {} SET rolled_back_at=now() WHERE promotion_id=%s').format(store.table('promotions')),(promotion_id,))
         store.conn.commit()
     except Exception:

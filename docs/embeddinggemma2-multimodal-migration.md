@@ -1,5 +1,9 @@
 # EmbeddingGemma 2 independent text/poster migration
 
+**Production deployment, November 5, 2026:** text-only B is published with 1,536 embedding dimensions and poster inference disabled. The authorized retirement and single production catch-up also completed. See [the execution report](embeddinggemma2-text-production-completion.md) and [physical text-only cutover runbook](embeddinggemma2-text-production-cutover.md). The independent poster/C procedures below remain historical research instructions; they are not the daily production contract.
+
+## Historical independent-modality refactor — November 3
+
 Implementation and bounded validation: **November 3, 2026, birch**. The canonical architecture is now **independent metadata-text and poster-image embeddings**, superseding the earlier joint-inference migration. **GO for a manually controlled full shadow rebuild; NO-GO for production promotion pending full population validation, model-quality review and explicit user approval.** No production backfill, production model training, activation, configuration change, schema installation, service restart or commit was performed during this refactor.
 
 Each media record retains two complete native **768-dimensional** representations. User profiles remain 768-dimensional semantic preferences derived from media **text** vectors. Watch vectors remain 768-dimensional behavioral text. XGBoost receives **2,304 embedding features**, followed by engineered features. Concatenation exposes separate modalities to the classifier; it is not a learned fusion encoder. No averaging, projection, truncation, SHAP pruning or joint inference occurs in the canonical media path.
