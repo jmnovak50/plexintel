@@ -4,10 +4,12 @@ from contextlib import contextmanager, nullcontext
 from psycopg2.extras import RealDictCursor
 from api.db.connection import connect_db
 from api.services.dimension_config import get_active_config, identity, feature_groups
+from api.services.dimension_labeling import compatible_label_sql
 
 REPEATED_ATTEMPTS = max(1, int(os.getenv('DIMENSION_EXPLORER_REPEATED_ATTEMPTS', '3')))
 FREQUENT_SELECTIONS = max(1, int(os.getenv('DIMENSION_EXPLORER_FREQUENT_SELECTIONS', '10')))
 LIMITATIONS = [
+    'Semantic dimension labels are approximate interpretations of coordinates, not proven causal explanations of model predictions.',
     'Current snapshots only. Older observations are isolated in the unversioned legacy scope; their model identity and pairing with scored_at cannot be verified. New scoring contexts retain model fingerprints and prediction timestamps. Incompatible or stale contexts are excluded, never combined with legacy observations.',
     'Mean absolute magnitude uses finite observed values only; unknown/non-finite contributions are excluded from that mean and counted separately. All contribution signs and zeros describe stored values.',
     'Statistics cover retained embedding contributions on selected SHAP targets, not all model usage. Missing SHAP is unknown, never zero. Signs are retained; non-finite values have unknown sign.',
@@ -135,7 +137,7 @@ def register_cte(scope, config):
             job.status AS job_status,COALESCE(job.error, CASE WHEN recent.result->>'processing_error'='true' THEN 'Labeling provider error' END) AS processing_error
         FROM feature_inventory i
         LEFT JOIN LATERAL (SELECT saved.*,COUNT(*) OVER() AS label_row_count FROM embedding_labels saved
-            WHERE saved.dimension=i.dimension ORDER BY saved.updated_at DESC NULLS LAST,
+            WHERE saved.dimension=i.dimension AND EXISTS (SELECT 1 FROM embedding_feature_config c WHERE c.active AND ''' + compatible_label_sql() + ''') ORDER BY saved.updated_at DESC NULLS LAST,
                 saved.created_at DESC NULLS LAST,saved.label LIMIT 1) el ON true
         LEFT JOIN embedding_dimension_admin a ON a.dimension=i.dimension AND a.config_id=%s
         LEFT JOIN contribution_stats cs ON cs.dimension=i.dimension
@@ -263,7 +265,7 @@ def get_prediction(username, rating_key, scored_at, model_version):
             ARRAY(SELECT group_name FROM selected s WHERE s.username=o.user_id AND s.rating_key=o.rating_key
                 AND o.dimension=ANY(s.dimensions)) AS selected_groups
             FROM observations o LEFT JOIN LATERAL (SELECT saved.* FROM embedding_labels saved
-                WHERE saved.dimension=o.dimension ORDER BY saved.updated_at DESC NULLS LAST,
+                WHERE saved.dimension=o.dimension AND EXISTS (SELECT 1 FROM embedding_feature_config c WHERE c.active AND ''' + compatible_label_sql() + ''') ORDER BY saved.updated_at DESC NULLS LAST,
                     saved.created_at DESC NULLS LAST,saved.label LIMIT 1) el ON true
             WHERE o.rating_key=%s ORDER BY ABS(o.shap_value) DESC NULLS LAST,o.dimension''', params+[rating_key])
         contributions = []

@@ -28,7 +28,7 @@ UNCLEAR_LABEL = "UNCLEAR / MIXED SIGNAL"
 LABEL_PROVIDER = str(get_setting_value("labeling.provider", default="ollama")).lower()
 OPENAI_LABEL_MODEL = get_setting_value("labeling.openai_model", default="gpt-4")
 OLLAMA_HOST = str(get_setting_value("ollama.host", default="http://localhost:11434")).rstrip("/")
-OLLAMA_LABEL_MODEL = get_setting_value("labeling.ollama_model", default="gemma3")
+OLLAMA_LABEL_MODEL = get_setting_value("labeling.ollama_model", default="gemma4:31b-cloud")
 OLLAMA_TIMEOUT_S = get_setting_value("ollama.timeout_s", default=300)
 
 SYSTEM_PROMPT = """
@@ -177,14 +177,14 @@ def connect_db():
 
 
 def resolve_label_backend(provider: str | None = None, model: str | None = None):
-    resolved_provider = (provider or LABEL_PROVIDER or "ollama").strip().lower()
+    resolved_provider = (provider or get_setting_value('labeling.provider',default=LABEL_PROVIDER) or "ollama").strip().lower()
     if resolved_provider not in {"openai", "ollama"}:
         raise ValueError(f"Unsupported label provider: {resolved_provider}")
 
     if resolved_provider == "openai":
-        resolved_model = (model or OPENAI_LABEL_MODEL or "gpt-4").strip()
+        resolved_model = (model or get_setting_value('labeling.openai_model',default=OPENAI_LABEL_MODEL) or "gpt-4").strip()
     else:
-        resolved_model = (model or OLLAMA_LABEL_MODEL or "gemma3").strip()
+        resolved_model = (model or get_setting_value('labeling.ollama_model',default=OLLAMA_LABEL_MODEL) or "gemma4:31b-cloud").strip()
 
     if not resolved_model:
         raise ValueError(f"No model configured for provider: {resolved_provider}")
@@ -920,14 +920,16 @@ def build_dimension_prompt(
     existing_label: str | None = None,
     existing_display_label: str | None = None,
     existing_label_type: str | None = None,
+    prepared_positive: dict | None = None,
+    prepared_negative: dict | None = None,
 ) -> dict:
     dimension_mode = _resolve_dimension_mode(dimension, dimension_mode)
-    positive_bundle = prepare_dimension_items(
+    positive_bundle = prepared_positive if prepared_positive is not None else prepare_dimension_items(
         positive_df,
         min_valid_items=min_valid_items,
         dimension_mode=dimension_mode,
     )
-    negative_bundle = prepare_dimension_items(
+    negative_bundle = prepared_negative if prepared_negative is not None else prepare_dimension_items(
         negative_df if negative_df is not None else pd.DataFrame(),
         min_valid_items=0,
         dimension_mode=dimension_mode,
@@ -946,7 +948,7 @@ def build_dimension_prompt(
 
     skipped_reason = ""
     total_positive = len(positive_bundle["all_items"])
-    valid_positive = len(positive_bundle["valid_items"])
+    valid_positive = positive_bundle.get('valid_count',len(positive_bundle["valid_items"]))
     flagged_positive = len(positive_bundle["flagged_items"])
 
     if valid_positive < min_valid_items:
@@ -982,7 +984,7 @@ def build_dimension_prompt(
         "positive_items": positive_items,
         "negative_items": negative_items,
         "valid_positive_count": valid_positive,
-        "valid_negative_count": len(negative_bundle["valid_items"]),
+        "valid_negative_count": negative_bundle.get('valid_count',len(negative_bundle["valid_items"])),
         "minimum_label_coverage_percent": minimum_label_coverage_percent,
         "maximum_low_overlap_percent": maximum_low_overlap_percent,
         "flagged_item_count": flagged_positive + len(negative_bundle["flagged_items"]),
@@ -1107,8 +1109,27 @@ def _call_openai_for_label_result(prompt_text: str, model: str, dimension_mode: 
     return _extract_label_result_from_response(content, dimension_mode=dimension_mode)
 
 
+def label_ollama_endpoint():
+    """Use the existing daemon (and its signed-in cloud identity) by default."""
+    import os
+    from pathlib import Path
+    from urllib.parse import urlsplit
+    base = str(get_setting_value('labeling.ollama_host',default='') or OLLAMA_HOST).rstrip('/')
+    parsed = urlsplit(base)
+    if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.query or parsed.fragment:
+        raise ValueError('Invalid labeling Ollama endpoint')
+    key = get_setting_value('ollama.api_key',default='') or os.getenv('OLLAMA_API_KEY','')
+    key_file = os.getenv('OLLAMA_API_KEY_FILE')
+    if not key and key_file:
+        key = Path(key_file).read_text().strip()
+    if key and parsed.scheme != 'https' and parsed.hostname == 'ollama.com':
+        raise ValueError('Ollama Cloud authentication requires HTTPS')
+    return base,({'Authorization':'Bearer '+key} if key else {})
+
+
 def _list_ollama_models() -> list[str]:
-    response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=30)
+    base,headers = label_ollama_endpoint()
+    response = requests.get(f"{base}/api/tags", headers=headers, timeout=30, allow_redirects=False)
     response.raise_for_status()
     data = response.json()
     models = []
@@ -1125,6 +1146,9 @@ def _resolve_ollama_model_name(model: str) -> str:
         raise ValueError("No Ollama model name provided")
 
     installed = _list_ollama_models()
+    from urllib.parse import urlsplit
+    if urlsplit(label_ollama_endpoint()[0]).hostname == 'ollama.com' and requested.endswith('-cloud'):
+        requested = requested[:-6]
     if requested in installed:
         return requested
 
@@ -1145,34 +1169,64 @@ def _resolve_ollama_model_name(model: str) -> str:
     )
 
 
-def _call_ollama_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media") -> dict:
+def _call_ollama_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media",
+                                max_output_tokens: int = 420, on_usage=None, strict_json=False) -> dict:
     resolved_model = _resolve_ollama_model_name(model)
+    base,headers = label_ollama_endpoint()
     payload = {
         "model": resolved_model,
         "system": SYSTEM_PROMPT,
         "prompt": prompt_text,
         "stream": False,
         "format": "json",
+        "think": False,
         "options": {
             "temperature": 0.1,
+            "num_predict": max_output_tokens,
         },
     }
     response = requests.post(
-        f"{OLLAMA_HOST}/api/generate",
+        f"{base}/api/generate",
         json=payload,
-        timeout=OLLAMA_TIMEOUT_S,
+        headers=headers,
+        timeout=(10,OLLAMA_TIMEOUT_S),
+        allow_redirects=False,
     )
     if response.status_code >= 400:
-        try:
-            error_message = response.json().get("error", response.text)
-        except Exception:
-            error_message = response.text
-        raise RuntimeError(
-            f"Ollama generate failed for model '{resolved_model}' at {OLLAMA_HOST}: "
-            f"{response.status_code} {error_message}"
-        )
+        error = RuntimeError(f'Ollama HTTP {response.status_code} for {resolved_model}')
+        error.status_code = response.status_code
+        error.transient = response.status_code in (408,429,500,502,503,504)
+        raise error
     data = response.json()
-    return _extract_label_result_from_response(data.get("response", ""), dimension_mode=dimension_mode)
+    if on_usage:
+        on_usage(data)
+    if not data.get('done',True) or data.get('done_reason') == 'length':
+        error = ValueError('Ollama response exceeded the output limit or was incomplete')
+        error.transient = False
+        raise error
+    if strict_json:
+        try:
+            candidate=json.loads(data.get('response',''))
+            required={'label','label_confidence','proposed_label_type','coverage_high_count','coverage_high_total',
+                      'coverage_high_percent','coverage_low_overlap_count','coverage_low_total','coverage_low_overlap_percent','explanation','evidence'}
+            if not isinstance(candidate,dict) or not required<=set(candidate):
+                raise ValueError('Missing label JSON fields')
+            if (not isinstance(candidate['label'],str) or not isinstance(candidate['explanation'],str)
+                or candidate['label_confidence'] not in ('high','medium','low','unclear')
+                or candidate['proposed_label_type'] not in ('semantic','cluster','mechanical','unclear')):
+                raise ValueError('Invalid label JSON types or confidence')
+            if not isinstance(candidate['evidence'],list) or len(candidate['evidence'])!=3 or not all(isinstance(s,str) for s in candidate['evidence']):
+                raise ValueError('Label evidence must contain three strings')
+            for count,total in [('coverage_high_count','coverage_high_total'),('coverage_low_overlap_count','coverage_low_total')]:
+                if type(candidate[count]) is not int or type(candidate[total]) is not int or not 0<=candidate[count]<=candidate[total]:
+                    raise ValueError('Invalid coverage counts')
+        except (TypeError,ValueError) as exc:
+            error=ValueError('Ollama returned invalid label JSON')
+            error.transient=False
+            raise error from exc
+    result = _extract_label_result_from_response(data.get("response", ""), dimension_mode=dimension_mode)
+    result['provider_model'] = data.get('model',resolved_model)
+    return result
 
 
 def call_llm_for_label_result(
@@ -1182,20 +1236,36 @@ def call_llm_for_label_result(
     dimension_mode: str = "media",
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
+    max_output_tokens: int | None = None,
+    before_attempt=None,
+    attempt_callback=None,
 ) -> dict:
     resolved_provider, resolved_model = resolve_label_backend(provider, model)
     last_error = None
 
     for attempt in range(1, max_retries + 1):
+        usage = {}
+        if before_attempt:
+            before_attempt(attempt)
         try:
             if resolved_provider == "openai":
-                return _call_openai_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
-            return _call_ollama_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
+                result = _call_openai_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
+            elif max_output_tokens is not None or attempt_callback is not None:
+                result = _call_ollama_for_label_result(prompt_text,resolved_model,dimension_mode=dimension_mode,
+                    max_output_tokens=max_output_tokens or 420,on_usage=lambda data:usage.update(data),strict_json=True)
+            else:
+                result = _call_ollama_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
         except Exception as exc:
             last_error = exc
-            if attempt == max_retries:
+            if attempt_callback:
+                attempt_callback(attempt,usage,exc)
+            if attempt == max_retries or getattr(exc,'transient',True) is False:
                 break
             time.sleep(retry_delay_s * attempt)
+        else:
+            if attempt_callback:
+                attempt_callback(attempt,usage,None)
+            return result
 
     error_detail = f": {last_error}" if last_error else ""
     raise RuntimeError(

@@ -370,13 +370,17 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         "llm_embeddings",
         "Ollama Label Model",
         "string",
-        default="gemma3",
+        default="gemma4:31b-cloud",
         env_aliases=("OLLAMA_LABEL_MODEL", "LABEL_MODEL"),
         description=(
-            "Ollama model used when labeling.provider is ollama. Use a larger/better local model if labels are too "
-            "shallow or inconsistent. Use a smaller model if your NAS/RPi is slow, CPU-bound, or timing out."
+            "Interpretation model for manual semantic dimension labeling. gemma4:31b-cloud uses the signed-in "
+            "Ollama daemon or the authenticated Cloud API. This does not change the embedding encoder."
         ),
     ),
+    _setting('labeling.ollama_host','llm_embeddings','Labeling Ollama endpoint','string',default='',
+             env_aliases=('OLLAMA_LABEL_HOST',),description='Optional label-only endpoint; blank reuses Ollama Host. Does not move embedding inference.'),
+    _setting('ollama.api_key','llm_embeddings','Ollama Cloud API Key','string',secret=True,
+             env_aliases=('OLLAMA_API_KEY',),description='Optional Bearer key for direct Ollama Cloud. Leave blank for a daemon with an existing signed-in cloud identity.'),
     _setting(
         "openai.api_key",
         "llm_embeddings",

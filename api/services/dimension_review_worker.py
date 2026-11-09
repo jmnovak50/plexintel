@@ -53,6 +53,7 @@ def dispatch_review():
         try:
             environment = build_pipeline_environment()
             environment['PLEXINTEL_DIMENSION_REVIEW_ID'] = str(job['review_id'])
+            environment['PLEXINTEL_LABELING_LOCK_FD'] = str(lock.handle.fileno())
             process = subprocess.run([
                 _python_executable(), str(REPO_ROOT / 'batch_label_embeddings.py'),
                 '--dimension', str(job['dimension']), '--dim_type', 'all',

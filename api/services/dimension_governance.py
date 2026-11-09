@@ -79,6 +79,11 @@ def apply_action(config_id, dimension, actor, action, reason, version):
             identity(config, dimension)
             if action == 'review' and (config['media_dimensions'],config['user_dimensions']) != (768,768):
                 raise HTTPException(409, 'The current labeling implementation supports 768 dimensions per side; review requires a compatible labeling implementation')
+            if action == 'review' and config.get('generation_id'):
+                if config.get('ordering')!='media_text,user':
+                    raise HTTPException(409,'Semantic labeling supports the current text/user feature layout only')
+                from api.services.dimension_labeling import current_context
+                current_context(conn)
             cur.execute('''INSERT INTO embedding_dimension_admin(config_id, dimension) VALUES (%s,%s)
                 ON CONFLICT DO NOTHING''', (config_id, dimension))
             cur.execute('SELECT * FROM embedding_dimension_admin WHERE config_id=%s AND dimension=%s FOR UPDATE',

@@ -146,7 +146,8 @@ export default function AdminDimensions() {
       .catch(err => { if (!controller.signal.aborted) { setError(String(err.message)); setLoading(false); } }), 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [query, dimension, prediction, refresh]);
-  useEffect(() => { setReason(''); setAction(data?.config.feature_groups ? 'investigate' : 'review'); setMessage(''); }, [dimension, data?.config.feature_groups]);
+  const reviewSupported = Boolean(data && (!data.config.feature_groups || data.config.ordering === 'media_text,user'));
+  useEffect(() => { setReason(''); setAction(reviewSupported ? 'review' : 'investigate'); setMessage(''); }, [dimension, reviewSupported]);
   const pending = data?.rows?.some(row => row.in_flight || ['queued', 'running'].includes(row.job_status || ''));
   useEffect(() => {
     if (!pending) return;
@@ -227,10 +228,11 @@ export default function AdminDimensions() {
             <Pager offset={historyOffset} total={Math.max(data.history_total || 0, data.actions_total || 0, data.reviews_total || 0, data.assessments_total || 0)} size={20} onChange={n => change('history_offset', String(n))} />
           </section>
           <section className={`${panel} space-y-3`}><h2 className="text-lg font-semibold">Targeted intervention</h2><p className="text-sm">Review runs in the background and bypasses only this dimension’s cooldown. Pause prevents future selections; an in-flight assessment can finish. Resume keeps the existing next-review date. Suppression affects explanation wording only; shared wording can still appear through another eligible dimension. Investigation changes neither scheduling nor eligibility.</p><p className="text-sm">Investigation: {row.investigation_status} · {row.investigation_reason || 'No reason recorded'}</p>
-            <label className="block text-xs">Action<select className="recs-input mt-1 w-full" value={action} onChange={e => setAction(e.target.value)}><option disabled={Boolean(data.config.feature_groups)} value="review">Request review / retry now</option><option value={row.paused ? 'resume' : 'pause'}>{row.paused ? 'Resume' : 'Pause'} automatic review</option><option value={row.suppressed ? 'restore' : 'suppress'}>{row.suppressed ? 'Restore' : 'Suppress'} explanation display</option><option value={row.investigation_status === 'open' ? 'clear' : 'investigate'}>{row.investigation_status === 'open' ? 'Clear' : 'Flag'} investigation</option></select></label>
+            <label className="block text-xs">Action<select className="recs-input mt-1 w-full" value={action} onChange={e => setAction(e.target.value)}><option disabled={!reviewSupported} value="review">Request review / retry now</option><option value={row.paused ? 'resume' : 'pause'}>{row.paused ? 'Resume' : 'Pause'} automatic review</option><option value={row.suppressed ? 'restore' : 'suppress'}>{row.suppressed ? 'Restore' : 'Suppress'} explanation display</option><option value={row.investigation_status === 'open' ? 'clear' : 'investigate'}>{row.investigation_status === 'open' ? 'Clear' : 'Flag'} investigation</option></select></label>
             <label className="block text-xs">Reason (recorded with your administrator identity)<textarea className="recs-input mt-1 w-full" maxLength={2000} value={reason} onChange={e => setReason(e.target.value)} /></label>
-            <button className="recs-btn-primary" disabled={busy || !reason.trim() || (action === 'review' && (row.paused || Boolean(data.config.feature_groups)))} onClick={intervene}>{busy ? 'Recording…' : 'Apply to this dimension'}</button>
-            {data.config.feature_groups && <p className="text-xs">Semantic wording reviews require a labeling workflow for this feature layout. Contribution inspection and governance controls are available.</p>}
+            <button className="recs-btn-primary" disabled={busy || !reason.trim() || (action === 'review' && (row.paused || !reviewSupported))} onClick={intervene}>{busy ? 'Recording…' : 'Apply to this dimension'}</button>
+            {!reviewSupported && <p className="text-xs">Semantic wording reviews require a labeling workflow for this feature layout. Contribution inspection and governance controls are available.</p>}
+            {reviewSupported && <p className="text-xs">Review runs one manual HIGH/LOW assessment. Batch forecasts and spending limits are available through the labeling CLI. Labels are approximate coordinate interpretations, not causal explanations.</p>}
             {row.paused && <p className="text-xs">Resume before requesting review. Pausing does not hide the current label.</p>}
           </section>
         </>}

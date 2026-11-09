@@ -2005,7 +2005,10 @@ def save_label_result(
 
 
 def main():
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.embedding_generation.runtime import assert_legacy_allowed, MARKER
+    if MARKER.is_file():
+        from api.services.dimension_label_batch import main as generation_main
+        return generation_main()
     assert_legacy_allowed()
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", action="store_true", help="Generate labels using the configured LLM provider")

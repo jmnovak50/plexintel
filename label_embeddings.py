@@ -146,6 +146,15 @@ def _label_single_dimension(
 
 def label_single_dimension(dimension, top_n=10, generate_label=False, save_label=False,
                            label_provider=None, label_model=None):
+    from api.embedding_generation.runtime import MARKER
+    if MARKER.is_file():
+        from api.services.dimension_label_batch import main as generation_main
+        argv = ['--dimension',str(dimension),'--top-n',str(top_n)]
+        if generate_label:argv.append('--label')
+        if save_label:argv.append('--save-label')
+        if label_provider:argv.extend(['--label-provider',label_provider])
+        if label_model:argv.extend(['--label-model',label_model])
+        return generation_main(argv)
     with closing(connect_db()) as conn, conn:
         with conn.cursor() as cur:
             with dimension_review_guard(cur, dimension) as allowed:
@@ -169,7 +178,10 @@ def label_single_dimension(dimension, top_n=10, generate_label=False, save_label
 
 
 def main():
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.embedding_generation.runtime import assert_legacy_allowed, MARKER
+    if MARKER.is_file():
+        from api.services.dimension_label_batch import main as generation_main
+        return generation_main()
     assert_legacy_allowed()
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
@@ -197,5 +209,7 @@ def main():
 
 
 if __name__ == "__main__":
-    ensure_app_schema()
+    from api.embedding_generation.runtime import MARKER
+    if not MARKER.is_file():
+        ensure_app_schema()
     main()
