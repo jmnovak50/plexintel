@@ -64,7 +64,7 @@ def estimate_input(system, prompt):
                 method='utf8-bytes/3+32 expected; utf8-bytes/2+64 high; estimated, not exact tokenization')
 
 
-def forecast(prompts, pricing, *, system, output_limit=420, attempts=3, observations=None):
+def forecast(prompts, pricing, *, system, output_limit=1024, attempts=3, observations=None):
     observations = observations or {}
     sides = {}
     for side in ('media','user'):
@@ -110,6 +110,45 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class LabelingError(RuntimeError):
+    """Content-free diagnostic; never embeds a prompt, response or credential."""
+    def __init__(self, code, category, message, *, details=None, transient=False):
+        super().__init__(message)
+        self.code,self.category,self.details,self.transient=code,category,details or {},transient
+
+
+def failure_diagnostic(error):
+    """Inspect wrapped causes without publishing arbitrary exception messages."""
+    chain=[];current=error;seen=set();typed=None
+    while current is not None and id(current) not in seen and len(chain)<8:
+        seen.add(id(current));chain.append(type(current).__name__)
+        if typed is None and isinstance(current,LabelingError):typed=current
+        current=current.__cause__ or current.__context__
+    if typed is not None:
+        return dict(code=typed.code,category=typed.category,message=str(typed),details=typed.details,
+                    cause_types=chain,transient=typed.transient)
+    status=getattr(error,'status_code',None)
+    response=getattr(error,'response',None)
+    if status is None and response is not None:status=getattr(response,'status_code',None)
+    if type(status) is int and 100<=status<=599:
+        return dict(code=f'HTTP_{status}',category='provider',message=f'Ollama returned HTTP {status}.',
+                    details={'http_status':status},cause_types=chain,transient=status in (408,429,500,502,503,504))
+    import requests
+    if str(error).strip().lower()=='model not found':
+        return dict(code='MODEL_NOT_FOUND',category='configuration',message='Ollama model not found; verify the Label Model in Setup.',
+                    details={},cause_types=chain,transient=False)
+    if isinstance(error,requests.Timeout):code,message='PROVIDER_TIMEOUT','Ollama timed out; provider metering may be unknown.'
+    elif isinstance(error,requests.ConnectionError):code,message='PROVIDER_CONNECTION','The Ollama connection failed; provider metering may be unknown.'
+    else:code,message='LABELING_INTERNAL_ERROR','Labeling failed internally; see the recorded exception types.'
+    return dict(code=code,category='provider' if code.startswith('PROVIDER_') else 'internal',message=message,
+                details={},cause_types=chain,transient=getattr(error,'transient',True))
+
+
+def failure_signature(diagnostic):
+    details=diagnostic.get('details',{})
+    return (diagnostic['code'],tuple(details.get('missing_fields',[])),tuple(details.get('invalid_fields',[])))
+
+
 class UsageLedger:
     def __init__(self, conn, batch_id, pricing, budget=None):
         self.conn,self.batch_id,self.pricing,self.budget = conn,batch_id,pricing,budget
@@ -148,7 +187,7 @@ class UsageLedger:
             cur.execute('''UPDATE embedding_label_requests SET status=%s,input_tokens=%s,cached_input_tokens=%s,
                 output_tokens=%s,estimated_cost_usd=%s,error_code=%s,completed_at=now() WHERE request_id=%s''',
                 ('failed' if error else 'succeeded',usage['input_tokens'],usage['cached_input_tokens'],usage['output_tokens'],cost,
-                 (f'HTTP_{error.status_code}' if hasattr(error,'status_code') else type(error).__name__) if error else None,request_id))
+                 failure_diagnostic(error)['code'] if error else None,request_id))
         self.conn.commit()
         return usage
 
@@ -183,6 +222,8 @@ def usage_report(conn, batch_id=None):
         batches = cur.fetchall()
     result = dict(batches=len(batches),requests=len(rows),provider_invoice_available=False,
                   billing_limitation='USD is a configurable-price estimate, not an invoice. Missing counts stay unknown; pending/unknown requests retain conservative cost reservations.')
+    from collections import Counter
+    result['failure_codes']=dict(Counter(r['error_code'] for r in rows if r['error_code']))
     def totals(group):
         measured = [r for r in group if r['input_tokens'] is not None and r['output_tokens'] is not None]
         return dict(requests=len(group),pending=sum(r['status']=='pending' for r in group),

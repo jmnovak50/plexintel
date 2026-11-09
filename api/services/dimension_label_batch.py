@@ -13,7 +13,8 @@ from psycopg2.extras import Json, RealDictCursor
 from api.db.connection import connect_db
 from api.services.dimension_governance import dimension_review_guard, record_assessment
 from api.services.dimension_labeling import Evidence, current_context, compatible_label_sql
-from api.services.labeling_costs import Pricing, UsageLedger, BudgetExceeded, forecast, usage_report, pricing_for_model
+from api.services.labeling_costs import (Pricing, UsageLedger, BudgetExceeded, LabelingError, failure_diagnostic,
+                                       failure_signature, forecast, usage_report, pricing_for_model)
 
 
 def emit(value):
@@ -40,7 +41,7 @@ def validate_sample_counts(result, prompt):
             notes.append('Reported '+prefix.upper()+' coverage did not match the supplied examples/counts')
     if notes:
         return dict(result,label=gpt.UNCLEAR_LABEL,label_confidence='unclear',label_type='unclear',
-                    validation_status='invalid',validation_notes=list(result.get('validation_notes',[]))+notes)
+                    validation_status='invalid',sample_count_mismatch=True,validation_notes=list(result.get('validation_notes',[]))+notes)
     return result
 
 
@@ -125,6 +126,7 @@ def choose(eligible, args):
 
 def workload_forecast(eligible, selected, pricing, args, observations):
     import gpt_utils as gpt
+    args.max_output_tokens=gpt.label_output_limit(args.max_output_tokens)
     remaining = [r for r in eligible if not r['completed'] and not r['abstained']]
     common = dict(system=gpt.SYSTEM_PROMPT,output_limit=args.max_output_tokens,attempts=args.max_attempts,observations=observations)
     counts = {}
@@ -179,9 +181,11 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
     status = 'completed'
     refined = False
     started = []
+    previous_failure=None;consecutive_failures=0
     try:
         for position,row in enumerate(selected,1):
             dimension = row['dimension']
+            request_count_before=len(started)
             with conn.cursor() as cur,dimension_review_guard(cur,dimension) as allowed:
                 if not allowed:
                     summary['skipped'] += 1
@@ -201,20 +205,41 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     result = gpt.call_llm_for_label_result(row['prompt']['prompt_text'],provider='ollama',model=args.label_model,
                         dimension_mode=row['side'],max_retries=args.max_attempts,max_output_tokens=args.max_output_tokens,
                         before_attempt=before,attempt_callback=finish)
+                    result=validate_sample_counts(result,row['prompt'])
+                    if result.get('sample_count_mismatch'):
+                        raise LabelingError('LABEL_COVERAGE_MISMATCH','label_validation','Reported coverage does not match the examples sent.')
                 except BudgetExceeded:
                     status = 'budget_stopped'
                     emit(dict(event='budget_stop',batch_id=batch_id,next_dimension=dimension,consumed_estimated_usd=ledger.total_cost()))
                     break
                 except Exception as exc:
                     summary['failures'] += 1
+                    diagnostic=failure_diagnostic(exc)
+                    if len(started)>request_count_before:
+                        # A post-parse sample-count check can fail after token
+                        # metering was committed. Retain its usage and classify
+                        # the latest attempt consistently with the assessment.
+                        cur.execute("UPDATE embedding_label_requests SET status='failed',error_code=%s WHERE request_id=%s AND status='succeeded'",
+                                    (diagnostic['code'],started[-1]))
+                    signature=failure_signature(diagnostic)
+                    consecutive_failures=consecutive_failures+1 if signature==previous_failure else 1
+                    previous_failure=signature
                     result = dict(processing_error=True,validation_status='invalid',label=gpt.UNCLEAR_LABEL,
-                        error_code=type(exc).__name__,provenance=ctx,prompt_sha256=prompt_hash(row['prompt']))
+                        error_code=diagnostic['code'],error_diagnostics=diagnostic,provenance=ctx,prompt_sha256=prompt_hash(row['prompt']))
+                    outcome='provider_error' if diagnostic['category']=='provider' else 'response_error'
                     record_assessment(cur,dimension,source='manual-batch',provider='ollama',model=args.label_model,
-                        prompt=dict(row['prompt'],provenance=ctx),result=result,saved=False,outcome='provider_error',before=None,after=None)
+                        prompt=dict(row['prompt'],provenance=ctx),result=result,saved=False,outcome=outcome,before=None,after=None)
                     conn.commit()
-                    emit(dict(progress=position,total=len(selected),dimension=dimension,outcome='provider_error',error_code=type(exc).__name__))
+                    emit(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,error=diagnostic))
+                    if consecutive_failures>=args.fail_fast_threshold:
+                        status='systemic_failure_stopped'
+                        summary.update(systemic_failure=diagnostic,consecutive_identical_failures=consecutive_failures,
+                                       unprocessed_dimensions=[r['dimension'] for r in selected[position:]])
+                        emit(dict(event='systemic_failure_stop',batch_id=batch_id,error=diagnostic,
+                                  consecutive_identical_failures=consecutive_failures,unprocessed=len(selected)-position))
+                        break
                     continue
-                result=validate_sample_counts(result,row['prompt'])
+                previous_failure=None;consecutive_failures=0
                 result.update(provenance=ctx,prompt_sha256=prompt_hash(row['prompt']))
                 if args.save_label:
                     saved,outcome = persist_result(conn,ctx,row,result,args.label_model,
@@ -242,6 +267,9 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
         raise
     finally:
         conn.rollback()
+        if status=='completed' and summary['failures']:
+            status='completed_with_errors' if summary['successes'] or summary['abstentions'] else 'failed'
+        summary['status']=status
         usage = usage_report(conn,batch_id)
         count = summary['successes']+summary['abstentions']
         summary.update(usage=usage['combined'],average_tokens_per_completed_dimension=(usage['combined']['input_tokens']+usage['combined']['output_tokens'])/count if count else None,
@@ -276,8 +304,9 @@ def parser():
     p.add_argument('--label-provider','--label_provider',default=None,choices=['ollama'],help='Default: Label Provider in Setup')
     p.add_argument('--label-model','--label_model',default=None,help='Default: Ollama Label Model in Setup')
     p.add_argument('--budget-usd',type=float)
-    p.add_argument('--max-output-tokens',type=int,default=420)
+    p.add_argument('--max-output-tokens',type=int,default=None,help='Default: Label response token limit in Setup (1024)')
     p.add_argument('--max-attempts',type=int,default=3)
+    p.add_argument('--fail-fast-threshold',type=int,default=3,help='Stop after this many consecutive identical failures')
     p.add_argument('--input-price',type=float,default=None,help='USD per million input tokens; default follows the configured model')
     p.add_argument('--cached-input-price',type=float,default=None)
     p.add_argument('--output-price',type=float,default=None)
@@ -288,8 +317,10 @@ def parser():
 
 def main(argv=None):
     p = parser();args = p.parse_args(argv)
-    if args.limit<1 or not 64<=args.max_output_tokens<=4096 or not 1<=args.max_attempts<=5 or args.top_n is not None and not 1<=args.top_n<=100:
+    if args.limit<1 or args.max_output_tokens is not None and not 64<=args.max_output_tokens<=4096 or not 1<=args.max_attempts<=5 or args.top_n is not None and not 1<=args.top_n<=100:
         p.error('Use a positive batch limit, 64..4096 output tokens and 1..5 attempts')
+    if not 1<=args.fail_fast_threshold<=25:
+        p.error('Fail-fast threshold must be between 1 and 25')
     if args.budget_usd is not None and (not math.isfinite(args.budget_usd) or args.budget_usd<0):
         p.error('Budget must be finite and nonnegative')
     if args.regenerate and not (args.dimension is not None or args.dimensions):
@@ -299,6 +330,7 @@ def main(argv=None):
             conn.set_session(readonly=True)
             emit(usage_report(conn,args.batch_id));return
         import gpt_utils as gpt
+        args.max_output_tokens=gpt.label_output_limit(args.max_output_tokens)
         args.model_source='CLI override' if args.label_model else 'Setup: labeling.ollama_model'
         args.label_provider,args.label_model=gpt.resolve_label_backend(args.label_provider,args.label_model)
         if args.label_provider!='ollama':
@@ -321,7 +353,10 @@ def main(argv=None):
             if args.dry_run or not args.label or not selected:
                 return prediction
             conn.set_session(readonly=False,isolation_level='READ COMMITTED')
-            return execute(conn,evidence,eligible,selected,pricing,args,prediction)
+            result=execute(conn,evidence,eligible,selected,pricing,args,prediction)
+            if result['status'] in ('failed','completed_with_errors','systemic_failure_stopped'):
+                raise SystemExit(1)
+            return result
 
 
 if __name__=='__main__':

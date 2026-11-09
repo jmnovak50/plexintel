@@ -70,6 +70,8 @@ HIGH and LOW examples are not meaningfully separable:
 UNCLEAR / MIXED SIGNAL
 
 Return JSON only.
+Complete all checks before answering. Emit exactly ONE final JSON object, with no
+Markdown fences, preliminary objects, alternatives, or visible self-corrections.
 """.strip()
 
 USER_PROMPT_TEMPLATE = """
@@ -1162,15 +1164,111 @@ def _resolve_ollama_model_name(model: str) -> str:
                 f"Ollama model '{requested}' is ambiguous. Use one of: {match_list}"
             )
 
-    match_list = ", ".join(installed[:12]) if installed else "none"
-    raise ValueError(
-        f"Ollama model '{requested}' is not installed on {OLLAMA_HOST}. "
-        f"Available models: {match_list}"
-    )
+    from api.services.labeling_costs import LabelingError
+    raise LabelingError('MODEL_NOT_FOUND','configuration','Ollama model not found; verify the Label Model in Setup.')
+
+
+def label_output_limit(value=None):
+    limit=get_setting_value('labeling.max_output_tokens',default=1024) if value is None else value
+    if type(limit) is not int or not 64<=limit<=4096:
+        raise ValueError('Label output limit must be an integer from 64 to 4096')
+    return limit
+
+
+def _parse_strict_label_json(raw):
+    """Restore lossless response compatibility; keep complete typed field checks."""
+    from api.services.labeling_costs import LabelingError
+    if not isinstance(raw,str):
+        raise LabelingError('INVALID_JSON_TYPES','json_schema','Model response must be JSON text.',details={'invalid_fields':['response']})
+    text=raw.strip();envelope='plain_json'
+    fenced=re.fullmatch(r'```(?:json)?\s*\n?([\s\S]*?)\n?```',text,flags=re.IGNORECASE)
+    if fenced:
+        text=fenced.group(1).strip();envelope='markdown_json_fence'
+    try:candidate=json.loads(text)
+    except (ValueError,TypeError) as exc:
+        details={'response_envelope':envelope}
+        if isinstance(exc,json.JSONDecodeError):details.update(json_line=exc.lineno,json_column=exc.colno)
+        raise LabelingError('INVALID_JSON_SYNTAX','json_syntax','Model response is not one complete JSON value.',details=details) from exc
+    if not isinstance(candidate,dict):
+        raise LabelingError('INVALID_JSON_TYPES','json_schema','Label JSON must be an object.',details={'invalid_fields':['root'],'response_envelope':envelope})
+    normalized=[]
+    # These aliases were already accepted by the original label parser. Never
+    # infer a missing value; conflicting aliases are invalid rather than guessed.
+    aliases={'label_confidence':'confidence','proposed_label_type':'label_type','coverage_low_overlap_percent':'coverage_low_percent'}
+    for target,alias in aliases.items():
+        if alias not in candidate:continue
+        if target in candidate and candidate[target]!=candidate[alias]:
+            raise LabelingError('INVALID_JSON_FIELDS','json_schema','Conflicting label JSON fields.',details={'invalid_fields':[target]})
+        if target not in candidate:candidate[target]=candidate[alias];normalized.append(target)
+    required={'label','label_confidence','proposed_label_type','coverage_high_count','coverage_high_total',
+              'coverage_high_percent','coverage_low_overlap_count','coverage_low_total','coverage_low_overlap_percent','explanation','evidence'}
+    missing=sorted(required-set(candidate))
+    if missing:
+        raise LabelingError('MISSING_JSON_FIELDS','json_schema','Model response omitted required label fields.',details={'missing_fields':missing,'response_envelope':envelope})
+    invalid=[]
+    for name in ('label','explanation'):
+        if not isinstance(candidate[name],str):invalid.append(name)
+    for name,allowed in [('label_confidence',{'high','medium','low','unclear'}),('proposed_label_type',{'semantic','cluster','mechanical','unclear'})]:
+        value=candidate[name]
+        if isinstance(value,str) and value.strip().lower() in allowed:
+            candidate[name]=value.strip().lower()
+            if candidate[name]!=value:normalized.append(name)
+        else:invalid.append(name)
+    if not isinstance(candidate['evidence'],list) or len(candidate['evidence'])!=3 or not all(isinstance(s,str) for s in candidate['evidence']):
+        invalid.append('evidence')
+    for count,total in [('coverage_high_count','coverage_high_total'),('coverage_low_overlap_count','coverage_low_total')]:
+        for name in (count,total):
+            value=candidate[name]
+            # JSON Schema integer semantics include integral JSON numbers (6.0).
+            # Numeric strings, booleans and fractional values are still rejected.
+            if type(value) is float and value.is_integer():candidate[name]=int(value);normalized.append(name)
+            if type(candidate[name]) is not int:invalid.append(name)
+        if type(candidate[count]) is int and type(candidate[total]) is int and not 0<=candidate[count]<=candidate[total]:
+            invalid.extend([count,total])
+    for name in ('coverage_high_percent','coverage_low_overlap_percent'):
+        value=candidate[name]
+        if type(value) not in (int,float) or not 0<=value<=100:invalid.append(name)
+    if invalid:
+        raise LabelingError('INVALID_JSON_TYPES','json_schema','Label JSON has invalid field types, enum values or ranges.',
+                            details={'invalid_fields':sorted(set(invalid)),'response_envelope':envelope})
+    return candidate,dict(response_envelope=envelope,normalized_fields=sorted(normalized))
+
+
+def _parse_ollama_label_response(raw, prompt, dimension_mode):
+    """Cloud JSON mode may still emit Markdown or visible self-corrections.
+
+    A unique fenced object is losslessly unwrapped. Multiple objects can NEVER
+    produce a usable label: recovery is limited to unanimous abstention under
+    the existing quality gates, with exactly one report matching actual sample
+    sizes. All other multiple-answer cases remain explicit protocol failures.
+    """
+    from api.services.labeling_costs import LabelingError
+    try:
+        candidate,metadata=_parse_strict_label_json(raw)
+        return _extract_label_result_from_response(json.dumps(candidate),dimension_mode=dimension_mode),metadata
+    except LabelingError as original:
+        if original.code!='INVALID_JSON_SYNTAX' or not isinstance(raw,str):raise
+        blocks=list(re.finditer(r'```(?:json)?\s*\n([\s\S]*?)```',raw,re.IGNORECASE))
+        if not blocks:raise
+        outside=re.sub(r'```(?:json)?\s*\n([\s\S]*?)```','',raw,flags=re.IGNORECASE)
+        if '```' in outside or '{' in outside or '}' in outside:raise
+        decoded=[_parse_strict_label_json(block.group(1)) for block in blocks]
+        results=[_extract_label_result_from_response(json.dumps(c),dimension_mode=dimension_mode) for c,_ in decoded]
+        if len(results)==1:
+            return results[0],dict(decoded[0][1],response_envelope='json_fence_with_prose')
+        sizes=re.search(r'HIGH examples in this prompt = (\d+); LOW examples in this prompt = (\d+)\.',prompt)
+        matching=[] if not sizes else [r for r in results if (r.get('coverage_high_total'),r.get('coverage_low_total'))==tuple(map(int,sizes.groups()))]
+        if len(matching)==1 and all(r['label']==UNCLEAR_LABEL for r in results):
+            return matching[0],dict(response_envelope='multiple_json_fences_consistent_abstention',
+                json_documents=len(results),coverage_matched_documents=1,usable_label_recovered=False)
+        raise LabelingError('MULTIPLE_JSON_OBJECTS','json_schema','Model returned multiple label answers; no answer was selected.',
+                            details={'json_documents':len(results)}) from original
 
 
 def _call_ollama_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media",
-                                max_output_tokens: int = 420, on_usage=None, strict_json=False) -> dict:
+                                max_output_tokens: int | None = None, on_usage=None, strict_json=False) -> dict:
+    from api.services.labeling_costs import LabelingError
+    max_output_tokens=label_output_limit(max_output_tokens)
     resolved_model = _resolve_ollama_model_name(model)
     base,headers = label_ollama_endpoint()
     payload = {
@@ -1193,39 +1291,35 @@ def _call_ollama_for_label_result(prompt_text: str, model: str, dimension_mode: 
         allow_redirects=False,
     )
     if response.status_code >= 400:
-        error = RuntimeError(f'Ollama HTTP {response.status_code} for {resolved_model}')
+        error = LabelingError(f'HTTP_{response.status_code}','provider',f'Ollama returned HTTP {response.status_code}.',
+                              details={'http_status':response.status_code},transient=response.status_code in (408,429,500,502,503,504))
         error.status_code = response.status_code
         error.transient = response.status_code in (408,429,500,502,503,504)
         raise error
-    data = response.json()
+    try:data=response.json()
+    except ValueError as exc:
+        raise LabelingError('PROVIDER_INVALID_JSON','provider','Ollama returned an invalid response envelope.') from exc
+    if not isinstance(data,dict):
+        raise LabelingError('PROVIDER_INVALID_JSON','provider','Ollama returned an invalid response envelope.')
     if on_usage:
         on_usage(data)
-    if not data.get('done',True) or data.get('done_reason') == 'length':
-        error = ValueError('Ollama response exceeded the output limit or was incomplete')
-        error.transient = False
-        raise error
+    metadata={'done_reason':data.get('done_reason') if data.get('done_reason') in ('stop','length','load','unload',None) else 'other',
+              'output_token_limit':max_output_tokens,'response_characters':len(data.get('response','')) if isinstance(data.get('response',''),str) else None}
+    if data.get('done_reason')=='length':
+        raise LabelingError('OUTPUT_TRUNCATED','truncation','Ollama reached the output-token limit; increase the configured output cap.',details=metadata)
+    if not data.get('done',True):
+        raise LabelingError('INCOMPLETE_RESPONSE','provider','Ollama returned an incomplete response.',details=metadata)
+    content=data.get('response','')
     if strict_json:
-        try:
-            candidate=json.loads(data.get('response',''))
-            required={'label','label_confidence','proposed_label_type','coverage_high_count','coverage_high_total',
-                      'coverage_high_percent','coverage_low_overlap_count','coverage_low_total','coverage_low_overlap_percent','explanation','evidence'}
-            if not isinstance(candidate,dict) or not required<=set(candidate):
-                raise ValueError('Missing label JSON fields')
-            if (not isinstance(candidate['label'],str) or not isinstance(candidate['explanation'],str)
-                or candidate['label_confidence'] not in ('high','medium','low','unclear')
-                or candidate['proposed_label_type'] not in ('semantic','cluster','mechanical','unclear')):
-                raise ValueError('Invalid label JSON types or confidence')
-            if not isinstance(candidate['evidence'],list) or len(candidate['evidence'])!=3 or not all(isinstance(s,str) for s in candidate['evidence']):
-                raise ValueError('Label evidence must contain three strings')
-            for count,total in [('coverage_high_count','coverage_high_total'),('coverage_low_overlap_count','coverage_low_total')]:
-                if type(candidate[count]) is not int or type(candidate[total]) is not int or not 0<=candidate[count]<=candidate[total]:
-                    raise ValueError('Invalid coverage counts')
-        except (TypeError,ValueError) as exc:
-            error=ValueError('Ollama returned invalid label JSON')
-            error.transient=False
-            raise error from exc
-    result = _extract_label_result_from_response(data.get("response", ""), dimension_mode=dimension_mode)
+        try:result,parsed_metadata=_parse_ollama_label_response(content,prompt_text,dimension_mode)
+        except LabelingError as exc:
+            exc.details={**metadata,**exc.details}
+            raise
+        metadata.update(parsed_metadata)
+    else:
+        result = _extract_label_result_from_response(content, dimension_mode=dimension_mode)
     result['provider_model'] = data.get('model',resolved_model)
+    result['response_diagnostics']=metadata
     return result
 
 
@@ -1252,7 +1346,7 @@ def call_llm_for_label_result(
                 result = _call_openai_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
             elif max_output_tokens is not None or attempt_callback is not None:
                 result = _call_ollama_for_label_result(prompt_text,resolved_model,dimension_mode=dimension_mode,
-                    max_output_tokens=max_output_tokens or 420,on_usage=lambda data:usage.update(data),strict_json=True)
+                    max_output_tokens=label_output_limit(max_output_tokens),on_usage=lambda data:usage.update(data),strict_json=True)
             else:
                 result = _call_ollama_for_label_result(prompt_text, resolved_model, dimension_mode=dimension_mode)
         except Exception as exc:
@@ -1267,10 +1361,11 @@ def call_llm_for_label_result(
                 attempt_callback(attempt,usage,None)
             return result
 
-    error_detail = f": {last_error}" if last_error else ""
-    raise RuntimeError(
-        f"Failed to generate label via {resolved_provider}:{resolved_model}{error_detail}"
-    ) from last_error
+    from api.services.labeling_costs import LabelingError,failure_diagnostic
+    if isinstance(last_error,LabelingError):raise last_error
+    diagnostic=failure_diagnostic(last_error)
+    raise LabelingError(diagnostic['code'],diagnostic['category'],diagnostic['message'],
+                        details=diagnostic['details'],transient=diagnostic['transient']) from last_error
 
 
 def call_llm_for_label(

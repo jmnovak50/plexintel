@@ -92,7 +92,9 @@ Every dry run and normal batch assembles the actual HIGH/LOW prompts and reports
 The first forecast uses UTF-8 byte length / 3 plus 32 tokens for the complete
 system and user prompts, and byte length / 2 plus 64 for the high envelope. This
 is an approximation, not Gemma’s exact tokenizer. Expected output starts at
-256 tokens; the default output cap is 420. Expected requests allow approximately
+256 tokens; the default output cap is **1,024**, configured by **Label response
+token limit** in Setup (`labeling.max_output_tokens`) or overridden with
+`--max-output-tokens`. Expected requests allow approximately
 10% retries, rounded separately per side; the high envelope assumes all three
 attempts at the output cap. Forecasts assume no cache discount.
 
@@ -244,7 +246,10 @@ vectors, with **zero label requests or label writes**. It found 603 eligible
 media dimensions and 345 eligible user dimensions; none are already labeled.
 The first 25 in SHAP priority order contain 20 media and 5 user dimensions.
 
-Each cell below is **expected / high-use**, including the retry assumptions above:
+This historical table used the original 420-token cap. Current 1,024-token
+forecasts and the first-batch parser correction are recorded in
+[the incident report](semantic-labeling-first-batch-fix.md).
+Each cell below is **expected / high-use**, including the original retry assumptions:
 
 | Workload | Dimensions | Requests | Input tokens | Output tokens | Estimated USD |
 | --- | ---: | ---: | ---: | ---: | ---: |

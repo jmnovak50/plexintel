@@ -379,6 +379,9 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
     ),
     _setting('labeling.ollama_host','llm_embeddings','Labeling Ollama endpoint','string',default='',
              env_aliases=('OLLAMA_LABEL_HOST',),description='Optional label-only endpoint; blank reuses Ollama Host. Does not move embedding inference.'),
+    _setting('labeling.max_output_tokens','llm_embeddings','Label response token limit','integer',default=1024,
+             minimum=64,maximum=4096,env_aliases=('LABEL_MAX_OUTPUT_TOKENS',),
+             description='Maximum generated tokens per semantic labeling attempt. Forecasts and budget reservations use this cap; --max-output-tokens overrides it for one CLI run.'),
     _setting('ollama.api_key','llm_embeddings','Ollama Cloud API Key','string',secret=True,
              env_aliases=('OLLAMA_API_KEY',),description='Optional Bearer key for direct Ollama Cloud. Leave blank for a daemon with an existing signed-in cloud identity.'),
     _setting(

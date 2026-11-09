@@ -17,7 +17,8 @@ import gpt_utils as gpt
 from api.embedding_generation.contracts import fingerprint
 from api.services.dimension_labeling import Evidence, checked_vectors, validate_context
 from api.services.dimension_label_batch import choose, parser, persist_result, workload_forecast, validate_sample_counts
-from api.services.labeling_costs import Pricing, UsageLedger, BudgetExceeded, forecast, token_usage, usage_report, pricing_for_model
+from api.services.labeling_costs import (Pricing, UsageLedger, BudgetExceeded, LabelingError, failure_diagnostic,
+                                       forecast, token_usage, usage_report, pricing_for_model)
 
 
 def context_fixture():
@@ -174,7 +175,7 @@ def test_ollama_contract_bounded_output_and_usage_before_json_parse(monkeypatch)
     assert request['json']['system']==gpt.SYSTEM_PROMPT
     assert result['label_confidence']=='high' and meter.call_args.args[0]['eval_count']==99
     raw.update(done_reason='length',response='{')
-    with patch.object(gpt.requests,'post',return_value=mock),pytest.raises(ValueError):
+    with patch.object(gpt.requests,'post',return_value=mock),pytest.raises(LabelingError,match='output-token limit'):
         gpt._call_ollama_for_label_result('fictional','gemma4:31b-cloud',on_usage=meter)
     assert meter.call_count==2
 
