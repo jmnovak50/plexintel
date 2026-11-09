@@ -19,6 +19,8 @@ from gpt_utils import (
     COMBINED_EMBEDDING_DIMENSIONS,
     DEFAULT_FETCH_ITEMS,
     EMBEDDING_SIDE_DIMENSIONS,
+    MINIMUM_LABEL_COVERAGE_PERCENT,
+    MAXIMUM_LOW_OVERLAP_PERCENT,
     UNCLEAR_LABEL,
     build_dimension_prompt,
     call_llm_for_label_result,
@@ -160,6 +162,25 @@ HARD_STRUCTURAL_LABELS = {
 SOFT_STRUCTURAL_RE = re.compile(
     r"(^|[^a-z0-9])(episode|episodes|season|seasons|tv|television|movie|movies|film|films|title|titles)([^a-z0-9]|$)"
 )
+# Match a complete format description, rather than rejecting a narrative label
+# merely because it mentions a series, episode, film, or genre.
+FORMAT_MODIFIER = (
+    r"(?:episodic|serialized|serialised|standalone|individual|single|limited|anthology|"
+    r"scripted|unscripted|animated|live-action|feature(?:-length| length)?|short(?:-form)?|"
+    r"long-form|tv|television|drama|comedy|crime|action|adventure|horror|thriller|"
+    r"romantic|romance|sci-fi|science fiction|documentary)"
+)
+FORMAT_UNIT = rf"(?:{FORMAT_MODIFIER}[ -]+)*(?:series|episodes?|seasons?|sitcoms?|movies?|films?|installments?)"
+FORMAT_ONLY_RE = re.compile(rf"{FORMAT_UNIT}(?:\s*(?:and|or|/|&)\s*{FORMAT_UNIT})*", re.IGNORECASE)
+NARRATIVE_QUALIFIER_RE = re.compile(
+    r"\b(?:about|explor(?:e|es|ing)|deal(?:s|ing)? with|cent(?:er|re)(?:ed|d|s)? (?:on|around)|"
+    r"focus(?:ed|es|ing)? on|stories of)\b", re.IGNORECASE
+)
+RUNTIME_ONLY_RE = re.compile(
+    rf"(?:(?:{FORMAT_UNIT})\s+)?(?:runtime[s]?\s+)?"
+    r"(?:under|over|below|above|at least|at most|longer than|shorter than|about|around|approximately)\s+"
+    r"\d+(?:[.-]\d+)?\s+(?:minutes?|hours?)(?:\s+runtime[s]?)?", re.IGNORECASE
+)
 YEAR_LANGUAGE_RE = re.compile(
     r"(?<!\d)(?:18|19|20)\d{2}s?(?!\d)|\b(?:release|released|premiere|premiered|aired|airing)\b"
 )
@@ -278,7 +299,8 @@ def classify_label_governance(label: str, dim_type: str = "media") -> dict:
             "display_label": None,
             "needs_review": False,
         }
-    if label_lc in HARD_STRUCTURAL_LABELS:
+    if (label_lc in HARD_STRUCTURAL_LABELS or FORMAT_ONLY_RE.fullmatch(label_lc)
+            or RUNTIME_ONLY_RE.fullmatch(label_lc)):
         return {
             "label_type": "hard_structural",
             "explainable": False,
@@ -299,7 +321,9 @@ def classify_label_governance(label: str, dim_type: str = "media") -> dict:
             "display_label": None,
             "needs_review": False,
         }
-    is_soft_structural = bool(SOFT_STRUCTURAL_RE.search(label_lc))
+    is_soft_structural = bool(
+        SOFT_STRUCTURAL_RE.search(label_lc) and not NARRATIVE_QUALIFIER_RE.search(label_lc)
+    )
     if dim_type == "user" and not is_soft_structural and not is_user_preference_framed_label(raw_label):
         return {
             "label_type": "perspective_mismatch",
@@ -321,6 +345,34 @@ def classify_label_governance(label: str, dim_type: str = "media") -> dict:
         "display_label": _format_governed_display_label(raw_label, dim_type=dim_type),
         "needs_review": is_soft_structural,
     }
+
+
+def classify_validated_label_governance(
+    result: dict,
+    dim_type: str = "media",
+    *,
+    minimum_label_coverage_percent=MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent=MAXIMUM_LOW_OVERLAP_PERCENT,
+) -> dict:
+    """Keep tentative interpretations, but only validated evidence may explain.
+
+    This does not alter the generated label, confidence, evidence, or validator's
+    abstention rules. Callers with a saved prompt use its original thresholds.
+    """
+    governance = classify_label_governance(result.get("label", ""), dim_type=dim_type)
+    high = result.get("coverage_high_percent")
+    low = result.get("coverage_low_overlap_percent")
+    evidence_valid = (
+        result.get("validation_status") == "valid"
+        and result.get("label_confidence") in {"high", "medium", "low"}
+        and type(high) in (int, float) and math.isfinite(high)
+        and minimum_label_coverage_percent <= high <= 100
+        and type(low) in (int, float) and math.isfinite(low)
+        and 0 <= low <= maximum_low_overlap_percent
+        and not result.get("sample_count_mismatch")
+    )
+    governance["explainable"] = governance["explainable"] and evidence_valid
+    return governance
 
 
 def _usable_label_sql(alias: str) -> str:
@@ -1717,7 +1769,7 @@ def _csv_governance_for_label(label_result: dict, dim_type: str = "media") -> di
     label_result = validate_label_perspective(label_result, dimension_mode=dim_type)
     if not _valid_generated_label(label_result):
         return _blank_governance()
-    return classify_label_governance(label_result.get("label", ""), dim_type=dim_type)
+    return classify_validated_label_governance(label_result, dim_type=dim_type)
 
 
 def _existing_label_row_to_dict(row) -> dict | None:
@@ -1810,6 +1862,8 @@ def save_label_result(
     repair_cooldown_days: int = DEFAULT_REPAIR_COOLDOWN_DAYS,
     review_mode: bool = False,
     dim_type: str | None = None,
+    minimum_label_coverage_percent=MINIMUM_LABEL_COVERAGE_PERCENT,
+    maximum_low_overlap_percent=MAXIMUM_LOW_OVERLAP_PERCENT,
 ) -> tuple[bool, str]:
     dim_type = dim_type or get_dimension_mode(dimension)
     label_result = validate_label_perspective(label_result, dimension_mode=dim_type)
@@ -1825,7 +1879,11 @@ def save_label_result(
         return False, "invalid_label_not_saved"
 
     generated_label = label_result["label"]
-    governance = classify_label_governance(generated_label, dim_type=dim_type)
+    governance = classify_validated_label_governance(
+        label_result, dim_type=dim_type,
+        minimum_label_coverage_percent=minimum_label_coverage_percent,
+        maximum_low_overlap_percent=maximum_low_overlap_percent,
+    )
     if not existing_row:
         cur.execute(
             """

@@ -151,7 +151,9 @@ def persist_result(conn, context, row, result, model, *, regenerate=False):
         cur.execute('SELECT config_id,generation_id,contract_hash,encoder_digest FROM embedding_labels WHERE dimension=%s',(dimension,))
         previous = cur.fetchone()
         incompatible = previous is not None and tuple(previous)!=(context['config_id'],context['generation_id'],context['contract_hash'],context['encoder_digest'])
-        saved,outcome = original.save_label_result(cur,dimension,result,review_mode=regenerate or incompatible,dim_type=row['side'])
+        saved,outcome = original.save_label_result(cur,dimension,result,review_mode=regenerate or incompatible,dim_type=row['side'],
+            minimum_label_coverage_percent=row['prompt'].get('minimum_label_coverage_percent',original.MINIMUM_LABEL_COVERAGE_PERCENT),
+            maximum_low_overlap_percent=row['prompt'].get('maximum_low_overlap_percent',original.MAXIMUM_LOW_OVERLAP_PERCENT))
         if saved:
             cur.execute('''UPDATE embedding_labels SET config_id=%s,generation_id=%s,contract_hash=%s,
                 encoder_digest=%s,interpretation_model=%s,needs_review=needs_review OR %s WHERE dimension=%s''',

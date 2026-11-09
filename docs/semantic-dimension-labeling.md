@@ -154,6 +154,19 @@ storage remain in use. Valid eligible labels can appear without a mandatory huma
 approval step. Labels needing review remain ineligible through the existing
 policy. Failed or unclear attempts do not overwrite good saved labels.
 
+Governance recognizes complete format descriptions such as “episodic drama
+series” and “standalone movies and series” as structural. Runtime and release
+metadata are also ineligible. A format or genre word alone does not exclude a
+narrative interpretation such as “series about police corruption.” Structural
+interpretations remain visible in Dimension Explorer.
+
+Explanation eligibility uses the complete validated result, including confidence,
+validation status, HIGH coverage and LOW overlap against the applicable prompt
+thresholds (normally at least 70% HIGH and at most 40% LOW). A downgraded
+interpretation can remain stored with its original confidence and evidence, but
+cannot enter semantic explanations. This adds no human approval requirement and
+does not change the validator's abstention or replacement rules.
+
 New labels record feature configuration, generation, contract hash, encoder
 digest and interpretation model. Assessment history retains confidence,
 explanation, evidence, original prompt examples and validation metadata.

@@ -41,6 +41,56 @@ def response():
         evidence=['HIGH fictional titles show work rivals.','LOW fictional titles concern sailing.','Repeated career competition separates them.'])
 
 
+@pytest.mark.parametrize('label',[
+    'episodic drama series', 'standalone movies and series', 'episodic sitcoms',
+    'episodic television series', 'serialized crime series', 'limited television series',
+    'runtime over 45 minutes', 'episodes under 42 minutes', 'runtime below 90 minutes',
+    'movies about 90 minutes',
+    'movies released 1990-1999', 'feature films',
+])
+def test_format_and_release_labels_are_never_semantic_explanations(label):
+    import batch_label_embeddings as labels
+    result=gpt.validate_label_result(dict(response(),label=label))
+    governance=labels.classify_validated_label_governance(result)
+    assert governance['label_type'] in {'hard_structural','metadata'}
+    assert not labels.is_saved_label_usable_for_explanation(governance)
+
+
+@pytest.mark.parametrize('label',[
+    'workplace rivalries', 'character-driven comedy and drama', 'historical and family dramas',
+    'drama about estranged siblings', 'series about police corruption',
+    'an episode exploring parental sacrifice', 'films centered on family reconciliation',
+])
+def test_narrative_content_is_not_rejected_for_format_or_genre_words(label):
+    import batch_label_embeddings as labels
+    governance=labels.classify_validated_label_governance(gpt.validate_label_result(dict(response(),label=label)))
+    assert governance['label_type']=='semantic_candidate'
+    assert labels.is_saved_label_usable_for_explanation(governance)
+
+
+@pytest.mark.parametrize('changes',[
+    dict(coverage_high_percent=66), dict(coverage_low_overlap_percent=45),
+    dict(coverage_high_percent=None), dict(coverage_low_overlap_percent=None),
+    dict(label_confidence='unclear'),
+])
+def test_incomplete_or_downgraded_evidence_cannot_explain(changes):
+    import batch_label_embeddings as labels
+    result=gpt.validate_label_result(dict(response(),**changes))
+    before=copy.deepcopy(result)
+    assert not labels.classify_validated_label_governance(result)['explainable']
+    assert result==before  # Classification never rewrites confidence or evidence.
+
+
+def test_governance_uses_applicable_thresholds_and_complete_validation_status():
+    import batch_label_embeddings as labels
+    result=gpt.validate_label_result(dict(response(),coverage_high_percent=66),minimum_label_coverage_percent=60)
+    assert labels.classify_validated_label_governance(result,minimum_label_coverage_percent=60)['explainable']
+    assert not labels.classify_validated_label_governance(result)['explainable']
+    for status in ('downgraded','needs_review','invalid'):
+        assert not labels.classify_validated_label_governance(dict(result,validation_status=status),minimum_label_coverage_percent=60)['explainable']
+    assert labels.classify_validated_label_governance(gpt.validate_label_result(dict(response(),label_confidence='low')))['explainable']
+
+
 def test_current_context_rejects_wrong_layout_generation_encoder_and_classifier():
     config,state,context = context_fixture()
     assert context['generation_id']=='fictional-generation'
@@ -327,6 +377,43 @@ def test_sql_persistence_reuses_original_governance_and_records_provenance(sql_d
     # replacement itself requires review, instead of silently replacing it.
     with conn.cursor() as cur:
         cur.execute('SELECT label FROM embedding_labels');assert cur.fetchone()[0]=='workplace rivalries'
+
+
+@pytest.mark.parametrize('label,high,minimum,eligible',[
+    ('episodic drama series',100,70,False),('standalone movies and series',100,70,False),
+    ('medical and birth events',66,70,False),('workplace rivalries',100,70,True),
+    ('workplace rivalries',66,60,True),
+])
+def test_sql_validated_governance_controls_current_explanations(sql_db,monkeypatch,label,high,minimum,eligible):
+    conn,schema=sql_db;_,_,context=context_fixture()
+    import api.services.dimension_label_batch as batch
+    monkeypatch.setattr(batch,'current_context',lambda conn:context)
+    monkeypatch.setattr(batch,'record_assessment',Mock())
+    result=gpt.validate_label_result(dict(response(),label=label,coverage_high_percent=high),minimum_label_coverage_percent=minimum)
+    original=copy.deepcopy(result)
+    row=dict(dimension=0,side='media',prompt=dict(prompt_text='fictional HIGH LOW',
+        minimum_label_coverage_percent=minimum,maximum_low_overlap_percent=40))
+    assert persist_result(conn,context,row,result,'gemma4:31b-cloud')[0]
+    assert result==original
+    with conn.cursor() as cur:
+        cur.execute('SELECT label,explainable,interpretation_model,generation_id FROM embedding_labels WHERE dimension=0')
+        assert cur.fetchone()==(label,eligible,'gemma4:31b-cloud',context['generation_id'])
+        cur.execute("INSERT INTO recommendations VALUES('fictional-viewer',1,'2000-01-01'); INSERT INTO shap_prediction_context VALUES('fictional-viewer',1,'2000-01-01','fictional-config',%s); INSERT INTO shap_impact VALUES('fictional-viewer',1,0,1)",(context['model_sha256'],))
+        cur.execute('SELECT * FROM '+schema+".selected_embedding_labels('fictional-viewer',1)")
+        assert bool(cur.fetchall())==eligible
+        cur.execute("UPDATE embedding_labels SET generation_id='retired'")
+        cur.execute('SELECT * FROM '+schema+".selected_embedding_labels('fictional-viewer',1)")
+        assert cur.fetchall()==[]
+
+
+def test_sql_persistence_refuses_production_context_change(sql_db,monkeypatch):
+    conn,_=sql_db;_,_,context=context_fixture()
+    import api.services.dimension_label_batch as batch
+    monkeypatch.setattr(batch,'current_context',lambda conn:dict(context,generation_id='changed'))
+    with pytest.raises(ValueError,match='provenance changed'):
+        persist_result(conn,context,dict(dimension=0,side='media',prompt={}),gpt.validate_label_result(response()),'gemma4:31b-cloud')
+    with conn.cursor() as cur:
+        cur.execute('SELECT count(*) FROM embedding_labels');assert cur.fetchone()[0]==0
 
 
 def test_dry_run_reads_forecasts_without_cloud_or_label_writes(monkeypatch):

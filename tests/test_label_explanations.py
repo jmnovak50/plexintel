@@ -1090,6 +1090,9 @@ class LabelRepairSaveTests(unittest.TestCase):
             "label": "preference for workplace comedy",
             "label_type": "semantic",
             "validation_status": "valid",
+            "label_confidence": "medium",
+            "coverage_high_percent": 100,
+            "coverage_low_overlap_percent": 0,
         }
 
         saved, status = batch_label_embeddings.save_label_result(
@@ -1131,6 +1134,9 @@ class LabelRepairSaveTests(unittest.TestCase):
             "label": "prestige drama",
             "label_type": "semantic",
             "validation_status": "valid",
+            "label_confidence": "medium",
+            "coverage_high_percent": 100,
+            "coverage_low_overlap_percent": 0,
         }
 
         saved, status = batch_label_embeddings.save_label_result(
@@ -1173,6 +1179,9 @@ class LabelRepairSaveTests(unittest.TestCase):
             "label": "prestige tv drama episodes",
             "label_type": "semantic",
             "validation_status": "valid",
+            "label_confidence": "medium",
+            "coverage_high_percent": 100,
+            "coverage_low_overlap_percent": 0,
         }
 
         saved, status = batch_label_embeddings.save_label_result(
@@ -2048,6 +2057,8 @@ class ReviewCsvExportTests(unittest.TestCase):
         label_result = {
             "label": "non-comedy mysteries",
             "label_confidence": "medium",
+            "coverage_high_percent": 100,
+            "coverage_low_overlap_percent": 0,
             "proposed_label_type": "semantic",
             "label_type": "semantic",
             "validation_status": "valid",
