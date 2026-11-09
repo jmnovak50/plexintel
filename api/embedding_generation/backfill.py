@@ -206,7 +206,14 @@ def _run_modality(store,gid,kind,cache,ollama,*,batch_size,progress):
                 if attempted:
                     store.log_inference(gid,kind,key,digest,'interrupted',dict(error='KeyboardInterrupt',attempt_elapsed_seconds=time.perf_counter()-request_start,server_completion='unknown'));store.conn.commit()
                 raise
-            progress(dict(stage=kind,item_key=key,error=error,reused=bool(inherited)))
+            message=dict(stage=kind,item_key=key,error=error,reused=bool(inherited))
+            if kind=='media_text':
+                metadata=row['source'].get('metadata')
+                metadata=metadata if isinstance(metadata,dict) else {}
+                show=metadata.get('show_context')
+                message.update(title=metadata.get('episode_title') or metadata.get('title') or row['source'].get('title'),
+                    show_title=show.get('title') if isinstance(show,dict) else None,media_type=metadata.get('media_type'))
+            progress(message)
     return store.counts(gid)
 
 

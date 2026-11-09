@@ -356,7 +356,7 @@ class PipelineRunTests(unittest.TestCase):
                 self.returncode = 0
                 return 0
 
-        connections = [FakeConnection([]), FakeConnection([{"cancel_requested": False}])]
+        connections = [FakeConnection([]), FakeConnection([]), FakeConnection([{"cancel_requested": False}])]
         fake_proc = FakeProc()
 
         def assert_connections_closed(_seconds):

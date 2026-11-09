@@ -145,8 +145,9 @@ def event_details(row):
     try:event = json.loads(row.get('stdout_tail') or '')
     except (ValueError, TypeError):return dict(row)
     if not isinstance(event, dict) or event.get('event') != EVENT:return dict(row)
+    interrupted = row.get('status') in {'failed','cancelled','skipped'} and event.get('status') == 'started'
     return dict(row, label=STAGE_NAMES.get(row['stage_key'], row['stage_key']),
                 metrics=clean_metrics(event.get('metrics') or {}),
-                duration_seconds=event.get('elapsed_seconds'), message=event.get('message'),
-                timing_active=event.get('timing_active', False), observed_at=event.get('at'),
+                duration_seconds=event.get('elapsed_seconds'), message=row.get('stderr_tail') if interrupted else event.get('message'),
+                timing_active=not interrupted and event.get('timing_active', False), observed_at=event.get('at'),
                 detail_source='structured_events')

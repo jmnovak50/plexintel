@@ -32,6 +32,9 @@ interface PipelineStage {
 }
 
 interface PipelineRun {
+  embedded_media?: { rating_key: string; title: string | null; show_title: string | null; media_type: string | null }[];
+  embedded_media_total?: number;
+  embedded_media_note?: string;
   run_id: number;
   delivery_type: string;
   schedule_key: string | null;
@@ -453,6 +456,18 @@ export default function AdminPipeline() {
                               )}
                               {run.publication_id && <p className="mb-3 break-all text-xs text-slate-600">Publication: {run.publication_id}</p>}
                               {run.stage_detail_note && <p className="mb-3 text-sm text-slate-600">{run.stage_detail_note}</p>}
+                              {run.embedded_media && (
+                                <details className="mb-4" open={run.embedded_media_total !== undefined && run.embedded_media_total <= 10}>
+                                  <summary className="cursor-pointer text-sm text-slate-700">Titles embedded: {run.embedded_media_total}</summary>
+                                  <p className="my-2 text-xs text-slate-500">{run.embedded_media_note}</p>
+                                  <ul className="max-h-64 space-y-1 overflow-auto text-sm text-slate-800">
+                                    {run.embedded_media.map(media => <li key={media.rating_key}>
+                                      {media.show_title ? `${media.show_title} — ` : ""}{media.title || `Title ${media.rating_key}`}
+                                      {media.media_type ? ` (${media.media_type})` : ""}
+                                    </li>)}
+                                  </ul>
+                                </details>
+                              )}
                               <div className="space-y-3">
                                 {(run.stage_details || run.stages || []).map((st) => (
                                   <div key={st.stage_id} className="recs-surface-muted p-3">
@@ -488,7 +503,7 @@ export default function AdminPipeline() {
                                 ))}
                               </div>
                               {run.stage_details && (
-                                <details className="mt-4"><summary className="cursor-pointer text-sm text-slate-600">Worker logs and original execution records</summary>
+                                <details className="mt-4"><summary className="cursor-pointer text-sm text-slate-600">Worker logs (updated live; full output retained on disk)</summary>
                                   {run.stages.filter(st => st.stage_key === "embeddinggemma2_generation").map(st => (
                                     <pre key={st.stage_id} className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900 p-3 text-xs text-slate-100">{st.stderr_tail || ""}{"\n"}{st.stdout_tail || ""}</pre>
                                   ))}

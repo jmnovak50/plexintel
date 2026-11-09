@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import pwd
+import re
 import signal
 import shlex
 import subprocess
@@ -204,6 +205,34 @@ def _read_output_tail(handle, max_len: int = LOG_TAIL_MAX) -> str:
     return _tail(data.decode("utf-8", errors="replace"), max_len)
 
 
+def _live_output_tail(handle, env, max_len=LOG_TAIL_MAX):
+    """Read without moving the offset shared with the writing child."""
+    size = os.fstat(handle.fileno()).st_size
+    text = os.pread(handle.fileno(), min(size, max_len * 4), max(0, size - max_len * 4)).decode('utf-8', errors='replace')
+    for key, value in env.items():
+        if value and re.search(r'(?:^|_)(?:TOKEN|API_KEY|APIKEY|SECRET|PASSWORD)(?:_|$)', key, re.I):
+            text = text.replace(value, '[REDACTED]')
+    text = re.sub(r'(?i)(apikey|api_key|x-plex-token|password|token)=([^&\s]+)', r'\1=[REDACTED]', text)
+    text = re.sub(r'(?i)(authorization\s*:\s*(?:bearer|basic)\s+)\S+', r'\1[REDACTED]', text)
+    return _tail(text, max_len)
+
+
+@contextmanager
+def _retained_stage_output(run_id, stage_key, stream):
+    directory = get_pipeline_log_path().parent
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w+b', dir=directory,
+            prefix=f'pipeline-run-{run_id}-{stage_key}-', suffix=f'.{stream}.log', delete=False) as handle:
+        yield handle  # Mode 0600; retained even if the backend or child is killed.
+
+
+def _save_live_output(run_id, stage_key, stdout, stderr):
+    with _pipeline_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''UPDATE public.pipeline_run_stages SET stdout_tail=%s,stderr_tail=%s
+                WHERE run_id=%s AND stage_key=%s''', (stdout, stderr, run_id, stage_key))
+
+
 def _process_exists(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
@@ -253,6 +282,22 @@ def get_pipeline_lock_path() -> Path:
     if raw_path:
         return Path(raw_path).expanduser()
     return DEFAULT_PIPELINE_LOCK_PATH
+
+
+def _pipeline_execution_locked():
+    """A controller can still be finalizing after its child exits."""
+    try:
+        with get_pipeline_lock_path().open('rb') as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # Uncertain ownership must not turn a live run into a failure.
 
 
 def _append_pipeline_log(text: str) -> None:
@@ -526,11 +571,14 @@ def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
             f"""
             SELECT
                 run_id,
+                status,
+                delivery_type,
+                last_heartbeat_at,
                 current_pid,
                 current_stage_key,
                 cancel_requested_at
             FROM public.pipeline_runs
-            WHERE status = 'cancel_requested'
+            WHERE (status = 'cancel_requested' OR (status='started' AND current_pid IS NOT NULL))
             {run_filter}
             ORDER BY cancel_requested_at ASC NULLS FIRST
             """,
@@ -543,6 +591,30 @@ def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
         rid = int(row["run_id"])
         pid = row.get("current_pid")
         stage_key = row.get("current_stage_key") or "active stage"
+        if row.get('status') == 'started':
+            # Heartbeat age alone never means failure: a live worker may be busy.
+            if (str(row.get('delivery_type', '')).startswith('content_discovery_')
+                    or not _is_older_than(row.get('last_heartbeat_at'), 30)
+                    or _process_exists(pid) or _pipeline_execution_locked()):
+                continue
+            note = ('Worker process disappeared before completion (for example after a backend restart). '
+                    'Completion time is unknown; this record was reconciled now. '
+                    'Existing production checkpoints are retained for manual resume.')
+            with conn.cursor() as cur:
+                cur.execute('''UPDATE public.pipeline_runs SET status='failed',completed_at=now(),
+                    current_pid=NULL,current_stage_key=NULL,notes=CONCAT_WS(E'\\n',NULLIF(notes,''),%s)
+                    WHERE run_id=%s AND status='started' AND current_pid=%s
+                      AND last_heartbeat_at IS NOT DISTINCT FROM %s RETURNING run_id''',
+                    (note, rid, pid, row.get('last_heartbeat_at')))
+                if cur.fetchone() is None:
+                    continue  # The controller advanced after our observation.
+                cur.execute('''UPDATE public.pipeline_run_stages SET
+                    status=CASE WHEN status='started' THEN 'failed' ELSE 'skipped' END,
+                    completed_at=now(),stderr_tail=CONCAT_WS(E'\\n',NULLIF(stderr_tail,''),%s)
+                    WHERE run_id=%s AND status IN ('started','pending')''', (note, rid))
+            reconciled_count += 1
+            _log_run_event(rid, note)
+            continue
         cancel_requested_at = row.get("cancel_requested_at")
 
         if not pid:
@@ -722,8 +794,8 @@ def _run_stage_process(
         else _env_float(PIPELINE_CANCEL_GRACE_SECONDS_ENV, DEFAULT_CANCEL_GRACE_SECONDS)
     )
 
-    with tempfile.TemporaryFile(mode="w+b") as stdout_file:
-        with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+    with _retained_stage_output(run_id, stage_key, 'stdout') as stdout_file:
+        with _retained_stage_output(run_id, stage_key, 'stderr') as stderr_file:
             started_at = datetime.now().astimezone()
             started_monotonic = time.monotonic()
             proc = subprocess.Popen(
@@ -739,6 +811,18 @@ def _run_stage_process(
             observer = PipelineStageObserver(run_id) if stage_key == 'embeddinggemma2_generation' else None
             reader = EventReader(stdout_file) if observer else None
             observation_failed = False
+            last_output = None
+
+            def retain_live_output():
+                nonlocal last_output
+                try:
+                    output = (_live_output_tail(stdout_file, env), _live_output_tail(stderr_file, env))
+                    if output != last_output:
+                        _save_live_output(run_id, stage_key, *output)
+                        last_output = output
+                except Exception as exc:
+                    # Log observation must not strand a child or disable cancellation.
+                    _log_run_event(run_id, 'Live log observation unavailable: '+type(exc).__name__)
 
             def observe(*, drain=False):
                 nonlocal observation_failed
@@ -757,11 +841,13 @@ def _run_stage_process(
             _log_run_event(
                 run_id,
                 f"child launched stage={stage_key} child_pid={proc.pid} "
-                f"start_timestamp={started_at.isoformat(timespec='seconds')}",
+                f"start_timestamp={started_at.isoformat(timespec='seconds')} "
+                f"stdout_log={stdout_file.name} stderr_log={stderr_file.name}",
             )
 
             while proc.poll() is None:
                 observe()
+                retain_live_output()
                 if _read_pipeline_cancel_requested(run_id):
                     cancelled = True
                     _signal_process_group(proc, signal.SIGTERM)
@@ -786,6 +872,7 @@ def _run_stage_process(
                 proc.wait()
 
             observe(drain=True)
+            retain_live_output()
             if observer and not observation_failed:
                 try:observer.finish(cancelled=cancelled, returncode=proc.returncode)
                 except Exception as exc:_log_run_event(run_id, 'Stage observation incomplete: '+type(exc).__name__)
@@ -800,8 +887,8 @@ def _run_stage_process(
                 stderr_file=stderr_file,
                 exit_code=proc.returncode,
             )
-            stdout = _read_output_tail(stdout_file)
-            stderr = _read_output_tail(stderr_file)
+            stdout = _live_output_tail(stdout_file, env)
+            stderr = _live_output_tail(stderr_file, env)
             _log_run_event(
                 run_id,
                 f"child completed stage={stage_key} child_pid={proc.pid} "
