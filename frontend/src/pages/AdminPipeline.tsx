@@ -503,7 +503,7 @@ export default function AdminPipeline() {
                                 ))}
                               </div>
                               {run.stage_details && (
-                                <details className="mt-4"><summary className="cursor-pointer text-sm text-slate-600">Worker logs (updated live; full output retained on disk)</summary>
+                                <details className="mt-4"><summary className="cursor-pointer text-sm text-slate-600">Worker log tail and original execution records</summary>
                                   {run.stages.filter(st => st.stage_key === "embeddinggemma2_generation").map(st => (
                                     <pre key={st.stage_id} className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900 p-3 text-xs text-slate-100">{st.stderr_tail || ""}{"\n"}{st.stdout_tail || ""}</pre>
                                   ))}
