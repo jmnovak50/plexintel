@@ -65,7 +65,7 @@ def code_hash():
                 'frontend/src/pages/AdminDimensions.tsx')],
             *[ROOT/name for name in ('fetch_tautulli_data.py','ollama_embeddings.py','build_user_embeddings.py','build_training_data.py','train_model.py','score_model.py','label_embeddings.py','batch_label_embeddings.py')]]
     paths += [ROOT/'gpt_utils.py', ROOT/'api/db/migrations/005_semantic_dimension_labeling.sql',
-              *[ROOT/'api/services'/name for name in ('dimension_labeling.py','dimension_label_batch.py','labeling_costs.py','dimension_governance.py','dimension_review_worker.py')]]
+              *[ROOT/'api/services'/name for name in ('dimension_labeling.py','dimension_label_batch.py','dimension_label_export.py','labeling_costs.py','dimension_governance.py','dimension_review_worker.py')]]
     digest=hashlib.sha256()
     for path in paths:
         digest.update(str(path.relative_to(ROOT)).encode())

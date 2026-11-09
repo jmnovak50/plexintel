@@ -226,7 +226,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     signature=failure_signature(diagnostic)
                     consecutive_failures=consecutive_failures+1 if signature==previous_failure else 1
                     previous_failure=signature
-                    result = dict(processing_error=True,validation_status='invalid',label=gpt.UNCLEAR_LABEL,
+                    result = dict(processing_error=True,validation_status='invalid',label=gpt.UNCLEAR_LABEL,batch_id=batch_id,
                         error_code=diagnostic['code'],error_diagnostics=diagnostic,provenance=ctx,prompt_sha256=prompt_hash(row['prompt']))
                     outcome='provider_error' if diagnostic['category']=='provider' else 'response_error'
                     record_assessment(cur,dimension,source='manual-batch',provider='ollama',model=args.label_model,
@@ -242,7 +242,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                         break
                     continue
                 previous_failure=None;consecutive_failures=0
-                result.update(provenance=ctx,prompt_sha256=prompt_hash(row['prompt']))
+                result.update(provenance=ctx,prompt_sha256=prompt_hash(row['prompt']),batch_id=batch_id)
                 if args.save_label:
                     saved,outcome = persist_result(conn,ctx,row,result,args.label_model,
                         regenerate=args.regenerate or args.selection_mode=='review')
@@ -314,11 +314,31 @@ def parser():
     p.add_argument('--output-price',type=float,default=None)
     p.add_argument('--usage',action='store_true',help='Read accumulated usage without inference')
     p.add_argument('--batch-id')
+    p.add_argument('--export-csv','--export_csv',help='Read-only Excel CSV snapshot; optionally restrict with --batch-id UUID')
     return p
 
 
 def main(argv=None):
     p = parser();args = p.parse_args(argv)
+    if args.export_csv is not None:
+        if not args.export_csv.strip():
+            p.error('--export-csv requires a filename')
+        if args.label or args.save_label or args.regenerate or args.usage:
+            p.error('--export-csv is read-only; omit --label, --save-label, --regenerate and --usage')
+        if args.batch_id is not None:
+            from uuid import UUID
+            try: args.batch_id=str(UUID(args.batch_id))
+            except ValueError: p.error('--batch-id must be a UUID')
+        from api.services.dimension_label_export import export_csv
+        with closing(connect_db()) as conn:
+            conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
+            try:
+                report=export_csv(conn,args.export_csv,batch_id=args.batch_id,dim_type=args.dim_type,
+                                  dimensions=args.dimensions or ([args.dimension] if args.dimension is not None else None))
+            except ValueError as exc:
+                p.error(str(exc))
+            emit(report)
+            return report
     if args.limit<1 or args.max_output_tokens is not None and not 64<=args.max_output_tokens<=4096 or not 1<=args.max_attempts<=5 or args.top_n is not None and not 1<=args.top_n<=100:
         p.error('Use a positive batch limit, 64..4096 output tokens and 1..5 attempts')
     if not 1<=args.fail_fast_threshold<=25:

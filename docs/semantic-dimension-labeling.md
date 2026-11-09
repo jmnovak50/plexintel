@@ -21,6 +21,49 @@ Run from the production checkout with its existing model-host environment:
 cd /home/jmnovak/projects/plexintel
 ```
 
+Export the accumulated current-generation results without inference or database
+writes (both `--export-csv` and the original `--export_csv` spelling work):
+
+```bash
+mkdir -p -m 700 .secrets/label-exports
+plexenv/bin/python batch_label_embeddings.py --export-csv .secrets/label-exports/current-generation.csv
+```
+
+Export one batch, including failures, abstentions and unprocessed dimensions:
+
+```bash
+plexenv/bin/python batch_label_embeddings.py --export-csv .secrets/label-exports/batch.csv --batch-id 02ffcd06-acb4-4e84-9be8-a2d9450a4065
+```
+
+The snapshot includes one latest applicable assessment/request outcome per
+dimension, plus current saved labels with no assessment. `label` describes that
+attempt; `final_saved_label` and `final_*` describe the current saved state, which
+can remain valid after a subsequent failed attempt. Batch exports use the saved
+state recorded at assessment time, explicitly marked by `final_state_scope`.
+Generated-label eligibility is computed under the current governance rules;
+historical saved-state columns preserve what the batch recorded. No history is
+rewritten. SHAP relevance columns describe the current matching model/prediction
+context, not a reconstructed historical snapshot.
+
+Existing assessments are linked to batches only when model, dimension, request
+records and timestamps identify a unique batch (`legacy_time_window`); uncertain
+links remain unassigned. New assessments store the batch UUID directly. Batch
+rows aggregate all request attempts for a dimension, including failed retries;
+`failed_attempt_count` and `request_error_codes` retain their failure information.
+Snapshot costs cover only the exported latest outcomes, not lifetime usage.
+Missing token counts stay blank; partial known sums are flagged by
+`token_totals_are_complete=False`. Estimated USD uses the existing ledger and
+can include reservations for pending/unmetered requests, shown by `cost_basis`.
+
+Exports retain applicable original CSV column names and add batch, usage,
+outcome and provenance fields. Files use UTF-8 with a BOM, quoted fields and
+Excel-compatible newlines; formula-like text receives a protective apostrophe.
+Files are created/replaced atomically with mode 0600. Evidence remains private
+local data; raw prompts, prompt examples and arbitrary exception messages are
+excluded. CSV files and `.secrets/` are ignored by Git. `--dim-type` and explicit
+dimension filters apply; the labeling batch `--limit` does not truncate exports.
+Do not combine export with labeling, saving, regeneration or usage-report flags.
+
 Forecast the first 25 eligible dimensions in existing SHAP priority order,
 without inference or label writes:
 

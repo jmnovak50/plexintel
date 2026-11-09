@@ -474,10 +474,14 @@ def test_sql_complete_batch_accounting_persistence_and_budget_stop(sql_db,monkey
     with conn.cursor() as cur:
         cur.execute('SELECT COUNT(*) FROM embedding_labels');labels=cur.fetchone()[0]
         cur.execute('SELECT status FROM embedding_label_batches');status=cur.fetchone()[0]
+        cur.execute("SELECT result->>'batch_id' FROM embedding_dimension_assessments")
+        assessment_batches=cur.fetchall()
     if stop_at_budget:
         assert labels==0 and status=='budget_stopped' and usage['requests']==0
+        assert assessment_batches==[]
         cloud.assert_not_called()
     else:
+        assert assessment_batches==[(summary['batch_id'],)]
         assert labels==1 and status=='completed' and usage['requests']==1
         assert usage['combined']['input_tokens']==1000 and usage['combined']['cached_input_tokens']==500
         assert summary['successes']==1 and choose(eligible,args)==[]
