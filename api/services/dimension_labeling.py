@@ -171,4 +171,3 @@ class Evidence:
         frame = self.user_prepared['valid_items']
         result['valid_count'] = len(frame[frame['username'].isin(usernames)]) if not frame.empty else 0
         return result
-
