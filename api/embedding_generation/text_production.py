@@ -11,6 +11,8 @@ from psycopg2.extras import Json
 from .contracts import (ContractError, text_contract, text_only, fingerprint, canonical,
                         TEXT_FEATURE_VERSION, LABEL_VERSION, modality_contract, vector)
 from .model import dataset, verify_bundle
+from .recovery import IDENTITY_POLICY
+from .features import SUPERVISION_POLICY
 
 
 def dimensions(bundle, sha):
@@ -65,6 +67,7 @@ def adopt(store,source_id,*,reason,progress=lambda value:None):
             or row['prediction_at']!=previous['prediction_at'] or row['label_available_at']!=previous['label_available_at']):
             raise ContractError('Text feature/label parity with evaluated B failed')
     bundle=dict(old,generation_id=gid,contract_hash=fingerprint(spec),feature_version=TEXT_FEATURE_VERSION,
+                identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
                 dataset_hash=summary['dataset_hash'],media_serializer=spec['media_serializer'],
                 adopted_from=dict(generation_id=source_id,artifact='text_model.pkl',sha256=original['sha256'],
                                   contract_hash=g['contract_hash'],reason=reason))
@@ -75,6 +78,7 @@ def adopt(store,source_id,*,reason,progress=lambda value:None):
     evidence=store.artifact(source_id,'evaluation.json');evaluation=json.loads(bytes(evidence['data']))
     evaluation=deepcopy(evaluation)
     evaluation.update(chronological=evaluation['ablations']['B_text_only']['chronological'],
+        identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
         show_grouped=dict(metrics=evaluation['ablations']['B_text_only']['show_grouped']),
         selection=dict(variant='B_text_only',reason=reason,source_generation=source_id,
                        evaluation_sha256=evidence['sha256'],model_sha256=original['sha256'],
@@ -119,8 +123,8 @@ def physical_verification(store,gid,live_schema='public'):
 def train_text(store,gid,*,progress=lambda value:None,monitor=None):
     """Future text-only refits; no posterior/artwork dependencies or legacy controls."""
     from .model import populations,fit,fit_compare
-    from .features import Vocabulary,chronological_split,feature_row
-    from .contracts import utc
+    from .features import Vocabulary,chronological_split,feature_row,show_heldout_plan
+    from .recovery import CanonicalTitles, IDENTITY_POLICY
     from contextlib import nullcontext
     with monitor.span('training_data') if monitor else nullcontext():
         g,media,watches,_=populations(store,gid)
@@ -129,30 +133,30 @@ def train_text(store,gid,*,progress=lambda value:None,monitor=None):
     with monitor.span('train_model') if monitor else nullcontext():
         train,test,boundary=chronological_split(rows)
         chronological=fit_compare(train,test,include_poster=False,progress=progress)
-        groups=sorted({r['show_key'] for r in rows},key=lambda k:hashlib.sha256(k.encode()).hexdigest())
-        heldout=set(groups[:max(1,len(groups)//5)])
-        excluded={k for k,m in media.items() if str(m['source'].get('show_rating_key') or k) in heldout}
+        identity=CanonicalTitles(media)
+        group_train,group_test,excluded,group_skips=show_heldout_plan(g,media,rows,identity=identity,boundary=boundary)
         a=[];b=[]
-        for row in rows:
-            is_test=row['show_key'] in heldout and utc(row['prediction_at'])>=boundary
-            is_train=row['show_key'] not in heldout and utc(row['prediction_at'])<boundary and utc(row['label_available_at'])<boundary
-            if not(is_test or is_train):continue
-            value=feature_row(g,media,watches,g['snapshot']['events'],row['owner'],row['media_key'],row['prediction_at'],excluded_keys=excluded)
-            if value is None:continue
-            value.update({k:row[k] for k in ('label','sample_weight','prediction_at','label_available_at')})
+        for row,is_test in [(r,False) for r in group_train]+[(r,True) for r in group_test]:
+            value=feature_row(g,media,watches,g['snapshot']['events'],row['owner'],row['media_key'],row['prediction_at'],excluded_keys=excluded,identity=identity)
+            if value is None:raise ContractError('Grouped feature support differs from training plan')
+            value.update({k:row[k] for k in ('label','sample_weight','prediction_at','label_available_at',
+                'label_source','observation_kind','feedback_provenance','auxiliary_feedback_count','auxiliary_feedback_conflicts')})
             (b if is_test else a).append(value)
         grouped=fit_compare(a,b,include_poster=False,progress=progress)
         vocab=Vocabulary.fit(rows,include_poster=False);model=fit(rows,vocab,progress=progress)
         bundle=dict(generation_id=gid,contract_hash=g['contract_hash'],encoder=g['contract']['encoder'],variant='text_only',
             feature_version=g['contract']['features'],label_version=LABEL_VERSION,dimensions=[768,768],ordering='media_text,user',
+            identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
             vocabulary=vocab.specification(),feature_names=vocab.names,model=model,dataset_hash=summary['dataset_hash'],
             media_serializer=g['contract']['media_serializer'])
         out=io.BytesIO();joblib.dump(bundle,out)
         sha=store.artifact(gid,'model.pkl',out.getvalue(),{k:v for k,v in bundle.items() if k!='model'})
         evaluation=dict(chronological=chronological,show_grouped=dict(metrics=grouped),
+            show_grouped_support_skips=group_skips,
             ablations=dict(B_text_only=dict(chronological=chronological,show_grouped=grouped)),
             feature_policy=g['contract']['features'],label_policy=LABEL_VERSION,model_sha256=sha,
-            comparison='Text-only prospective chronological and show-heldout validation. No new image ablation.')
+            identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
+            comparison='Text-only chronological and show-heldout validation, including retrospective explicit supervision. Submission cutoff does not establish first viewing. No new image ablation.')
         store.artifact(gid,'evaluation.json',canonical(evaluation).encode(),dict(contract_hash=g['contract_hash']))
         store.artifact(gid,'dimensions.json',canonical(dimensions(bundle,sha)).encode(),dict(contract_hash=g['contract_hash']))
         store.conn.commit();return evaluation

@@ -17,7 +17,8 @@ def fixture_data(encoder):
     media={}
     for key,index in [('1',0),('2',1),('3',2)]:
         media[key]=dict(generation_id='new',status='succeeded',embedding=unit(index),input_hash=key,
-            source=dict(duration=100000,metadata=metadata(dict(type='movie',title=key,year=2000,duration=100000))))
+            source=dict(duration=100000,media_type='movie',plex_guid='plex://movie/fixture-'+key,
+                        metadata=metadata(dict(type='movie',title=key,year=2000,duration=100000))))
     watches={k:dict(generation_id='new',status='succeeded',embedding=unit(int(k)-1),input_hash=k) for k in ('1','2','3')}
     def event(k,day,played=80):
         stamp=f'2020-01-{day:02}T00:00:00+00:00'

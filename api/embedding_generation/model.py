@@ -11,7 +11,8 @@ from pgvector import Vector
 from psycopg2 import sql
 from psycopg2.extras import Json
 from .contracts import ContractError,FEATURE_VERSION,LABEL_VERSION,canonical,cosine,fingerprint,utc,text_only,TEXT_FEATURE_VERSION
-from .features import Vocabulary,ProfileContext,chronological_split,feature_row,training_rows
+from .features import Vocabulary,ProfileContext,chronological_split,feature_row,training_rows,unseen_candidate_keys,SUPERVISION_POLICY
+from .recovery import CanonicalTitles, IdentityError, IDENTITY_POLICY
 from .backfill import runtime_seconds,generation_writer
 from .evaluation import evaluate
 
@@ -56,6 +57,14 @@ def dataset(store,gid,*,progress=lambda value:None):
     summary=dict(rows=len(rows),skips=skips,feature_version=g['contract']['features'],label_version=LABEL_VERSION,
         dataset_hash=hasher.hexdigest(),hash_format='canonical-rows-jsonl/1.0',watch_coverage=g['snapshot']['watch_coverage'],
         retrospective_metadata_assumption='Captured descriptive metadata (current Plex or explicitly approved stored history); point-in-time metadata snapshots do not exist. Mutable ratings/popularity/outcomes are excluded.')
+    if text_mode:
+        from collections import Counter
+        summary.update(identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
+            label_sources=dict(Counter(r['label_source'] for r in rows)),
+            observation_kinds=dict(Counter(r['observation_kind'] for r in rows)),
+            feedback_provenance=dict(Counter(r['feedback_provenance'] for r in rows)),
+            auxiliary_feedback_conflicts=sum(r['auxiliary_feedback_conflicts'] for r in rows),
+            retrospective_feedback_assumption='Submission cutoff is not actual first viewing. Unrecorded earlier exposure may influence later history; legacy actions lack original semantic provenance.')
     store.artifact(gid,'dataset.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
     return rows,summary
 
@@ -277,8 +286,16 @@ def load_bundle(store,gid):
     g=store.generation(gid);artifact=store.artifact(gid,'model.pkl')
     bundle=joblib.load(io.BytesIO(bytes(artifact['data'])))
     result=verify_bundle(bundle,g['contract'],g['contract_hash'],gid=gid)
+    if text_only(g['contract']) and bundle.get('identity_policy')!=IDENTITY_POLICY:
+        raise ContractError('Canonical identity policy requires a controlled refit; stale model cannot score')
+    if text_only(g['contract']) and bundle.get('supervision_policy')!=SUPERVISION_POLICY:
+        raise ContractError('Retrospective supervision policy requires a controlled refit; stale model cannot score')
     data=json.loads(bytes(store.artifact(gid,'dataset.json')['data']))
     if data['dataset_hash']!=bundle['dataset_hash']:raise ContractError('Model dataset provenance mismatch')
+    if text_only(g['contract']) and data.get('identity_policy')!=IDENTITY_POLICY:
+        raise ContractError('Dataset canonical identity policy differs from the model')
+    if text_only(g['contract']) and data.get('supervision_policy')!=SUPERVISION_POLICY:
+        raise ContractError('Dataset supervision policy differs from the model')
     return result
 
 
@@ -291,15 +308,27 @@ def score(store,gid,*,batch_size=128,shap_items_per_user=750,progress=lambda val
     owners=[r['item_key'] for r in store.items(gid,'user')]
     store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table('predictions')),(gid,))
     from contextlib import nullcontext
-    total=0;skipped=0;contexts=0;contributions=0
+    total=0;skipped=0;contexts=0;contributions=0;identity_users_skipped=0;quarantine_users=0;quarantine_groups_count=0
+    identity=CanonicalTitles(media) if text_only(g['contract']) else None
     for owner_index,owner in enumerate(owners):
         progress(dict(stage='shadow-scoring',expected=len(owners),completed=owner_index,failed=0))
         with monitor.span('score_model') if monitor else nullcontext():
             events=[e for e in g['snapshot']['events'] if e['username']==owner]
-            context=ProfileContext(g,media,watches,events,owner,as_of);by_key=defaultdict(list)
+            try:
+                from .eligibility_quarantine import profile_exclusions
+                quarantined_groups=set()
+                candidate_keys=unseen_candidate_keys(media,events,g['snapshot']['feedback'],owner,identity,
+                                                     quarantined_groups=quarantined_groups) if identity else list(media)
+                excluded=profile_exclusions(identity,quarantined_groups) if quarantined_groups else set()
+                context=ProfileContext(g,media,watches,events,owner,as_of,excluded_keys=excluded,identity=identity)
+            except IdentityError:
+                identity_users_skipped+=1;continue
+            quarantine_users+=bool(quarantined_groups);quarantine_groups_count+=len(quarantined_groups)
+            by_key=defaultdict(list)
             for event in events:by_key[str(event['rating_key'])].append(event)
             rows=[]
-            for key,parent in media.items():
+            for key in candidate_keys:
+                parent=media[key]
                 if parent['source']['metadata']['media_type'] not in ('movie','episode'):continue
                 f=feedback.get((owner,key))
                 if f and f.get('suppress') and f.get('feedback')!='interested':continue
@@ -309,7 +338,8 @@ def score(store,gid,*,batch_size=128,shap_items_per_user=750,progress=lambda val
                     if ratio>=.5 or runtime and event.get('played_seconds') is not None and event['played_seconds']/runtime>=.5:
                         watched=True;break
                 if watched:continue
-                row=feature_row(g,media,watches,events,owner,key,as_of,posters=posters,context=context)
+                row=feature_row(g,media,watches,events,owner,key,as_of,posters=posters,context=context,
+                                excluded_keys=excluded,identity=identity)
                 if row is None:skipped+=1;continue
                 rows.append(row)
             predictions=[]
@@ -331,10 +361,16 @@ def score(store,gid,*,batch_size=128,shap_items_per_user=750,progress=lambda val
                     (gid,owner,row['media_key'],probability,cosine(row['embedding'][:768],row['embedding'][-768:]),index+1,Json(shap)))
         total+=len(predictions)
     summary=dict(predictions=total,users=len(owners),limited_history_skips=skipped,generation_id=gid,
+        unresolved_identity_users=identity_users_skipped,
         contract_hash=g['contract_hash'],model_sha256=store.artifact(gid,'model.pkl')['sha256'],
         total_scoring_seconds=time.perf_counter()-started,
         shap_contexts=contexts,shap_contributions=contributions,
         shap_dimensions=('text 0:768, semantic user 768:1536; raw margin' if text_only(g['contract']) else 'text 0:768, poster 768:1536, semantic user 1536:2304; raw margin; no legacy labels reused'))
+    if identity:
+        from .eligibility_quarantine import QUARANTINE_POLICY
+        summary.update(identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
+                       unresolved_identity_media=len(identity.errors),quarantine_policy=QUARANTINE_POLICY,
+                       series_quarantine_users=quarantine_users,series_quarantine_groups=quarantine_groups_count)
     store.artifact(gid,'scoring.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
     if monitor:
         monitor.done('score_model',users=len(owners),predictions=total,limited_history_skips=skipped)

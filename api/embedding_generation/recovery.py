@@ -9,6 +9,133 @@ from .contracts import ContractError, fingerprint, metadata,utc,MEDIA_VERSION,PO
 from .io import SourceError
 
 POLICY = 'verified-plex-or-stored-history/1.0'
+IDENTITY_POLICY = 'verified-canonical-unseen-title/1.0'
+
+
+class IdentityError(ContractError):
+    """Identity evidence is missing, conflicting or insufficient for unseen scoring."""
+
+
+def stable_identity(kind, guid):
+    """The typed, exact GUID rule used by recovery and predictive isolation.
+
+    External GUIDs remain typed by media kind. A series GUID can never identify
+    an episode. No title, season-name or fuzzy matching is permitted.
+    """
+    if kind not in ('movie', 'episode', 'season', 'show') or not isinstance(guid, str):
+        raise IdentityError('Missing typed stable GUID')
+    if guid != guid.strip() or not guid:
+        raise IdentityError('Invalid stable GUID')
+    if guid.startswith('plex://'):
+        prefix = 'plex://' + kind + '/'
+        if not guid.startswith(prefix) or not guid[len(prefix):] or '/' in guid[len(prefix):]:
+            raise IdentityError('Plex GUID kind differs from media kind')
+    elif not any(guid.startswith(prefix) and guid[len(prefix):]
+                 for prefix in ('imdb://', 'tmdb://', 'tvdb://')):
+        raise IdentityError('Unsupported stable GUID')
+    return kind + ':' + guid
+
+
+class CanonicalTitles:
+    """Read-only index over prepared sources, including verified recovery lineage.
+
+    This consumes Resolver's evidence; it never discovers replacement records.
+    An uncertain member poisons its entire GUID group rather than becoming an
+    independent title. Unknown history must not be silently discarded by callers.
+    """
+    def __init__(self, media):
+        self.media = media
+        self.identities, self.errors, self.members, self.preferred = {}, {}, {}, {}
+        edges = {}
+        for key, row in media.items():
+            source = row['source']
+            kind = source.get('media_type') or source.get('metadata', {}).get('media_type')
+            try:
+                identity = stable_identity(kind, source.get('plex_guid'))
+            except IdentityError as exc:
+                self.errors[key] = str(exc)
+                continue
+            self.identities[key] = identity
+            self.members.setdefault(identity, set()).add(key)
+            try:
+                if source.get('metadata', {}).get('media_type') != kind:
+                    raise IdentityError('Source/metadata media kind conflict')
+                if source.get('metadata_origin') or source.get('_metadata_recovery'):
+                    validate_origin(source, key)
+                    origin = source['metadata_origin']
+                    raw = origin['raw_inputs']['media']
+                    if stable_identity(raw.get('type'), raw.get('guid')) != identity:
+                        raise IdentityError('Recovery/source stable identity conflict')
+                    component = origin['components']['media']
+                    if component['source'] == 'plex-guid-replacement':
+                        if (component.get('identity_rule') != 'exact-stable-guid'
+                            or component.get('verified_guid') != source.get('plex_guid')):
+                            raise IdentityError('Title replacement lacks exact stable GUID evidence')
+                        edges[key] = str(component['resolved_key'])
+                if kind == 'episode':
+                    for field in ('season_number', 'episode_number'):
+                        value = source.get('metadata', {}).get(field)
+                        if type(value) is not int or value < 0 or source.get(field, value) != value:
+                            raise IdentityError('Missing/conflicting episode numbering')
+            except (ContractError, KeyError, TypeError) as exc:
+                self.errors[key] = 'Invalid identity evidence: ' + str(exc)
+
+        for identity, keys in self.members.items():
+            try:
+                if any(k in self.errors for k in keys):
+                    raise IdentityError('Conflicting member in stable GUID group')
+                for key in keys:
+                    if key in edges and (edges[key] not in keys or edges[key] == key):
+                        raise IdentityError('Replacement target missing or conflicting')
+                terminals = set()
+                for key in keys:
+                    seen = set()
+                    while key in edges:
+                        if key in seen:
+                            raise IdentityError('Cyclic replacement lineage')
+                        seen.add(key)
+                        key = edges[key]
+                    terminals.add(key)
+                if edges.keys() & keys and len(terminals) != 1:
+                    raise IdentityError('Ambiguous replacement destination')
+                if identity.startswith('episode:'):
+                    signatures = set()
+                    for key in keys:
+                        src = media[key]['source']
+                        show = str(src.get('show_rating_key'))
+                        show_src = media.get(show, {}).get('source', {})
+                        parent = stable_identity('show', show_src.get('plex_guid'))
+                        signatures.add((parent, src['metadata']['season_number'], src['metadata']['episode_number']))
+                    if len(signatures) != 1:
+                        raise IdentityError('Episode GUID has conflicting series/episode context')
+                self.preferred[identity] = sorted(terminals)[0]
+            except IdentityError as exc:
+                for key in keys:
+                    self.errors[key] = str(exc)
+        self.signature = fingerprint(dict(policy=IDENTITY_POLICY, identities=self.identities,
+                                          errors=self.errors, preferred=self.preferred))
+
+    def identity(self, key):
+        key = str(key)
+        if key in self.errors or key not in self.identities:
+            raise IdentityError(self.errors.get(key, 'Identity absent from prepared media'))
+        return self.identities[key]
+
+    def aliases(self, key):
+        return self.members[self.identity(key)]
+
+    def representative(self, key):
+        return self.preferred[self.identity(key)]
+
+    def expand(self, keys):
+        return {alias for key in keys for alias in self.aliases(key)}
+
+    def group(self, key):
+        identity = self.identity(key)
+        source = self.media[str(key)]['source']
+        if identity.startswith('episode:'):
+            return self.identity(str(source['show_rating_key']))
+        return identity
 
 
 def context_keys(sources,keys):
@@ -128,7 +255,11 @@ class Resolver:
         except SourceError as exc:
             if str(exc)!='HTTP_404':raise
             candidates=[]
-            if guid and guid.startswith(('plex://','imdb://','tmdb://','tvdb://')):
+            try:
+                identity = stable_identity(kind, guid)
+            except IdentityError:
+                identity = None
+            if identity:
                 candidates=[r for r in self._catalog() if r['type']==kind and r['guid']==guid]
             if not candidates and kind=='season' and source.get('show_rating_key') is not None and source.get('season_number') is not None:
                 parent,parent_origin=self.get(source['show_rating_key'])

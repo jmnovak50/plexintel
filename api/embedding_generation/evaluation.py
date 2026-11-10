@@ -55,6 +55,12 @@ def evaluate(classifier,vocabulary,rows,*,training_keys=()):
     for name,predicate in segments.items():
         indices=[i for i,r in enumerate(rows) if predicate(r)]
         result['segments'][name]=probability_metrics([rows[i] for i in indices],p[indices])
+    result['supervision_segments']={}
+    for field in ('label_source','observation_kind','feedback_provenance'):
+        result['supervision_segments'][field]={}
+        for value in sorted({r[field] for r in rows if field in r}):
+            indices=[i for i,r in enumerate(rows) if r.get(field)==value]
+            result['supervision_segments'][field][value]=probability_metrics([rows[i] for i in indices],p[indices])
     result['zero_history_users']='Not scored: no semantic profile. Excluded counts appear in dataset/scoring coverage.'
     import xgboost as xgb
     values=classifier.get_booster().predict(xgb.DMatrix(vocabulary.transform(rows),feature_names=vocabulary.names,nthread=2),pred_contribs=True)[:,:-1]

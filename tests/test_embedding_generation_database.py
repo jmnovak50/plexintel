@@ -159,7 +159,8 @@ def synthetic_ready(store,encoder,*,missing_keys=()):
     for index in range(1,121):
         raw=dict(type='movie',title=f'Fixture {index}',duration=6000000,year=2000+index%20,
                  Genre=[{'tag':'Comedy' if index%2 else 'Drama'}])
-        media.append(dict(rating_key=index,media_type='movie',duration=6000000,metadata=metadata(raw)))
+        media.append(dict(rating_key=index,media_type='movie',plex_guid=f'plex://movie/fixture-{index}',
+                          duration=6000000,metadata=metadata(raw)))
         day=base+timedelta(days=index*3)
         events.append(dict(watch_id=index,rating_key=index,username='fixture',watched_at=day.isoformat(),
             available_at=(day+timedelta(hours=2)).isoformat(),observed_at='2026-01-01T00:00:00+00:00',
