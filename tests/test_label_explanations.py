@@ -1976,7 +1976,7 @@ class ReviewCsvExportTests(unittest.TestCase):
                                             "call_llm_for_label_result",
                                         ) as call_llm:
                                             with redirect_stdout(io.StringIO()):
-                                                batch_label_embeddings.main()
+                                                batch_label_embeddings._legacy_main()
 
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
@@ -2111,7 +2111,7 @@ class ReviewCsvExportTests(unittest.TestCase):
                                             return_value=label_result,
                                         ):
                                             with redirect_stdout(io.StringIO()):
-                                                batch_label_embeddings.main()
+                                                batch_label_embeddings._legacy_main()
 
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))

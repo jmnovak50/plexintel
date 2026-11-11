@@ -83,3 +83,23 @@ class Plex:
                 raise SourceError('metadata_identity_mismatch')
             self.metadata_cache[key] = records[0]
         return self.metadata_cache[key]
+
+
+class FrozenPlex:
+    """Tiny replay adapter for an explicitly complete, private source capture."""
+    def __init__(self,payload):
+        if payload.get('complete_catalog') is not True:
+            raise ContractError('Replay needs an explicitly complete Plex catalog')
+        self.rows={str(r['ratingKey']):r for r in payload['metadata']}
+        self.inventory=payload['catalog']
+        if len(self.rows)!=len(payload['metadata']):raise ContractError('Duplicate captured metadata keys')
+        self.catalog_keys={str(r['ratingKey']) for r in self.inventory}
+
+    def catalog(self):
+        return iter(self.inventory)
+
+    def metadata(self,key):
+        key=str(key)
+        if key in self.rows:return self.rows[key]
+        if key in self.catalog_keys:raise SourceError('incomplete_recorded_metadata')
+        raise SourceError('HTTP_404')

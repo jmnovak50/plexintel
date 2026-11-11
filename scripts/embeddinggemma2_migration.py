@@ -542,9 +542,7 @@ def daily(store,config,*,pipeline_lock_held=False):
     result=text_daily(store,config,collect=collect,plex_factory=source.plex,cache=CACHE,
         publication_lock=publication_lock,pipeline_lock_held=pipeline_lock_held,
         progress=lambda value:print(canonical(value),flush=True))
-    from api.services.pipeline_labeling import run_after_publication
-    run_after_publication(store,result,publication_lock=publication_lock,pipeline_lock_held=pipeline_lock_held,
-                          output=lambda value:print(canonical(value),flush=True))
+    result['summary']['semantic_labeling']=dict(status='skipped',reason='Retired migration worker does not label')
     summary=result['summary']
     print(canonical(dict(run_id=result['run_id'],generation_id=result['generation_id'],promotion_id=result['promotion_id'],
         verification_only=bool(result.get('verification_only')),outcome='verification_only' if result.get('verification_only') else 'daily_completed',
@@ -577,6 +575,7 @@ def yield_to_existing_pipeline():
 
 
 if __name__=='__main__':
+    raise SystemExit('Retired: use scripts/predictive_pipeline.py; migration state is not part of the restored architecture')
     try:main()
     except KeyboardInterrupt:
         print('Interrupted by operator; committed checkpoints are preserved. Resume the SAME stage and generation ID.',file=sys.stderr)

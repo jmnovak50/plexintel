@@ -4,11 +4,12 @@ No permanent staging populations or activation records. Readers keep seeing the
 last committed recommendations throughout fitting and staging.
 """
 from contextlib import contextmanager
-import hashlib,json,os,subprocess,tempfile,tarfile,io
+import hashlib,json,os,subprocess,tempfile,tarfile,shutil
+from psycopg2.extensions import parse_dsn,make_dsn
 from pathlib import Path
 import numpy as np
 from pgvector import Vector
-from psycopg2 import sql
+from psycopg2 import sql,OperationalError,InterfaceError
 from psycopg2.extras import Json,execute_values
 from .artifacts import current_config,load_model
 from .contracts import ContractError,fingerprint
@@ -31,9 +32,11 @@ def writer_lock(conn):
     try:yield
     finally:
         if not conn.closed:
-            conn.rollback()
-            with conn.cursor() as cur:cur.execute('SELECT pg_advisory_unlock(%s,%s)',LOCK)
-            conn.commit()
+            try:
+                conn.rollback()
+                with conn.cursor() as cur:cur.execute('SELECT pg_advisory_unlock(%s,%s)',LOCK)
+                conn.commit()
+            except (OperationalError,InterfaceError):pass  # Session loss releases its locks.
 
 
 def source_signature(conn):
@@ -83,6 +86,7 @@ def stage_training(conn,rows):
             diagnostics={key:r[key] for key in ('canonical_identity','identity_policy','supervision_policy','prediction_at',
                 'label_available_at','observation_kind','feedback_provenance','auxiliary_feedback_count','auxiliary_feedback_conflicts')}
             diagnostics['dependency_hash']=fingerprint(r['dependencies'])
+            diagnostics['feature_sha256']=hashlib.sha256(np.asarray(r['embedding'],dtype='<f4').tobytes()).hexdigest()
             values.append((index,r['owner'],int(r['media_key']),r['label'],Vector(r['embedding']),','.join(r['genres']),
                 '',','.join(r['directors']),r['year'],r['played_duration'],r['media_duration'],r['engagement_ratio'],
                 r['season_number'],r['episode_number'],r['watch_sim'],r['sample_weight'],r['label_source'],r['feedback_value'],Json(diagnostics)))
@@ -138,6 +142,14 @@ def verify(conn,config,*,prepared=False):
         for table in ('training_data','recommendations','shap_impact','shap_prediction_context'):
             cur.execute(sql.SQL('SELECT count(*) FROM {}').format(sql.Identifier('pg_temp' if prepared else 'public',
                 'prepared_'+table if prepared else table)));counts[table]=cur.fetchone()[0]
+        cur.execute(f'SELECT embedding::text,diagnostics FROM {prefix}training_data')
+        while True:
+            batch=cur.fetchmany(128)
+            if not batch:break
+            for raw,diagnostics in batch:
+                values=np.asarray(json.loads(raw),dtype='<f4')
+                if values.shape!=(1536,) or not np.isfinite(values).all() or not diagnostics or hashlib.sha256(values.tobytes()).hexdigest()!=diagnostics.get('feature_sha256'):
+                    raise ContractError('Training feature materialization differs from prepared vector')
         cur.execute(f'''SELECT count(*) FROM {prefix}recommendations WHERE predicted_probability NOT BETWEEN 0 AND 1''')
         if cur.fetchone()[0]:raise ContractError('Invalid prediction probabilities')
         cur.execute(f'''SELECT username,diagnostics->>'canonical_identity',count(*) FROM {prefix}training_data
@@ -149,19 +161,35 @@ def verify(conn,config,*,prepared=False):
     return counts
 
 
+def file_sha256(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda:source.read(1024*1024),b''):digest.update(chunk)
+    return digest.hexdigest()
+
+
+def pg_connection(conn):
+    # Never put a database password in a subprocess argument or command log.
+    values=parse_dsn(conn.dsn);environment=dict(os.environ)
+    secret=values.pop('password',None)
+    if secret is not None:environment['PGPASSWORD']=secret
+    return make_dsn(**values),environment
+
+
 def backup(conn,directory):
     """Keep exactly one ordinary backup of derived tables and the previous model."""
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     previous=current_config(conn)
     with tempfile.TemporaryDirectory(dir=directory,prefix='.backup-') as work:
         work=Path(work);dump=work/'published.dump'
+        dsn,environment=pg_connection(conn)
         with dump.open('wb') as target:
-            command=['pg_dump','--dbname',conn.dsn,'--format=custom','--data-only','--no-owner','--no-privileges']
+            command=['pg_dump','--dbname',dsn,'--format=custom','--data-only','--no-owner','--no-privileges']
             for table in PUBLISHED:
                 if table!='embedding_feature_config':command+=['--table','public.'+table]
-            process=subprocess.run(command,stdout=target,stderr=subprocess.PIPE,timeout=300)
+            process=subprocess.run(command,stdout=target,stderr=subprocess.PIPE,timeout=300,env=environment)
             if process.returncode:raise ContractError('Last-good database backup failed; publication cancelled')
-        manifest=dict(config=previous,dump_sha256=hashlib.sha256(dump.read_bytes()).hexdigest(),
+        manifest=dict(config=previous,dump_sha256=file_sha256(dump),
             counts=verify(conn,previous) if previous.get('architecture')=='public-text-predictor/1.0' else None)
         if previous.get('architecture')=='public-text-predictor/1.0':
             model=Path(previous['model_path']).read_bytes()
@@ -190,9 +218,10 @@ def restore_last_good(conn,directory):
             for name in archive.getnames():
                 member=archive.getmember(name)
                 if not member.isfile():raise ContractError('Unexpected recovery archive member')
-                with archive.extractfile(member) as source:(work/name).write_bytes(source.read())
+                with archive.extractfile(member) as source,(work/name).open('wb') as target:
+                    shutil.copyfileobj(source,target,length=1024*1024)
         manifest=json.loads((work/'manifest.json').read_text());config=manifest['config']
-        if hashlib.sha256((work/'published.dump').read_bytes()).hexdigest()!=manifest['dump_sha256']:
+        if file_sha256(work/'published.dump')!=manifest['dump_sha256']:
             raise ContractError('Recovery dump checksum mismatch')
         model=(work/'model.joblib').read_bytes()
         if hashlib.sha256(model).hexdigest()!=config['model_sha256']:raise ContractError('Recovery model checksum mismatch')
@@ -200,9 +229,10 @@ def restore_last_good(conn,directory):
         fd,temp=tempfile.mkstemp(dir=Path(config['model_path']).parent,prefix='.restore-model-')
         with os.fdopen(fd,'wb') as handle:handle.write(model);handle.flush();os.fsync(handle.fileno())
         os.replace(temp,config['model_path']);load_model(config)
+        dsn,environment=pg_connection(conn)
         restored=work/'restored.sql'
         with restored.open('wb') as output:
-            process=subprocess.run(['pg_restore','--data-only','--file=-',str(work/'published.dump')],stdout=output,stderr=subprocess.PIPE,timeout=300)
+            process=subprocess.run(['pg_restore','--data-only','--file=-',str(work/'published.dump')],stdout=output,stderr=subprocess.PIPE,timeout=300,env=environment)
         if process.returncode:raise ContractError('Recovery dump cannot be decoded')
         before=work/'before.sql';after=work/'after.sql'
         with conn.cursor() as cur:
@@ -215,8 +245,8 @@ def restore_last_good(conn,directory):
                 checks.append(f"IF (SELECT count(*) FROM public.{table})<>{int(count)} THEN RAISE EXCEPTION 'Recovery population mismatch'; END IF;")
             after.write_text(update+'\nDO $$ BEGIN '+' '.join(checks)+' END $$;')
         conn.commit()  # Keep only the session writer lock while psql owns the restore transaction.
-        process=subprocess.run(['psql','--dbname',conn.dsn,'--no-psqlrc','--single-transaction','--set','ON_ERROR_STOP=1',
-            '--file',str(before),'--file',str(restored),'--file',str(after)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=300)
+        process=subprocess.run(['psql','--dbname',dsn,'--no-psqlrc','--single-transaction','--set','ON_ERROR_STOP=1',
+            '--file',str(before),'--file',str(restored),'--file',str(after)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=300,env=environment)
         if process.returncode:raise ContractError('Recovery transaction failed; prior publication remains committed')
         counts=verify(conn,config);conn.commit()
         if counts!=manifest['counts']:raise ContractError('Recovery verification differs from backup')
@@ -239,15 +269,26 @@ def publish(conn,config,expected_config,expected_source,*,backup_directory,failp
             failpoint('backed_up')
             for table in PUBLISHED:
                 if table=='embedding_feature_config':continue
-                cur.execute(sql.SQL('DELETE FROM public.{}').format(sql.Identifier(table)))
-                cur.execute(sql.SQL('INSERT INTO public.{} SELECT * FROM {}').format(sql.Identifier(table),sql.Identifier('prepared_'+table)))
+                if table in {value[0] for value in TABLES.values()}:
+                    key=next(value[1] for value in TABLES.values() if value[0]==table)
+                    live=sql.Identifier('public',table);staged=sql.Identifier('pg_temp','prepared_'+table);column=sql.Identifier(key)
+                    cur.execute(sql.SQL('DELETE FROM {} live WHERE NOT EXISTS(SELECT 1 FROM {} staged WHERE staged.{}=live.{})').format(live,staged,column,column))
+                    cur.execute(sql.SQL('UPDATE {} live SET embedding=staged.embedding,provenance=staged.provenance FROM {} staged WHERE live.{}=staged.{} AND (live.embedding IS DISTINCT FROM staged.embedding OR live.provenance IS DISTINCT FROM staged.provenance)').format(live,staged,column,column))
+                    cur.execute(sql.SQL('INSERT INTO {} SELECT staged.* FROM {} staged WHERE NOT EXISTS(SELECT 1 FROM {} live WHERE live.{}=staged.{})').format(live,staged,live,column,column))
+                else:
+                    cur.execute(sql.SQL('DELETE FROM public.{}').format(sql.Identifier(table)))
+                    cur.execute(sql.SQL('INSERT INTO public.{} SELECT * FROM {}').format(sql.Identifier(table),sql.Identifier('prepared_'+table)))
                 failpoint(table)
             cur.execute('UPDATE public.embedding_feature_config SET active=false WHERE active')
             cur.execute('''INSERT INTO public.embedding_feature_config(config_id,metadata,active) VALUES(%s,%s,true)
                 ON CONFLICT(config_id) DO UPDATE SET metadata=EXCLUDED.metadata,active=true''',(config['config_id'],Json(config)))
             if verify(conn,config)!=expected:raise ContractError('Public materialization differs from prepared counts')
             failpoint('verified')
-        conn.commit()
+        try:conn.commit()
+        except (OperationalError,InterfaceError):
+            raise ContractError('Publication commit outcome is uncertain; run read-only verify before retrying') from None
     except BaseException:
-        conn.rollback();raise
+        try:conn.rollback()
+        except (OperationalError,InterfaceError):pass
+        raise
     return expected

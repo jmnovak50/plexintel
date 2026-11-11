@@ -137,106 +137,14 @@ class PipelineRetentionTests(unittest.TestCase):
 
 
 class PipelineStageTests(unittest.TestCase):
-    def setUp(self):
-        # These tests exercise an explicitly verified legacy installation.
-        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
-        active.start();self.addCleanup(active.stop)
-
-    def test_build_pipeline_stages_uses_label_batch_setting_defaults(self):
-        with patch.object(pipeline_service, "get_setting_value", side_effect=lambda _key, default=None: default):
-            stages = pipeline_service.build_pipeline_stages()
-
-        batch_label = dict(stages)["batch_label"]
-        self.assertIn("batch_label_embeddings.py", batch_label[1])
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "eligible")
-        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
-        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
-        self.assertIn("--label", batch_label)
-        self.assertIn("--save_label", batch_label)
-        self.assertIn("--export_csv", batch_label)
-        self.assertNotIn("--coverage_share", batch_label)
-        self.assertNotIn("--refresh_existing", batch_label)
-
-    def test_build_pipeline_stages_can_disable_labeling(self):
-        values = {
-            "pipeline.labeling_enabled": False,
-        }
-
-        with patch.object(
-            pipeline_service,
-            "get_setting_value",
-            side_effect=lambda key, default=None: values.get(key, default),
-        ):
-            stages = pipeline_service.build_pipeline_stages()
-
-        self.assertNotIn("batch_label", dict(stages))
-
-    def test_build_pipeline_stages_can_refresh_existing_labels_from_settings(self):
-        values = {
-            "pipeline.labeling_enabled": True,
-            "pipeline.label_selection_mode": "importance",
-            "pipeline.label_batch_limit": 25,
-            "pipeline.label_dim_type": "media",
-            "pipeline.refresh_existing_labels": True,
-        }
-
-        with patch.object(
-            pipeline_service,
-            "get_setting_value",
-            side_effect=lambda key, default=None: values.get(key, default),
-        ):
-            stages = pipeline_service.build_pipeline_stages()
-
-        batch_label = dict(stages)["batch_label"]
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "importance")
-        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
-        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "media")
-        self.assertNotIn("--coverage_share", batch_label)
-        self.assertIn("--refresh_existing", batch_label)
-
-    def test_build_pipeline_stages_passes_coverage_share_for_hybrid_only(self):
-        values = {
-            "pipeline.labeling_enabled": True,
-            "pipeline.label_selection_mode": "hybrid",
-            "pipeline.label_batch_limit": 40,
-            "pipeline.label_dim_type": "user",
-            "pipeline.label_coverage_share": 0.55,
-        }
-
-        with patch.object(
-            pipeline_service,
-            "get_setting_value",
-            side_effect=lambda key, default=None: values.get(key, default),
-        ):
-            stages = pipeline_service.build_pipeline_stages()
-
-        batch_label = dict(stages)["batch_label"]
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "hybrid")
-        self.assertEqual(batch_label[batch_label.index("--coverage_share") + 1], "0.55")
-        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "40")
-        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "user")
-
-    def test_build_pipeline_stages_does_not_use_review_mode_for_scheduled_labeling(self):
-        values = {
-            "pipeline.labeling_enabled": True,
-            "pipeline.label_selection_mode": "review",
-            "pipeline.label_batch_limit": 25,
-            "pipeline.label_dim_type": "all",
-            "pipeline.label_coverage_share": 0.55,
-        }
-
-        with patch.object(
-            pipeline_service,
-            "get_setting_value",
-            side_effect=lambda key, default=None: values.get(key, default),
-        ):
-            stages = pipeline_service.build_pipeline_stages()
-
-        batch_label = dict(stages)["batch_label"]
-        self.assertEqual(batch_label[batch_label.index("--selection_mode") + 1], "eligible")
-        self.assertEqual(batch_label[batch_label.index("--limit") + 1], "25")
-        self.assertEqual(batch_label[batch_label.index("--dim_type") + 1], "all")
-        self.assertNotIn("--coverage_share", batch_label)
+    def test_daily_dispatch_does_not_consult_generation_or_label_authorization_before_worker(self):
+        with patch.object(pipeline_service,'get_setting_value',side_effect=AssertionError('No early labeling policy read')):
+            stages=pipeline_service.build_pipeline_stages()
+        self.assertEqual(len(stages),1)
+        key,command=stages[0]
+        self.assertEqual(key,'predictive_daily')
+        self.assertTrue(command[1].endswith('/scripts/predictive_pipeline.py'))
+        self.assertEqual(command[2:],['daily','--execute'])
 
 
 class PipelineRefreshStatusTests(unittest.TestCase):

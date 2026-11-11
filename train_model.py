@@ -548,7 +548,7 @@ def train_and_evaluate(
     importance_plot_path="feature_importance_plot.png",
     experiment_label="production no-direct-actor model",
 ):
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.predictive.retired import assert_legacy_allowed
     assert_legacy_allowed()
     from sklearn.model_selection import train_test_split
 
@@ -686,6 +686,8 @@ def train_and_evaluate(
 
 
 if __name__ == "__main__":
+    from api.predictive.retired import assert_legacy_allowed
+    assert_legacy_allowed()
     import argparse
 
     parser = argparse.ArgumentParser(description="Train the PlexIntel XGBoost recommendation model.")

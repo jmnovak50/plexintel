@@ -4,6 +4,7 @@ No embedding inference, model fitting or scoring. Full vectors are read once per
 manual batch; coordinate values and their canonical physical lineage are checked.
 """
 import hashlib
+import re
 import json
 
 from psycopg2.extras import RealDictCursor
@@ -12,52 +13,44 @@ from api.services.dimension_config import get_active_config, feature_groups
 
 
 def compatible_label_sql(label='saved', config='c'):
-    return f"""({config}.metadata->>'generation_id' IS NULL OR (
-        {config}.metadata->>'ordering'='media_text,user'
+    return f"""({config}.metadata->>'architecture'='public-text-predictor/1.0'
+        AND {config}.metadata->>'ordering'='media_text,user'
         AND {label}.config_id={config}.config_id
-        AND {label}.generation_id={config}.metadata->>'generation_id'
+        AND {label}.feature_space_id={config}.metadata->>'feature_space_id'
         AND {label}.contract_hash={config}.metadata->>'contract_hash'
-        AND {label}.encoder_digest={config}.metadata->>'encoder_digest'))"""
+        AND {label}.encoder_digest={config}.metadata->>'encoder_digest')"""
 
 
-def validate_context(config, state, control):
-    from api.embedding_generation.contracts import fingerprint
-    expected = [dict(name='media_text',start=0,width=768),dict(name='user',start=768,width=768)]
-    if (feature_groups(config) != expected or config.get('ordering') != 'media_text,user'
-        or config.get('embedding_model') != 'embeddinggemma-2'
-        or config.get('generation_id') != state['generation_id']
-        or control != state['generation_id']
-        or config.get('contract_hash') != state['contract_hash']
-        or fingerprint(state['contract']) != state['contract_hash']
-        or config.get('model_sha256') != state['model_sha256']
-        or config.get('encoder_digest') != state['contract']['encoder']['digest']
-        or state['contract'].get('ordering') != 'media_text,user'
-        or state['contract']['encoder']['name'] != 'embeddinggemma-2:latest'):
-        raise ValueError('Labeling requires the verified active Gemma 2 text/user generation')
-    expected_names = [f'{g["name"]}_{i}' for g in expected for i in range(768)]
-    if config.get('feature_names',[])[:1536] != expected_names:
-        raise ValueError('Dimension coordinates differ from the active model feature layout')
-    return dict(config_id=config['config_id'],generation_id=state['generation_id'],
-                contract_hash=state['contract_hash'],encoder_digest=config['encoder_digest'],
-                encoder_model=state['contract']['encoder']['name'],
-                media_serializer=state['contract']['media_serializer'],
-                profile=state['contract']['profile'],model_sha256=state['model_sha256'],
-                publication_id=state.get('publication_id'),interpretation='Approximate coordinate interpretation; not a causal explanation')
+def validate_context(config, state=None, control=None):
+    from api.predictive.contracts import fingerprint
+    from api.predictive.features import SUPERVISION_POLICY
+    from api.predictive.recovery import IDENTITY_POLICY
+    expected=[dict(name='media_text',start=0,width=768),dict(name='user',start=768,width=768)]
+    contract=config.get('contract') or {}
+    if (config.get('architecture')!='public-text-predictor/1.0' or feature_groups(config)!=expected
+        or config.get('ordering')!='media_text,user' or config.get('embedding_model')!='embeddinggemma-2'
+        or config.get('feature_space_id')!=fingerprint(contract) or config.get('contract_hash')!=fingerprint(contract)
+        or config.get('encoder_digest')!=contract.get('encoder',{}).get('digest')
+        or contract.get('encoder',{}).get('name')!='embeddinggemma-2:latest'
+        or not re.fullmatch('[a-f0-9]{64}',str(config.get('model_sha256','')))
+        or config.get('identity_policy')!=IDENTITY_POLICY or config.get('supervision_policy')!=SUPERVISION_POLICY):
+        raise ValueError('Labeling requires verified Gemma 2 text/user provenance')
+    names=[f"{g['name']}_{i}" for g in expected for i in range(768)]
+    if config.get('feature_names',[])[:1536]!=names:raise ValueError('Invalid dimension coordinates')
+    return dict(config_id=config['config_id'],feature_space_id=config['feature_space_id'],
+        contract_hash=config['contract_hash'],encoder_digest=config['encoder_digest'],
+        encoder_model=contract['encoder']['name'],media_serializer=contract['media_serializer'],profile=contract['profile'],
+        model_sha256=config['model_sha256'],publication_id=config.get('workload_id'),
+        interpretation='Approximate coordinate interpretation; not a causal explanation')
 
 
 def current_context(conn):
-    from api.embedding_generation.runtime import TRANSITION
-    if TRANSITION.exists():
-        raise ValueError('Embedding publication is in progress; labeling is temporarily unavailable')
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        config = get_active_config(cur)
-        cur.execute('SELECT generation_id,contract,contract_hash,model_sha256,publication_id FROM embedding_v2.production_state WHERE singleton')
-        state = cur.fetchone()
-        cur.execute('SELECT active_generation FROM embedding_v2.control WHERE singleton')
-        control = cur.fetchone()
-        if not state or not control:
-            raise ValueError('No canonical text production state')
-        return validate_context(config,state,control['active_generation'])
+    from pathlib import Path
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:config=get_active_config(cur)
+    context=validate_context(config)
+    if hashlib.sha256(Path(config['model_path']).read_bytes()).hexdigest()!=context['model_sha256']:
+        raise ValueError('Published model file checksum mismatch')
+    return context
 
 
 def checked_vectors(rows, context):
@@ -68,9 +61,9 @@ def checked_vectors(rows, context):
         raw = row['embedding']
         array = np.asarray(json.loads(raw) if isinstance(raw,str) else raw,dtype='<f4')
         if (array.shape != (768,) or not np.isfinite(array).all()
-            or not record or record.get('generation_id') != context['generation_id']
+            or not record or record.get('feature_space_id') != context['feature_space_id']
             or hashlib.sha256(array.tobytes()).hexdigest() != record.get('vector_sha256')
-            or record.get('provenance',{}).get('encoder',{}).get('digest') != context['encoder_digest']):
+            or record.get('encoder_digest') != context['encoder_digest']):
             raise ValueError('Physical labeling vector differs from canonical generation provenance')
         ids.append(row['id']); values.append(array)
     return ids,np.asarray(values,dtype='<f4').reshape((-1,768))
@@ -84,9 +77,8 @@ class Evidence:
         self.vectors = {}
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for side,table,key,kind in [('media','media_embeddings','rating_key','media_text'),('user','user_embeddings','username','user')]:
-                cur.execute(f'''SELECT e.{key} AS id,e.embedding::text AS embedding,p.record
-                    FROM public.{table} e LEFT JOIN embedding_v2.production_inputs p
-                    ON p.kind=%s AND p.item_key=e.{key}::text ORDER BY e.{key}''',(kind,))
+                cur.execute(f'''SELECT e.{key} AS id,e.embedding::text AS embedding,e.provenance AS record
+                    FROM public.{table} e ORDER BY e.{key}''')
                 self.vectors[side] = checked_vectors(cur.fetchall(),self.context)
         self.media = gpt.get_media_metadata(self.vectors['media'][0])
         self.user = gpt.get_user_positive_training_examples(self.vectors['user'][0])

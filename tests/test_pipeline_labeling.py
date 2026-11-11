@@ -25,11 +25,13 @@ def setup(monkeypatch):
               'pipeline.labeling_budget_usd':1.,'pipeline.labeling_request_limit':10}
     monkeypatch.setattr(auto,'get_setting_value',lambda key,default=None:settings.get(key,default))
     monkeypatch.setattr(auto,'resolve_settings',lambda **kw:{key:SimpleNamespace(value=settings[key]) for key in kw['keys']})
-    ctx=dict(generation_id='generation',publication_id='publication',model_sha256='model',config_id='config')
+    ctx=dict(feature_space_id='generation',publication_id='publication',model_sha256='model',config_id='config')
     summary=dict(outcome='daily_completed',model_after='model',final_verification=dict(ctx,verified=True))
-    result=dict(run_id='daily-run',generation_id='generation',promotion_id='publication',summary=deepcopy(summary))
+    result=dict(verified=True,model_sha256='model',run_id='daily-run',feature_space_id='generation',promotion_id='publication',summary=deepcopy(summary))
     conn=MagicMock();cur=conn.cursor.return_value.__enter__.return_value
-    cur.fetchone.side_effect=[('succeeded','publication',summary),None]
+    cur.fetchone.return_value=None
+    from api.predictive import artifacts
+    monkeypatch.setattr(artifacts,'current_config',lambda c:dict(workload_id=result['promotion_id'],model_sha256='model'))
     cur.fetchall.return_value=[]
     connect=Mock(return_value=conn);monkeypatch.setattr(auto,'connect_db',connect)
     monkeypatch.setattr(auto,'current_context',lambda c:ctx)
@@ -46,7 +48,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(batch,'execute',execute)
     model_store=Mock();model_store.table.side_effect=lambda n:sql.Identifier('fixture',n)
     events=[]
-    def run():return auto.run_after_publication(model_store,result,publication_lock=lambda held:nullcontext(),output=events.append)
+    def run():return auto.run_after_publication(result,output=events.append)
     return settings,result,summary,conn,cur,connect,factory,execute,model_store,events,run
 
 
@@ -68,18 +70,18 @@ def test_authorized_stage_uses_existing_selection_only_after_exact_verification(
     assert args.label_model=='gemma4:31b-cloud' and args.max_output_tokens==1024
     assert args.automation['scope']==auto.SCOPE and args.automation['max_attempts']==3
     assert execute.call_args.args[6]['automation_publication_id']=='publication'
-    assert any(e['stage_key']=='semantic_labels' and e['status']=='success' for e in events)
+    assert events[-1]['status']=='completed'
     assert all('production_runs' in str(c.args[0]) for c in store.query.call_args_list)
 
 
-@pytest.mark.parametrize('fault',['status','publication','verification','current'])
+@pytest.mark.parametrize('fault',['unverified','stale'])
 def test_unverified_stale_or_failed_publication_cannot_label(setup,monkeypatch,fault):
     settings,result,summary,conn,cur,connect,evidence,execute,store,events,run=setup
-    if fault=='status':cur.fetchone.side_effect=[('failed','publication',summary)]
-    elif fault=='publication':cur.fetchone.side_effect=[('succeeded','other',summary)]
-    elif fault=='verification':summary['final_verification']['verified']=False
-    else:monkeypatch.setattr(auto,'current_context',lambda c:dict(generation_id='generation',publication_id='other',model_sha256='model'))
-    assert run()['status']=='failed'
+    if fault=='unverified':result['verified']=False
+    else:
+        from api.predictive import artifacts
+        monkeypatch.setattr(artifacts,'current_config',lambda c:dict(workload_id='stale',model_sha256='model'))
+    assert run()['status'] in ('failed','skipped')
     evidence.assert_not_called();execute.assert_not_called()
 
 
@@ -94,23 +96,6 @@ def test_label_failure_or_interrupt_does_not_invalidate_publication(setup,error)
     assert 'sensitive provider URL' not in json.dumps(events)
 
 
-@pytest.mark.parametrize('error',[RuntimeError('fictional provider failure'),KeyboardInterrupt()])
-def test_daily_cli_still_succeeds_after_optional_failure_without_repeating_core(setup,monkeypatch,error):
-    from api.embedding_generation import text_production
-    from tests.test_pipeline_review_remediation import load_cli
-    settings,result,summary,conn,cur,connect,evidence,execute,store,events,run=setup
-    result['summary'].update(counts={},inference={},scoring={},stages={},model_before='old',elapsed_seconds=10.)
-    execute.side_effect=error
-    cli=load_cli();bootstrap=Mock();monkeypatch.setattr(cli,'connect_db',lambda:bootstrap)
-    monkeypatch.setattr(cli.source,'settings',lambda:{})
-    monkeypatch.setattr(cli,'Store',lambda c:store);monkeypatch.setattr(cli,'publication_lock',lambda held:nullcontext())
-    core=Mock(return_value=result);monkeypatch.setattr(text_production,'daily',core)
-    assert cli.main(['daily']) is result
-    core.assert_called_once()
-    assert result['summary']['outcome']=='daily_completed'
-    assert result['summary']['semantic_labeling']['status'] in ('failed','interrupted')
-
-
 def test_recovery_only_does_not_touch_unrelated_run_or_cloud(setup):
     settings,result,summary,conn,cur,connect,evidence,execute,store,events,run=setup
     result['verification_only']=True
@@ -118,15 +103,12 @@ def test_recovery_only_does_not_touch_unrelated_run_or_cloud(setup):
     connect.assert_not_called();store.query.assert_not_called();execute.assert_not_called()
 
 
-@pytest.mark.parametrize('record',['journal','batch'])
-def test_terminal_label_work_is_not_repeated_after_restart(setup,record):
+def test_terminal_label_work_is_not_repeated_after_restart(setup):
     settings,result,summary,conn,cur,connect,evidence,execute,store,events,run=setup
     done=dict(status='completed',successes=1,abstentions=2,usage=dict(requests=3))
-    if record=='journal':summary['semantic_labeling']=done
-    else:cur.fetchone.side_effect=[('succeeded','publication',summary),('old-batch','completed',done)]
+    cur.fetchone.return_value=('old-batch','completed',done)
     outcome=run();assert outcome['status']=='completed' and outcome['reused']
     assert outcome['usage']['requests']==3
-    assert events[-1]['status']=='skipped' and events[-1]['metrics']['requests']==0
     evidence.assert_not_called();execute.assert_not_called()
 
 
@@ -157,7 +139,7 @@ def test_unsupported_legacy_selection_is_not_silently_reinterpreted(setup):
 def ledger_db(store):
     text=Path('api/db/migrations/005_semantic_dimension_labeling.sql').read_text()
     for match in re.finditer(r'CREATE TABLE IF NOT EXISTS public.embedding_label_(?:batches|requests) \([\s\S]*?\n\);',text):
-        store.query(match[0].replace('public.','pg_temp.'))
+        store.query(match[0].replace('public.','pg_temp.').replace('generation_id text NOT NULL,','generation_id text,feature_space_id text,'))
     store.conn.commit()
     return store
 
@@ -165,10 +147,10 @@ def ledger_db(store):
 def new_auto_ledger(db,*,cap=1.,request_limit=100,prompt='same-prompt',max_attempts=3):
     batch_id=str(uuid4());pricing=Pricing()
     forecast=dict(automation_scope=auto.SCOPE,automation_prompts={'0':prompt})
-    db.query('''INSERT INTO pg_temp.embedding_label_batches(batch_id,config_id,generation_id,model,dimensions,forecast,pricing)
+    db.query('''INSERT INTO pg_temp.embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing)
         VALUES(%s,'config','generation','gemma4:31b-cloud','[0]',%s,%s)''',(batch_id,Json(forecast),Json(vars(pricing))))
     db.conn.commit()
-    limits=dict(scope=auto.SCOPE,generation_id='generation',prompts={'0':prompt},max_attempts=max_attempts,
+    limits=dict(scope=auto.SCOPE,feature_space_id='generation',prompts={'0':prompt},max_attempts=max_attempts,
                 limits=lambda conn:dict(budget_usd=cap,request_limit=request_limit))
     return UsageLedger(db.conn,batch_id,pricing,automation=limits)
 
@@ -216,7 +198,7 @@ def test_sql_exhausted_prompts_are_skipped_in_favor_of_other_dimensions(ledger_d
         ledger=new_auto_ledger(ledger_db,prompt=batch.prompt_hash(row['prompt']))
         ledger.start(0,'media',1,'fictional','system',1024)
     other=dict(row,dimension=1)
-    assert auto._eligible_attempts(ledger_db.conn,[row,other],dict(generation_id='generation'),3)==[other]
+    assert auto._eligible_attempts(ledger_db.conn,[row,other],dict(feature_space_id='generation'),3)==[other]
 
 
 @pytest.mark.parametrize('kind',['label','abstain','error','interrupt'])
@@ -224,13 +206,13 @@ def test_existing_batch_engine_with_mock_cloud_keeps_publication_independent(led
     import gpt_utils as gpt
     from api.embedding_generation import model,backfill
     from api.services.labeling_costs import LabelingError
-    context=dict(config_id='config',generation_id='generation')
+    context=dict(config_id='config',feature_space_id='generation')
     row=dict(dimension=1,side='media',completed=False,abstained=False,
              prompt=dict(prompt_text='fictional high low',positive_items=[{}]*6,negative_items=[{}]*4))
     existing=dict(dimension=0,side='media',completed=True,abstained=False,prompt=dict(prompt_text='existing'))
     args=batch.parser().parse_args([]);args.label_model='gemma4:31b-cloud';args.label_provider='ollama'
     args.max_output_tokens=1024;args.save_label=True;args.budget_usd=1.
-    args.automation=dict(scope=auto.SCOPE,generation_id='generation',prompts={'1':batch.prompt_hash(row['prompt'])},
+    args.automation=dict(scope=auto.SCOPE,feature_space_id='generation',prompts={'1':batch.prompt_hash(row['prompt'])},
                          max_attempts=3,limits=lambda conn:dict(budget_usd=1.,request_limit=10))
     prediction=dict(automation_scope=auto.SCOPE,automation_prompts=args.automation['prompts'],
                     selected_batch=dict(combined=dict(expected=dict(cost_usd=.001))))

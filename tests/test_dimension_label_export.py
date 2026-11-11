@@ -46,7 +46,7 @@ def records():
     first,second=str(uuid4()),str(uuid4())
     batches={}
     for bid,start,dimensions in ((first,now,[0]),(second,now+timedelta(minutes=5),[0,1,2,3,768])):
-        batches[bid]=dict(batch_id=bid,config_id=context['config_id'],generation_id=context['generation_id'],
+        batches[bid]=dict(batch_id=bid,config_id=context['config_id'],feature_space_id=context['feature_space_id'],
             model='gemma4:31b-cloud',dimensions=dimensions,status='completed_with_errors',created_at=start,completed_at=start+timedelta(minutes=1))
     saved=dict(label='workplace rivalries',label_type='semantic_candidate',display_label='workplace rivalries',explainable=True,needs_review=False)
     good=dict(response(),validation_status='valid',provenance=context)
@@ -70,7 +70,7 @@ def records():
             attempt=attempt,status=status,error_code=error,input_tokens=input_count,output_tokens=output_count,cached_input_tokens=None,
             estimated_cost_usd=Decimal('.001'),created_at=batches[bid]['created_at']+timedelta(seconds=attempt),
             completed_at=batches[bid]['created_at']+timedelta(seconds=30) if status!='pending' else None))
-    labels={0:dict(saved,dimension=0,**{k:context[k] for k in ('config_id','generation_id','contract_hash','encoder_digest')}),
+    labels={0:dict(saved,dimension=0,**{k:context[k] for k in ('config_id','feature_space_id','contract_hash','encoder_digest')}),
             1:dict(saved,dimension=1,label='feature films',label_type='hard_structural',display_label=None,explainable=False)}
     return context,labels,assessments,batches,requests,first,second
 
@@ -150,26 +150,26 @@ def test_sql_read_only_export_provenance_history_failures_and_token_totals(sql_d
     monkeypatch.setattr(export,'current_context',lambda conn:context)
     with conn.cursor() as cur:
         for bid,b in batches.items():
-            cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,generation_id,model,dimensions,forecast,pricing,status,created_at,completed_at)
+            cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing,status,created_at,completed_at)
                 VALUES(%s,%s,%s,%s,%s,'{}','{}',%s,%s,%s)''',
-                (bid,context['config_id'],context['generation_id'],b['model'],Json(b['dimensions']),b['status'],b['created_at'],b['completed_at']))
+                (bid,context['config_id'],context['feature_space_id'],b['model'],Json(b['dimensions']),b['status'],b['created_at'],b['completed_at']))
         for r in requests:
             cur.execute('''INSERT INTO embedding_label_requests(batch_id,dimension,side,attempt,status,input_tokens,output_tokens,
                 estimated_input_tokens,reserved_input_tokens,reserved_output_tokens,estimated_cost_usd,error_code,created_at,completed_at)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,100,100,100,%s,%s,%s,%s)''',
                 tuple(r[k] for k in ('batch_id','dimension','side','attempt','status','input_tokens','output_tokens','estimated_cost_usd','error_code','created_at','completed_at')))
         for dimension,l in labels.items():
-            cur.execute('''INSERT INTO embedding_labels(dimension,label,display_label,label_type,explainable,needs_review,config_id,generation_id,contract_hash,encoder_digest)
+            cur.execute('''INSERT INTO embedding_labels(dimension,label,display_label,label_type,explainable,needs_review,config_id,feature_space_id,contract_hash,encoder_digest)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                 (dimension,l['label'],l['display_label'],l['label_type'],l['explainable'],False,
-                 context['config_id'],context['generation_id'],context['contract_hash'],context['encoder_digest']))
+                 context['config_id'],context['feature_space_id'],context['contract_hash'],context['encoder_digest']))
         for a in assessments:
             prompt=dict(a['prompt_metadata'],prompt_text='PRIVATE_RAW_PROMPT',positive_items=['PRIVATE_EXAMPLE'],provenance=context)
             cur.execute('''INSERT INTO embedding_dimension_assessments(dimension,config_id,source,provider,model,prompt,result,saved,outcome,before_state,after_state,created_at)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                 (a['dimension'],context['config_id'],a['source'],a['provider'],a['model'],Json(prompt),Json(a['result']),a['saved'],a['outcome'],Json(a['before_state']),Json(a['after_state']),a['created_at']))
         cur.execute("INSERT INTO embedding_dimension_assessments(dimension,config_id,source,model,prompt,result,saved,outcome) VALUES(99,%s,'manual-batch','fictional','{}',%s,false,'retired')",
-                    (context['config_id'],Json(dict(provenance=dict(context,generation_id='retired')))))
+                    (context['config_id'],Json(dict(provenance=dict(context,feature_space_id='retired')))))
     conn.commit()
     tables=('embedding_labels','embedding_dimension_assessments','embedding_label_batches','embedding_label_requests')
     def snapshot():

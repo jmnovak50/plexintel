@@ -11,7 +11,7 @@ from api.services.app_settings import get_setting_value,resolve_settings,Setting
 from api.services import dimension_label_batch as batch
 from api.services.dimension_labeling import Evidence,current_context
 from api.services.labeling_costs import BudgetExceeded,UsageLedger,pricing_for_model,LabelingError,failure_diagnostic
-from api.embedding_generation.progress import Reporter
+from api.predictive.progress import Reporter
 
 SCOPE='daily-semantic-labeling/1'
 POLICY_KEYS=('pipeline.labeling_enabled','pipeline.labeling_cloud_authorized',
@@ -37,28 +37,20 @@ def _eligible_attempts(conn,eligible,context,max_attempts):
     with conn.cursor() as cur:
         cur.execute('''SELECT r.dimension,b.forecast->'automation_prompts'->>r.dimension::text,COUNT(*)
             FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
-            WHERE b.forecast->>'automation_scope'=%s AND b.generation_id=%s
-            GROUP BY r.dimension,b.forecast->'automation_prompts'->>r.dimension::text''',(SCOPE,context['generation_id']))
+            WHERE b.forecast->>'automation_scope'=%s AND b.feature_space_id=%s
+            GROUP BY r.dimension,b.forecast->'automation_prompts'->>r.dimension::text''',(SCOPE,context['feature_space_id']))
         used={(dimension,prompt):count for dimension,prompt,count in cur.fetchall()}
     return [r for r in eligible if used.get((r['dimension'],batch.prompt_hash(r['prompt'])),0)<max_attempts]
 
 
 def _run(conn,result,caps):
     import gpt_utils as gpt
-    # Bind to the completed daily run, not merely the latest publication.
-    with conn.cursor() as cur:
-        cur.execute('''SELECT status,promotion_id,summary FROM embedding_v2.production_runs WHERE run_id=%s''',(result['run_id'],))
-        saved=cur.fetchone()
-    if not saved or saved[0]!='succeeded' or saved[1]!=result['promotion_id']:
-        raise ValueError('A successfully published daily run is required')
-    summary=saved[2] or {};verified=summary.get('final_verification') or {}
-    if (summary.get('outcome')!='daily_completed' or verified.get('publication_id')!=result['promotion_id']
-        or verified.get('generation_id')!=result['generation_id'] or not verified.get('verified')
-        or verified.get('model_sha256')!=summary.get('model_after')):
-        raise ValueError('Final daily publication verification is missing or inconsistent')
-    prior=summary.get('semantic_labeling') or {}
-    if prior.get('status') in ('completed','completed_with_errors','budget_stopped','failed','systemic_failure_stopped','empty'):
-        return dict(prior,reused=True,reason='A terminal labeling outcome is already recorded for this publication')
+    if result.get('verification_only') or not result.get('verified'):
+        raise ValueError('Fresh verified predictive publication required')
+    from api.predictive.artifacts import current_config
+    config=current_config(conn)
+    if not config or config.get('workload_id')!=result['promotion_id'] or config.get('model_sha256')!=result['model_sha256']:
+        raise ValueError('Current model differs from completed workload')
     with conn.cursor() as cur:
         cur.execute('''SELECT batch_id,status,summary FROM embedding_label_batches
             WHERE forecast->>'automation_scope'=%s AND forecast->>'automation_run_id'=%s
@@ -69,7 +61,7 @@ def _run(conn,result,caps):
         return dict(previous[2],batch_id=previous[0],status=previous[1],reused=True,
                     reason='Existing terminal batch recovered without another provider request')
     context=current_context(conn)
-    if any(context[k]!=verified[k] for k in ('generation_id','publication_id','model_sha256')):
+    if (context['publication_id']!=result['promotion_id'] or context['model_sha256']!=result['model_sha256']):
         raise ValueError('Current production differs from the verified daily publication')
     args=batch.parser().parse_args([])
     args.label_provider,args.label_model=gpt.resolve_label_backend()
@@ -105,7 +97,7 @@ def _run(conn,result,caps):
     # Existing refresh semantics remain explicit and bounded to this selection.
     if args.regenerate:args.dimensions=[row['dimension'] for row in selected]
     prompts={str(r['dimension']):batch.prompt_hash(r['prompt']) for r in selected}
-    args.automation=dict(scope=SCOPE,generation_id=context['generation_id'],prompts=prompts,
+    args.automation=dict(scope=SCOPE,feature_space_id=context['feature_space_id'],prompts=prompts,
                          max_attempts=args.max_attempts,limits=limits)
     observations=UsageLedger(conn,'forecast-only',pricing).observations(context['config_id'],args.label_model)
     prediction=batch.workload_forecast(eligible,selected,pricing,args,observations)
@@ -115,53 +107,26 @@ def _run(conn,result,caps):
     return batch.execute(conn,evidence,eligible,selected,pricing,args,prediction)
 
 
-def run_after_publication(store,result,*,publication_lock,pipeline_lock_held=False,output=lambda value:None):
-    """Never enters the predictive worker's failure/retry boundary."""
-    def safe_output(value):
-        try:output(value)
-        except Exception:pass
-    reporter=Reporter(safe_output);reporter.bind(result['run_id'])
-    if result.get('verification_only'):
-        reporter.skip('semantic_labels')
-        return dict(status='skipped',reason='Verification-only recovery does not start labeling')
+def run_after_publication(result,*,output=lambda value:None):
+    """Optional work stays outside the predictive failure/retry boundary.
+
+    Caller retains the ordinary predictive writer lock so publication cannot
+    change while a provider request is admitted and its interpretation saved.
+    """
+    if result.get('verification_only') or not result.get('verified'):
+        return dict(status='skipped',reason='No fresh verified predictive workload')
     started=time.perf_counter()
     try:
         try:caps=limits()
-        except BudgetExceeded as exc:
-            outcome=dict(status='skipped',reason=str(exc))
-        else:
-            reporter.emit('semantic_labels','started')
-            with publication_lock(pipeline_lock_held):
-                with closing(connect_db()) as conn:
-                    conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
-                    outcome=_run(conn,result,caps)
+        except BudgetExceeded as exc:return dict(status='skipped',reason=str(exc))
+        with closing(connect_db()) as conn:
+            conn.set_session(readonly=False,isolation_level='READ COMMITTED')
+            outcome=_run(conn,result,caps)
     except BaseException as exc:
-        # Provider errors, interrupts and unavailable optional ledgers never
-        # reclassify an already committed/verified model run as failed.
-        outcome=dict(getattr(exc,'labeling_summary',{}) or {})
         diagnostic=failure_diagnostic(exc)
-        outcome.update(status='interrupted' if isinstance(exc,(KeyboardInterrupt,SystemExit)) else 'failed',
-                       reason=diagnostic['message'],error_code=diagnostic['code'])
-        if 'usage' not in outcome:outcome['usage_unavailable']=True
+        outcome=dict(status='interrupted' if isinstance(exc,(KeyboardInterrupt,SystemExit)) else 'failed',
+            reason=diagnostic['message'],error_code=diagnostic['code'])
     outcome['seconds']=time.perf_counter()-started
-    usage=outcome.get('usage') or {}
-    outcome.setdefault('reason',f"Selected {outcome.get('selected',0)}; saved {outcome.get('successes',0)}, "
-        f"abstained {outcome.get('abstentions',0)}, failed {outcome.get('failures',0)}; "
-        f"reserved/estimated USD {usage.get('estimated_cost_usd',0):.6f}")
-    status='skipped' if outcome.get('reused') or outcome['status'] in ('skipped','empty') else 'success' if outcome['status']=='completed' else 'failed'
-    metrics={k:usage[k] for k in ('requests','input_tokens','output_tokens','total_tokens','estimated_cost_usd') if k in usage}
-    if outcome.get('reused'):metrics={'requests':0}  # Historical usage remains in the durable outcome.
-    reporter.emit('semantic_labels',status,message=outcome.get('reason') or outcome['status'],expected=outcome.get('selected',0),
-                  reused=bool(outcome.get('reused')),
-                  **{k:outcome[k] for k in ('selected','successes','failures','abstentions','seconds') if k in outcome},
-                  **metrics)
-    try:
-        store.query(sql.SQL("""UPDATE {} SET summary=jsonb_set(COALESCE(summary,'{{}}'::jsonb),
-            '{{semantic_labeling}}',%s::jsonb) WHERE run_id=%s AND promotion_id=%s AND status='succeeded'""")
-            .format(store.table('production_runs')),(Json(outcome),result['run_id'],result['promotion_id']))
-        store.conn.commit()
-    except Exception:
-        try:store.conn.rollback()
-        except Exception:pass
-    result['summary']['semantic_labeling']=outcome
+    try:output(outcome)
+    except Exception:pass
     return outcome

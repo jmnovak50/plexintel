@@ -25,7 +25,7 @@ def fetch_user_watch_history(conn):
 
 
 def build_user_embeddings(watch_history, conn):
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.predictive.retired import assert_legacy_allowed
     assert_legacy_allowed()
     profiles = build_user_profiles(
         watch_history,
@@ -63,7 +63,7 @@ def main():
 
 
 if __name__ == "__main__":
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.predictive.retired import assert_legacy_allowed
     assert_legacy_allowed()
     ensure_app_schema()
     main()

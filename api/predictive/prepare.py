@@ -1,7 +1,7 @@
 """Incremental text vectors and corrected observations, prepared off publication."""
 from collections import Counter
 from datetime import datetime,timezone
-import hashlib,json
+import hashlib,json,time
 import numpy as np
 from psycopg2 import sql
 from .contracts import ContractError,fingerprint,specification,modality_contract,media_text,watch_text,vector
@@ -18,7 +18,10 @@ def cache(conn,kind):
     with conn.cursor() as cur:
         cur.execute(sql.SQL('SELECT {}::text,embedding::text,provenance FROM public.{}').format(
             sql.Identifier(key),sql.Identifier(table)))
-        return {k:dict(provenance=p,embedding=json.loads(v) if v else None) for k,v,p in cur.fetchall() if p}
+        rows=cur.fetchall()
+    conn.commit()  # Never hold a read transaction across local encoder requests.
+    if len({row[0] for row in rows})!=len(rows):raise ContractError('Duplicate current-vector source keys')
+    return {k:dict(provenance=p,embedding=json.loads(v) if v else None) for k,v,p in rows if p}
 
 
 def record(spec,kind,key,source,values,input_hash):
@@ -50,6 +53,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
     resolver.catalog=[{k:r.get(k) for k in ('ratingKey','type','guid','parentRatingKey','index')} for r in catalog]
     revisions={str(r['ratingKey']):fingerprint({k:r.get(k) for k in
         ('updatedAt','guid','type','parentRatingKey','grandparentRatingKey')}) for r in catalog if r.get('updatedAt') is not None}
+    started=time.monotonic()
     old=cache(conn,'media_text');media={};stats=Counter()
     for key,source in sources.items():
         previous=(old.get(key) or {}).get('provenance',{}).get('source',{})
@@ -71,13 +75,17 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
                                  if revision_keys and all(k in revisions for k in revision_keys) else None)
         media[key]=refresh_vector(spec,'media_text',key,source,media_text(source['metadata']),old,encoder,stats)
         progress('media_text',completed=len(media),expected=len(sources),**stats)
+    progress('media_text',seconds=time.monotonic()-started)
     identity=CanonicalTitles(media)
+    started=time.monotonic()
     old=cache(conn,'watch');watches={};stats=Counter()
     for event in snapshot['events']:
         key=str(event['rating_key']);watch=str(event['watch_id'])
         if key not in media:raise ContractError('Unscoped watch event: quarantine before preparation')
         watches[watch]=refresh_vector(spec,'watch',watch,event,watch_text(event,media[key]['source']['metadata']),old,encoder,stats)
         progress('watch',completed=len(watches),expected=len(snapshot['events']),**stats)
+    progress('watch',seconds=time.monotonic()-started)
+    started=time.monotonic()
     users={};blocked=0
     for owner in sorted({e['username'] for e in snapshot['events']}):
         events=[e for e in snapshot['events'] if e['username']==owner]
@@ -92,8 +100,9 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
         source=dict(profile_keys=context.keys,hashes=[[k,media[k]['input_hash']] for k in context.keys],identity_policy=spec['identity_policy'])
         digest=fingerprint(dict(contract=modality_contract(spec,'user'),source=source))
         users[owner]=record(spec,'user',owner,source,mean,digest)
-    progress('users',users=len(users),quarantined=blocked)
-    rows,skips=training_rows(inputs,media,watches)
+    progress('users',users=len(users),quarantined=blocked,seconds=time.monotonic()-started)
+    started=time.monotonic()
+    rows,skips=training_rows(inputs,media,watches,progress=lambda item:progress('training_data',**{k:v for k,v in item.items() if k!='stage'}))
     if not rows:raise ContractError('No leakage-safe training observations')
     identities=[(r['owner'],r['canonical_identity']) for r in rows]
     if len(identities)!=len(set(identities)):raise ContractError('Duplicate canonical training outcome')
@@ -112,5 +121,5 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
         vector=hashlib.sha256(np.asarray(r['embedding'],dtype='<f4').tobytes()).hexdigest(),
         fields={k:r[k] for k in ('label','sample_weight','prediction_at','label_available_at','watch_sim','label_source',
                                   'observation_kind','feedback_provenance','genres','directors','year')}) for r in rows])
-    progress('training_data',rows=len(rows),completed=len(rows),expected=len(rows))
+    progress('training_data',rows=len(rows),completed=len(rows),expected=len(rows),seconds=time.monotonic()-started)
     return inputs,media,watches,users,rows,summary

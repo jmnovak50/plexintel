@@ -79,7 +79,7 @@ def apply_action(config_id, dimension, actor, action, reason, version):
             identity(config, dimension)
             if action == 'review' and (config['media_dimensions'],config['user_dimensions']) != (768,768):
                 raise HTTPException(409, 'The current labeling implementation supports 768 dimensions per side; review requires a compatible labeling implementation')
-            if action == 'review' and config.get('generation_id'):
+            if action == 'review' and config.get('feature_space_id'):
                 if config.get('ordering')!='media_text,user':
                     raise HTTPException(409,'Semantic labeling supports the current text/user feature layout only')
                 from api.services.dimension_labeling import current_context

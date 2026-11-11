@@ -74,7 +74,7 @@ class FakeIncrementalConnection:
 
 class TautulliWatchReconciliationTests(unittest.TestCase):
     def setUp(self):
-        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
+        active=patch('api.predictive.retired.assert_legacy_allowed')
         active.start();self.addCleanup(active.stop)
 
     def test_incremental_load_clears_cache_before_listing_libraries(self):
@@ -231,7 +231,7 @@ class FakeUserEmbeddingConnection:
 
 class UserEmbeddingRebuildTests(unittest.TestCase):
     def setUp(self):
-        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
+        active=patch('api.predictive.retired.assert_legacy_allowed')
         active.start();self.addCleanup(active.stop)
 
     def test_rebuild_clears_stale_user_embeddings_before_insert(self):

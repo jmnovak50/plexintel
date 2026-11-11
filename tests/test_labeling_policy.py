@@ -83,11 +83,11 @@ def policy_db(sql_db, monkeypatch):
 def ledger_for(conn, *, prompt='fixture'):
     batch_id = str(uuid4())
     with conn.cursor() as cur:
-        cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,generation_id,model,dimensions,forecast,pricing)
+        cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing)
             VALUES(%s,'fixture','fixture','gemma4:31b-cloud','[0]',%s,%s)''',
             (batch_id, Json(dict(automation_scope=auto.SCOPE, automation_prompts={'0': prompt})), Json(vars(Pricing()))))
     conn.commit()
-    return UsageLedger(conn, batch_id, Pricing(), automation=dict(scope=auto.SCOPE, generation_id='fixture',
+    return UsageLedger(conn, batch_id, Pricing(), automation=dict(scope=auto.SCOPE, feature_space_id='fixture',
         prompts={'0': prompt}, max_attempts=3, limits=auto.limits))
 
 

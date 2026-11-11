@@ -1,0 +1,11 @@
+# Prepare only. Install after separate deployment approval; adjust checkout path.
+/home/jmnovak/projects/plexintel/logs/pipeline.log {
+    size 20M
+    rotate 4
+    compress
+    missingok
+    notifempty
+    delaycompress
+    create 0640 jmnovak jmnovak
+    su jmnovak jmnovak
+}

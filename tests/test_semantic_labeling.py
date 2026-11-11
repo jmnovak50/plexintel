@@ -24,13 +24,16 @@ from api.services.labeling_costs import (Pricing, UsageLedger, BudgetExceeded, L
 def context_fixture():
     contract = dict(ordering='media_text,user',encoder=dict(name='embeddinggemma-2:latest',digest='a'*64),
                     media_serializer='fictional/1',profile='fictional-mean/1')
-    state = dict(generation_id='fictional-generation',contract=contract,contract_hash=fingerprint(contract),
-                 model_sha256='b'*64,publication_id='fictional-publication')
-    config = dict(config_id='fictional-config',generation_id=state['generation_id'],contract_hash=state['contract_hash'],
+    from api.predictive.features import SUPERVISION_POLICY
+    from api.predictive.recovery import IDENTITY_POLICY
+    state=dict(feature_space_id=fingerprint(contract),contract=contract)
+    config=dict(architecture='public-text-predictor/1.0',contract=contract,
+        config_id='fictional-config',feature_space_id=state['feature_space_id'],contract_hash=fingerprint(contract),
+        identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
         encoder_digest='a'*64,model_sha256='b'*64,embedding_model='embeddinggemma-2',ordering='media_text,user',
         media_dimensions=768,user_dimensions=768,feature_groups=[dict(name='media_text',start=0,width=768),dict(name='user',start=768,width=768)],
         feature_names=[f'{side}_{i}' for side in ('media_text','user') for i in range(768)])
-    return config,state,validate_context(config,state,state['generation_id'])
+    return config,state,validate_context(config)
 
 
 def response():
@@ -93,32 +96,31 @@ def test_governance_uses_applicable_thresholds_and_complete_validation_status():
 
 def test_current_context_rejects_wrong_layout_generation_encoder_and_classifier():
     config,state,context = context_fixture()
-    assert context['generation_id']=='fictional-generation'
-    for key,value in [('generation_id','other'),('encoder_digest','c'*64),('model_sha256','wrong'),('ordering','media_text,media_poster,user')]:
+    assert context['feature_space_id']==fingerprint(config['contract'])
+    for key,value in [('feature_space_id','other'),('encoder_digest','c'*64),('model_sha256','wrong'),('ordering','media_text,media_poster,user')]:
         bad=copy.deepcopy(config);bad[key]=value
-        with pytest.raises(ValueError):validate_context(bad,state,state['generation_id'])
-    with pytest.raises(ValueError):validate_context(config,state,'other')
+        with pytest.raises(ValueError):validate_context(bad,state,state['feature_space_id'])
     bad=copy.deepcopy(config);bad['feature_names'][768]='media_text_768'
-    with pytest.raises(ValueError):validate_context(bad,state,state['generation_id'])
+    with pytest.raises(ValueError):validate_context(bad,state,state['feature_space_id'])
 
 
 @pytest.mark.parametrize('fault',['width','nan','hash','generation','encoder'])
 def test_vector_lineage_is_checked_before_sample_selection(fault):
     _,_,context = context_fixture()
     vector=np.arange(768,dtype='<f4')
-    record=dict(generation_id=context['generation_id'],vector_sha256=hashlib.sha256(vector.tobytes()).hexdigest(),
-                provenance=dict(encoder=dict(digest=context['encoder_digest'])))
+    record=dict(feature_space_id=context['feature_space_id'],vector_sha256=hashlib.sha256(vector.tobytes()).hexdigest(),
+                encoder_digest=context['encoder_digest'])
     if fault=='width':vector=vector[:-1]
     if fault=='nan':vector[0]=np.nan
     if fault=='hash':record['vector_sha256']='bad'
-    if fault=='generation':record['generation_id']='other'
-    if fault=='encoder':record['provenance']['encoder']['digest']='other'
+    if fault=='generation':record['feature_space_id']='other'
+    if fault=='encoder':record['encoder_digest']='other'
     with pytest.raises(ValueError):checked_vectors([dict(id='fictional',embedding=vector,record=record)],context)
 
 
 def test_checked_vectors_retain_unnormalized_user_coordinate_values():
     _,_,context=context_fixture();values=np.full(768,.01,dtype='<f4')
-    record=dict(generation_id=context['generation_id'],vector_sha256=hashlib.sha256(values.tobytes()).hexdigest(),provenance=dict(encoder=dict(digest=context['encoder_digest'])))
+    record=dict(feature_space_id=context['feature_space_id'],vector_sha256=hashlib.sha256(values.tobytes()).hexdigest(),encoder_digest=context['encoder_digest'])
     ids,matrix=checked_vectors([dict(id='fictional',embedding=json.dumps(values.tolist()),record=record)],context)
     assert ids==['fictional'] and np.array_equal(matrix[0],values)
 
@@ -294,7 +296,7 @@ def sql_db():
 def new_ledger(conn,budget=None):
     batch_id=str(uuid4())
     with conn.cursor() as cur:
-        cur.execute("INSERT INTO embedding_label_batches(batch_id,config_id,generation_id,model,dimensions,forecast,pricing) VALUES(%s,'fictional-config','fictional-generation','gemma4:31b-cloud','[]','{}',%s)",(batch_id,Json(vars(Pricing()))))
+        cur.execute("INSERT INTO embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing) VALUES(%s,'fictional-config','fictional-generation','gemma4:31b-cloud','[]','{}',%s)",(batch_id,Json(vars(Pricing()))))
     conn.commit()
     return UsageLedger(conn,batch_id,Pricing(),budget)
 
@@ -345,15 +347,15 @@ def test_sql_explanation_path_rejects_old_generation_and_stale_shap(sql_db):
             cur.execute('SELECT * FROM '+schema+".selected_embedding_labels('fictional-viewer',1)")
             return cur.fetchall()
         assert selected()==[]  # Historical dimension number is insufficient.
-        cur.execute('UPDATE embedding_labels SET config_id=%s,generation_id=%s,contract_hash=%s,encoder_digest=%s',
-                    (context['config_id'],context['generation_id'],context['contract_hash'],context['encoder_digest']))
+        cur.execute('UPDATE embedding_labels SET config_id=%s,feature_space_id=%s,contract_hash=%s,encoder_digest=%s',
+                    (context['config_id'],context['feature_space_id'],context['contract_hash'],context['encoder_digest']))
         assert len(selected())==1  # No human approval required for an eligible candidate.
         cur.execute("UPDATE shap_prediction_context SET model_version='wrong'")
         assert selected()==[]
         cur.execute('UPDATE shap_prediction_context SET model_version=%s',(context['model_sha256'],))
-        cur.execute("UPDATE embedding_labels SET generation_id='retired'")
+        cur.execute("UPDATE embedding_labels SET feature_space_id='retired'")
         assert selected()==[]
-        cur.execute('UPDATE embedding_labels SET generation_id=%s',(context['generation_id'],))
+        cur.execute('UPDATE embedding_labels SET feature_space_id=%s',(context['feature_space_id'],))
         cur.execute("INSERT INTO embedding_dimension_admin VALUES('fictional-config',0,true)")
         assert selected()==[]
 
@@ -368,8 +370,8 @@ def test_sql_persistence_reuses_original_governance_and_records_provenance(sql_d
     saved,outcome=persist_result(conn,context,row,result,'gemma4:31b-cloud')
     assert saved and outcome=='inserted_missing_label'
     with conn.cursor() as cur:
-        cur.execute('SELECT config_id,generation_id,encoder_digest,interpretation_model,needs_review FROM embedding_labels')
-        assert cur.fetchone()==(context['config_id'],context['generation_id'],context['encoder_digest'],'gemma4:31b-cloud',False)
+        cur.execute('SELECT config_id,feature_space_id,encoder_digest,interpretation_model,needs_review FROM embedding_labels')
+        assert cur.fetchone()==(context['config_id'],context['feature_space_id'],context['encoder_digest'],'gemma4:31b-cloud',False)
     assert assessment.call_args.kwargs['prompt']['provenance']==context
     result['validation_status']='needs_review'
     persist_result(conn,context,row,result,'gemma4:31b-cloud',regenerate=True)
@@ -396,12 +398,12 @@ def test_sql_validated_governance_controls_current_explanations(sql_db,monkeypat
     assert persist_result(conn,context,row,result,'gemma4:31b-cloud')[0]
     assert result==original
     with conn.cursor() as cur:
-        cur.execute('SELECT label,explainable,interpretation_model,generation_id FROM embedding_labels WHERE dimension=0')
-        assert cur.fetchone()==(label,eligible,'gemma4:31b-cloud',context['generation_id'])
+        cur.execute('SELECT label,explainable,interpretation_model,feature_space_id FROM embedding_labels WHERE dimension=0')
+        assert cur.fetchone()==(label,eligible,'gemma4:31b-cloud',context['feature_space_id'])
         cur.execute("INSERT INTO recommendations VALUES('fictional-viewer',1,'2000-01-01'); INSERT INTO shap_prediction_context VALUES('fictional-viewer',1,'2000-01-01','fictional-config',%s); INSERT INTO shap_impact VALUES('fictional-viewer',1,0,1)",(context['model_sha256'],))
         cur.execute('SELECT * FROM '+schema+".selected_embedding_labels('fictional-viewer',1)")
         assert bool(cur.fetchall())==eligible
-        cur.execute("UPDATE embedding_labels SET generation_id='retired'")
+        cur.execute("UPDATE embedding_labels SET feature_space_id='retired'")
         cur.execute('SELECT * FROM '+schema+".selected_embedding_labels('fictional-viewer',1)")
         assert cur.fetchall()==[]
 
@@ -409,7 +411,7 @@ def test_sql_validated_governance_controls_current_explanations(sql_db,monkeypat
 def test_sql_persistence_refuses_production_context_change(sql_db,monkeypatch):
     conn,_=sql_db;_,_,context=context_fixture()
     import api.services.dimension_label_batch as batch
-    monkeypatch.setattr(batch,'current_context',lambda conn:dict(context,generation_id='changed'))
+    monkeypatch.setattr(batch,'current_context',lambda conn:dict(context,feature_space_id='changed'))
     with pytest.raises(ValueError,match='provenance changed'):
         persist_result(conn,context,dict(dimension=0,side='media',prompt={}),gpt.validate_label_result(response()),'gemma4:31b-cloud')
     with conn.cursor() as cur:

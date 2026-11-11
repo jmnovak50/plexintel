@@ -226,21 +226,14 @@ def test_active_pipeline_dispatch_and_legacy_write_protection(monkeypatch):
 def test_admin_receipt_reports_canonical_text_classifier(monkeypatch):
     from unittest.mock import MagicMock
     from api.routes import admin_routes
-    from api.embedding_generation import runtime,text_production
-    runtime.MARKER.write_text('{}')
-    monkeypatch.setattr(runtime,'active_generation',lambda:'text')
-    conn=MagicMock();cur=conn.cursor.return_value.__enter__.return_value
-    cur.fetchone.side_effect=[(True,),('text',),(True,)]
-    monkeypatch.setattr(admin_routes,'connect_db',lambda:conn)
-    state=dict(generation_id='text',model_sha256='a'*64)
-    bundle=dict(variant='text_only',encoder=dict(digest='b'*64),feature_version='semantic-text-user-prospective/1.0',
-                ordering='media_text,user',dimensions=[768,768],feature_names=['feature']*1605)
-    monkeypatch.setattr(text_production,'load_production',lambda store:(state,bundle,None))
-    monkeypatch.setattr(__import__('api.embedding_generation.store',fromlist=['Store']),'Store',lambda connection:Mock())
+    from api.predictive import artifacts
+    conn=MagicMock();monkeypatch.setattr(admin_routes,'connect_db',lambda:conn)
+    config=dict(model_sha256='a'*64,encoder_digest='b'*64,feature_space_id='space',
+        ordering='media_text,user',embedding_dimensions=1536,feature_names=['feature']*1605)
+    monkeypatch.setattr(artifacts,'current_config',lambda _:config)
     result=admin_routes.embedding_generation_deployment_status(admin_user={'is_admin':True})
-    assert result['model_variant']=='text_only' and result['embedding_dimensions']==1536
-    assert result['classifier_feature_count']==1605 and result['poster_inference']=='disabled/1.0'
-    assert result['model_storage']=='canonical production state'
+    assert result['embedding_dimensions']==1536 and result['classifier_feature_count']==1605
+    assert result['model_storage']=='checksum-addressed file'
     conn.set_session.assert_called_once_with(readonly=True,isolation_level='REPEATABLE READ')
     conn.rollback.assert_called_once();conn.close.assert_called_once()
 

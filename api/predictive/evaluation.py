@@ -52,7 +52,6 @@ def evaluate(classifier,vocabulary,rows,*,training_keys=()):
     result=probability_metrics(rows,p);result['prediction_seconds']=time.perf_counter()-start
     keys=set(training_keys)
     segments={'movie':lambda r:r.get('media_type')=='movie','tv':lambda r:r.get('media_type')=='episode',
-        'missing_art':lambda r:r.get('poster_missing',False),'with_art':lambda r:not r.get('poster_missing',False),
         'sparse_history_1_to_5_titles':lambda r:0<r.get('history_titles',0)<=5,
         'cold_start_title_not_in_training':lambda r:r['media_key'] not in keys}
     result['segments']={}
@@ -70,7 +69,7 @@ def evaluate(classifier,vocabulary,rows,*,training_keys=()):
     values=classifier.get_booster().predict(xgb.DMatrix(vocabulary.transform(rows),feature_names=vocabulary.names,nthread=2),pred_contribs=True)[:,:-1]
     gain=classifier.get_booster().get_score(importance_type='gain');groups=defaultdict(list)
     for i,name in enumerate(vocabulary.names):
-        group=next((prefix for prefix in ('media_text','media_poster','user','genre','director','decade') if name.startswith(prefix+'_')),name)
+        group=next((prefix for prefix in ('media_text','user','genre','director','decade') if name.startswith(prefix+'_')),name)
         groups[group].append(i)
     result['feature_group_importance']={group:dict(dimensions=len(indices),
         mean_sum_abs_shap=float(np.abs(values[:,indices]).sum(axis=1).mean()),

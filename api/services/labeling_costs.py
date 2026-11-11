@@ -178,9 +178,9 @@ class UsageLedger:
                 if Decimal(str(cost))+Decimal(str(reserved))>Decimal(str(caps['budget_usd'])) or requests>=caps['request_limit']:
                     raise BudgetExceeded('Cumulative automatic labeling budget/request limit reached')
                 cur.execute('''SELECT COUNT(*) FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
-                    WHERE b.forecast->>'automation_scope'=%s AND b.generation_id=%s AND r.dimension=%s
+                    WHERE b.forecast->>'automation_scope'=%s AND b.feature_space_id=%s AND r.dimension=%s
                     AND b.forecast->'automation_prompts'->>%s=%s''',
-                    (self.automation['scope'],self.automation['generation_id'],dimension,str(dimension),self.automation['prompts'][str(dimension)]))
+                    (self.automation['scope'],self.automation['feature_space_id'],dimension,str(dimension),self.automation['prompts'][str(dimension)]))
                 prior_attempts=cur.fetchone()[0]
                 if prior_attempts>=self.automation['max_attempts']:
                     raise BudgetExceeded('Automatic per-prompt attempt limit reached across batches')

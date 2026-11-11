@@ -22,8 +22,8 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
-from api.embedding_generation.progress import EVENT, STAGES, STAGE_NAMES, EventReader, clean_metrics, event_details
-from api.embedding_generation.run_safety import VERIFICATION_ONLY_EXIT,classify_failure,failure_message
+from api.predictive.progress import EVENT, STAGES, STAGE_NAMES, EventReader, clean_metrics, event_details
+from api.predictive.failures import VERIFICATION_ONLY_EXIT,classify_failure,failure_message
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENV_PYTHON = REPO_ROOT / "plexenv" / "bin" / "python"
@@ -43,7 +43,7 @@ TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled", "verification_only"}
 SCHEDULE_TERMINAL_STATUSES = {"success", "cancelled"}
 ACTIVE_SCHEDULE_STATUSES = {"started", "cancel_requested"}
 PIPELINE_PROCESS_MARKERS = (
-    "embeddinggemma2_migration.py",
+    "predictive_pipeline.py",
     "fetch_tautulli_data.py",
     "build_user_embeddings.py",
     "build_training_data.py",
@@ -817,7 +817,7 @@ def _run_stage_process(
                 close_fds=True,
             )
             cancelled = False
-            observer = PipelineStageObserver(run_id) if stage_key == 'embeddinggemma2_generation' else None
+            observer = PipelineStageObserver(run_id) if stage_key in ('embeddinggemma2_generation','predictive_daily') else None
             reader = EventReader(stdout_file) if observer else None
             observation_failed = False
             last_output = None
@@ -919,52 +919,7 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     """Ordered stages matching run_daily_pipeline.sh (single source for app runs)."""
     py = _python_executable()
     root = str(REPO_ROOT)
-    from api.embedding_generation.runtime import active_generation
-    if active_generation():
-        return [("embeddinggemma2_generation", [py, f"{root}/scripts/embeddinggemma2_migration.py", "daily", "--pipeline-lock-held"])]
-    today = datetime.now().strftime("%Y-%m-%d")
-    csv_path = str(REPO_ROOT / f"shap_labels_{today}.csv")
-    labeling_enabled = get_setting_value("pipeline.labeling_enabled", default=True)
-    label_selection_mode = get_setting_value("pipeline.label_selection_mode", default="eligible")
-    label_batch_limit = get_setting_value("pipeline.label_batch_limit", default=25)
-    label_dim_type = get_setting_value("pipeline.label_dim_type", default="all")
-    label_coverage_share = get_setting_value("pipeline.label_coverage_share", default=0.80)
-    refresh_existing_labels = get_setting_value("pipeline.refresh_existing_labels", default=False)
-    if str(label_selection_mode) not in {"eligible", "importance", "coverage", "hybrid"}:
-        label_selection_mode = "eligible"
-
-    stages = [
-        ("tautulli_incremental", [py, f"{root}/fetch_tautulli_data.py", "--mode", "incremental"]),
-        ("library_embeddings", [py, f"{root}/fetch_tautulli_data.py", "--mode", "embeddings"]),
-        ("watch_embeddings", [py, f"{root}/fetch_tautulli_data.py", "--mode", "watch_embeddings"]),
-        ("user_embeddings", [py, f"{root}/build_user_embeddings.py"]),
-        ("training_data", [py, f"{root}/build_training_data.py"]),
-        ("train_model", [py, f"{root}/train_model.py"]),
-        ("score_model", [py, f"{root}/score_model.py", "--all-users"]),
-    ]
-
-    if labeling_enabled:
-        batch_label_args = [
-            py,
-            f"{root}/batch_label_embeddings.py",
-            "--selection_mode",
-            str(label_selection_mode),
-            "--limit",
-            str(label_batch_limit),
-            "--dim_type",
-            str(label_dim_type),
-            "--label",
-            "--save_label",
-            "--export_csv",
-            csv_path,
-        ]
-        if str(label_selection_mode) == "hybrid":
-            batch_label_args.extend(["--coverage_share", str(label_coverage_share)])
-        if refresh_existing_labels:
-            batch_label_args.append("--refresh_existing")
-        stages.append(("batch_label", batch_label_args))
-
-    return stages
+    return [("predictive_daily", [py, f"{root}/scripts/predictive_pipeline.py", "daily", "--execute"])]
 
 
 def get_pipeline_schedule_slot(now_utc: datetime | None = None) -> dict[str, Any]:

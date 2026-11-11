@@ -79,7 +79,7 @@ class ProfileContext:
             self.watch_by_title[key][1] += 1
             self.watch_events.append((key, [str(event['watch_id']), row['input_hash'], available(event).isoformat()]))
 
-def feature_row(inputs, media, watches, events, owner, target, cutoff, *, posters=None, excluded_keys=(), context=None, identity=None):
+def feature_row(inputs, media, watches, events, owner, target, cutoff, *, excluded_keys=(), context=None, identity=None):
     """Use only events completed/observed before cutoff, excluding target key.
 
     For a prospective never-watched candidate, the user half equals its complete
@@ -87,13 +87,13 @@ def feature_row(inputs, media, watches, events, owner, target, cutoff, *, poster
     with the target vector or an unrelated user's profile.
     """
     target = str(target)
-    gid = inputs['feature_space_id']
+    space = inputs['feature_space_id']
     parent = media[target]
     identity = identity or (context.identity if context else None) or CanonicalTitles(media)
     target_aliases = identity.aliases(target) if identity else {target}
     expected_excluded = frozenset(identity.expand(excluded_keys) if identity else map(str, excluded_keys))
     context = context or ProfileContext(inputs, media, watches, events, owner, cutoff, excluded_keys, identity=identity)
-    if context.feature_space_id != gid or context.contract_hash != inputs['contract_hash'] or context.owner != owner or (context.cutoff != utc(cutoff)) or (context.excluded_keys != expected_excluded) or (identity and (context.identity is None or context.identity.signature != identity.signature)):
+    if context.feature_space_id != space or context.contract_hash != inputs['contract_hash'] or context.owner != owner or (context.cutoff != utc(cutoff)) or (context.excluded_keys != expected_excluded) or (identity and (context.identity is None or context.identity.signature != identity.signature)):
         raise ContractError('Reused profile context does not match inputs/user/cutoff')
     keys = [key for key in context.keys if key not in target_aliases]
     if not keys:
@@ -110,12 +110,10 @@ def feature_row(inputs, media, watches, events, owner, target, cutoff, *, poster
     fused = np.concatenate([vector(parent['embedding']), mean]).astype(np.float32)
     if fused.shape != (1536,) or not np.isfinite(fused).all():
         raise ContractError('Invalid text/user feature layout')
-    poster_dependencies = {}
-    missing = False
-    dependencies = dict(feature_space_id=gid, contract_hash=inputs['contract_hash'], cutoff=utc(cutoff).isoformat(), target_excluded=target, profile_keys=keys, media_text_hash=parent['input_hash'], profile_hashes=[[k, media[k]['input_hash']] for k in keys], watch_events=used_events, feature_version=inputs['contract']['features'], **poster_dependencies)
+    dependencies = dict(feature_space_id=space, contract_hash=inputs['contract_hash'], cutoff=utc(cutoff).isoformat(), target_excluded=target, profile_keys=keys, media_text_hash=parent['input_hash'], profile_hashes=[[k, media[k]['input_hash']] for k in keys], watch_events=used_events, feature_version=inputs['contract']['features'])
     if identity:
         dependencies.update(identity_policy=IDENTITY_POLICY, canonical_target=identity.identity(target), target_aliases=sorted(target_aliases), identity_index_hash=identity.signature)
-    return dict(owner=owner, media_key=target, embedding=fused, genres=description['genres'] or (description.get('show_context') or {}).get('genres', []), directors=description['directors'], year=description['year'], watch_sim=watch_sim, poster_missing=missing, history_titles=len(keys), media_type=description['media_type'], dependencies=dependencies, show_key=identity.group(target) if identity else str(parent['source'].get('show_rating_key') or target), **dict(canonical_identity=identity.identity(target), identity_policy=IDENTITY_POLICY) if identity else {})
+    return dict(owner=owner, media_key=target, embedding=fused, genres=description['genres'] or (description.get('show_context') or {}).get('genres', []), directors=description['directors'], year=description['year'], watch_sim=watch_sim, history_titles=len(keys), media_type=description['media_type'], dependencies=dependencies, show_key=identity.group(target) if identity else str(parent['source'].get('show_rating_key') or target), **dict(canonical_identity=identity.identity(target), identity_policy=IDENTITY_POLICY) if identity else {})
 
 def label_for(events, feedback, runtime, kind, as_of, *, movie_days=21, tv_days=14):
     """Port of active legacy label rules, intentionally retaining 0.60, not 0.70."""
@@ -335,7 +333,8 @@ class Vocabulary:
         self.genres = list(genres)
         self.directors = list(directors)
         self.decades = list(decades)
-        self.include_poster = include_poster
+        if include_poster:raise ContractError('Poster features are unsupported')
+        self.include_poster = False
 
     @classmethod
     def fit(cls, rows, *, include_poster=False):
@@ -351,26 +350,22 @@ class Vocabulary:
 
     @property
     def names(self):
-        groups = ['media_text'] + (['media_poster'] if self.include_poster else []) + ['user']
-        return [f'{group}_{i}' for group in groups for i in range(768)] + ['genre_' + g for g in self.genres] + ['director_' + d for d in self.directors] + [f'decade_{d}' for d in self.decades] + ['watch_sim'] + (['poster_missing'] if self.include_poster else [])
+        return ([f'{group}_{i}' for group in ('media_text','user') for i in range(768)]
+            +['genre_'+g for g in self.genres]+['director_'+d for d in self.directors]
+            +[f'decade_{d}' for d in self.decades]+['watch_sim'])
 
-    def transform(self, rows):
-        values = []
-        for r in rows:
-            data = np.asarray(r['embedding'], dtype=np.float32)
-            if data.shape == (1536,) and (not self.include_poster):
-                if not np.isfinite(data).all():
-                    raise ContractError('Invalid text feature policy')
-                embedding = list(data)
-            elif data.shape == (2304,):
-                if not np.isfinite(data[:768]).all() or not np.isfinite(data[1536:]).all() or (not np.isnan(data[768:1536]).all() if r['poster_missing'] else not np.isfinite(data[768:1536]).all()):
-                    raise ContractError('Invalid missing-modality feature policy')
-                embedding = list(data if self.include_poster else np.concatenate([data[:768], data[1536:]]))
-            else:
-                raise ContractError('Feature width mismatch')
-            decade = int(r['year']) // 10 * 10 if r['year'] is not None else None
-            values.append(embedding + [int(g in r['genres']) for g in self.genres] + [int(d in r['directors']) for d in self.directors] + [int(decade == d) for d in self.decades] + [r['watch_sim']] + ([int(r['poster_missing'])] if self.include_poster else []))
-        return np.asarray(values, dtype=np.float32).reshape(len(rows), len(self.names))
+    def transform(self,rows):
+        values=[]
+        for row in rows:
+            data=np.asarray(row['embedding'],dtype=np.float32)
+            if data.shape!=(1536,) or not np.isfinite(data).all():
+                raise ContractError('Expected exactly 768 text and 768 user coordinates')
+            decade=int(row['year'])//10*10 if row['year'] is not None else None
+            values.append(list(data)+[int(g in row['genres']) for g in self.genres]
+                +[int(d in row['directors']) for d in self.directors]
+                +[int(decade==d) for d in self.decades]+[row['watch_sim']])
+        return np.asarray(values,dtype=np.float32).reshape(len(rows),len(self.names))
+
 
 def chronological_split(rows):
     identities = [(r.get('owner'), r['canonical_identity']) for r in rows if 'canonical_identity' in r]

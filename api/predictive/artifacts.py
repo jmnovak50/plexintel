@@ -1,13 +1,12 @@
 """Ordinary checksum-addressed model files; public feature config is the pointer."""
 import hashlib,io,json,os,tempfile
 from pathlib import Path
-import joblib
 from .contracts import ContractError,fingerprint
-from .features import Vocabulary,SUPERVISION_POLICY
 from .recovery import IDENTITY_POLICY
 
 
 def save_model(directory,bundle):
+    import joblib
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     data=io.BytesIO();joblib.dump(bundle,data);raw=data.getvalue()
     digest=hashlib.sha256(raw).hexdigest();path=directory/(digest+'.joblib')
@@ -24,11 +23,13 @@ def save_model(directory,bundle):
 
 
 def load_model(config):
+    import joblib
+    from .features import Vocabulary,SUPERVISION_POLICY
     if config.get('architecture')!='public-text-predictor/1.0':raise ContractError('Unsupported model architecture')
     path=Path(config['model_path']);raw=path.read_bytes()
     if hashlib.sha256(raw).hexdigest()!=config['model_sha256']:raise ContractError('Model file checksum mismatch')
     bundle=joblib.load(io.BytesIO(raw))  # Trusted local owner-written artifacts only.
-    if (bundle['feature_space_id']!=config['feature_space_id'] or bundle['feature_names']!=config['feature_names']
+    if (bundle.get('source_sha256')!=config.get('source_sha256') or bundle['feature_space_id']!=config['feature_space_id'] or bundle['feature_names']!=config['feature_names']
         or bundle['contract_hash']!=config['contract_hash'] or fingerprint(config['contract'])!=config['contract_hash']
         or bundle['identity_policy']!=IDENTITY_POLICY or bundle['supervision_policy']!=SUPERVISION_POLICY):
         raise ContractError('Model/configuration/policy mismatch')
@@ -46,6 +47,7 @@ def current_config(conn):
 
 
 def model_config(inputs,bundle,path,digest,evaluation):
+    from .features import SUPERVISION_POLICY
     groups=[dict(name='media_text',start=0,width=768),dict(name='user',start=768,width=768)]
     return dict(architecture='public-text-predictor/1.0',config_id=inputs['feature_space_id'][:24],
         feature_space_id=inputs['feature_space_id'],contract=inputs['contract'],contract_hash=inputs['contract_hash'],

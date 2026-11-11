@@ -23,7 +23,7 @@ def fieldnames():
         'attempt_count', 'failed_attempt_count', 'pending_attempt_count', 'request_error_codes',
         'input_tokens', 'cached_input_tokens', 'output_tokens', 'token_totals_are_complete',
         'estimated_cost_usd', 'cost_basis', 'minimum_label_coverage_percent', 'maximum_low_overlap_percent',
-        'interpretation_model', 'config_id', 'generation_id', 'contract_hash', 'encoder_digest', 'encoder_model',
+        'interpretation_model', 'config_id', 'feature_space_id', 'contract_hash', 'encoder_digest', 'encoder_model',
         'model_sha256', 'publication_id',
     ]
 
@@ -74,9 +74,9 @@ def write_csv(filename, rows):
 
 def load_records(conn, context):
     """Select explicit export fields; never load raw prompt text or prompt examples."""
-    identity = (context['config_id'], context['generation_id'], context['contract_hash'], context['encoder_digest'])
+    identity = (context['config_id'], context['feature_space_id'], context['contract_hash'], context['encoder_digest'])
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute('''SELECT * FROM embedding_labels WHERE config_id=%s AND generation_id=%s
+        cur.execute('''SELECT * FROM embedding_labels WHERE config_id=%s AND feature_space_id=%s
             AND contract_hash=%s AND encoder_digest=%s ORDER BY dimension''', identity)
         labels = {r['dimension']: dict(r) for r in cur.fetchall()}
         cur.execute('''SELECT assessment_id,dimension,source,provider,model,result,saved,outcome,
@@ -89,16 +89,16 @@ def load_records(conn, context):
                 'skipped_reason',prompt->'skipped_reason') AS prompt_metadata
             FROM embedding_dimension_assessments
             WHERE config_id=%s
-              AND COALESCE(result->'provenance',prompt->'provenance')->>'generation_id'=%s
+              AND COALESCE(result->'provenance',prompt->'provenance')->>'feature_space_id'=%s
               AND COALESCE(result->'provenance',prompt->'provenance')->>'contract_hash'=%s
               AND COALESCE(result->'provenance',prompt->'provenance')->>'encoder_digest'=%s
             ORDER BY assessment_id''', identity)
         assessments = [dict(r) for r in cur.fetchall()]
-        cur.execute('''SELECT batch_id,config_id,generation_id,model,dimensions,status,created_at,completed_at
-            FROM embedding_label_batches WHERE config_id=%s AND generation_id=%s ORDER BY created_at''', identity[:2])
+        cur.execute('''SELECT batch_id,config_id,feature_space_id,model,dimensions,status,created_at,completed_at
+            FROM embedding_label_batches WHERE config_id=%s AND feature_space_id=%s ORDER BY created_at''', identity[:2])
         batches = {r['batch_id']: dict(r) for r in cur.fetchall()}
         cur.execute('''SELECT r.* FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
-            WHERE b.config_id=%s AND b.generation_id=%s ORDER BY r.request_id''', identity[:2])
+            WHERE b.config_id=%s AND b.feature_space_id=%s ORDER BY r.request_id''', identity[:2])
         requests = [dict(r) for r in cur.fetchall()]
     return labels, assessments, batches, requests
 
@@ -254,7 +254,7 @@ def format_row(event, saved_label, batch, attempts, stats, context, historical=F
         values = [r[name] for r in attempts if r[name] is not None]
         row[name] = sum(values) if values else None
     row.update({name:stats[name] for name in ('usage_count','sum_abs_shap','avg_abs_shap','user_count') if name in stats})
-    row.update({name:context.get(name) for name in ('config_id','generation_id','contract_hash','encoder_digest',
+    row.update({name:context.get(name) for name in ('config_id','feature_space_id','contract_hash','encoder_digest',
                                                   'encoder_model','model_sha256','publication_id')})
     return row
 
@@ -280,5 +280,5 @@ def export_csv(conn, filename, *, batch_id=None, dim_type='all', dimensions=None
             groups.get((event.get('batch_id'), dimension), []), stats.get(dimension, {}), context, historical=bool(batch_id)))
     write_csv(filename, rows)
     return dict(export_csv=str(Path(filename).expanduser()), rows=len(rows), batch_id=batch_id,
-                generation_id=context['generation_id'], cloud_requests_started=0,
+                feature_space_id=context['feature_space_id'], cloud_requests_started=0,
                 warning='Private local evidence. CSV is not an invoice; unknown token counts stay blank. Keep out of Git.')

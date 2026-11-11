@@ -16,4 +16,83 @@ The XGBoost architecture remains 100 trees, depth 6, learning rate .1, subsample
 
 Validation models and the final all-data fit are distinct. Only the former receive held-out performance claims. Reports include both classes, confusion matrices, Brier/ECE buckets, supervision segments, media/history segments and feature-group raw-margin SHAP. AP/NDCG can look strong under positive prevalence; labeled-candidate ranking is not catalog-wide accuracy. Small negative cohorts are flagged. A prospective test remains a separate requirement for independent generalization claims.
 
-Implementation/qualification evidence and the reversible cutover procedure follow below as validation completes.
+Protected reference: `preserve/embedding-generation-232c940` at `232c94022b88cd9a6ea7a19e1d5be79b1fcb9598`. The implementation is committed only on the restoration branch; qualification evidence and the reversible cutover procedure are recorded below.
+
+## Compatibility and small schema changes
+
+The existing recommendation REST/MCP queries, authentication, feedback, discovery, dimension governance and public SHAP interfaces are retained. Scheduler enablement, schedule slots, execution exclusion, cancellation, retry/backoff and logs retain their existing public interfaces. Daily dispatch is now `scripts/predictive_pipeline.py daily --execute`; the shell launcher and web controller use the same file lock, and every predictive worker also takes the same database advisory writer lock. Independent obsolete numeric-writer CLIs reject execution rather than falling back to the old encoder or unsafe feature builders. The historical migration CLI is disabled for execution; reference modules/tests remain for forensic comparison, outside the tested production import closure.
+
+The existing admin status URL remains authenticated and reports `active_generation: null`, architecture and model/feature inventory. Migration-era receipt fields are retired. This status change is intentional; it does not register a deployment approval. Source hashes in the model/config/report describe reproducibility, not authorization. The old standalone review CSV helper remains a historical reference; operational CSV export uses the current provenance-aware, read-only batch exporter.
+
+`api/db/migrations/optional/simple_predictor/001_public_provenance.sql` adds provenance to the three existing embedding tables and diagnostics/sample weight to current training rows. It removes the obsolete fixed training-vector typmod without changing stored values. Three natural-key unique indexes reject duplicate existing vectors. Label rows/batches gain a stable feature-space fingerprint; the unused historical generation column remains for old records and is nullable in batches. There are no new persistent predictor tables. Reapplying the migration is tested, including preservation of a populated vector.
+
+`005_semantic_dimension_labeling.sql` retains the existing public label tables and changes compatibility checks to the stable encoder/serializer/profile/identity contract. It has no schema-state lookup. Incompatible old labels stay stored but cannot attach by dimension number alone. Raw SHAP contexts must match the currently published model and scoring time. Compatible labels and same-prompt abstentions are reused. The four strict cloud settings and the cumulative accounting scope remain unchanged; past automatic reservations still consume the budget after this architectural change. Policy is read coherently and locked during admission. Labeling runs only after a fresh verified publication; optional errors and recovery/verification never trigger predictive retries.
+
+## Failure and retention behavior
+
+Preparation failures leave the last committed vectors/model/predictions intact. Training and scoring use only memory and connection-private tables. Publication takes short source/write locks, checks the incumbent configuration and source fingerprint, verifies vector/training hashes, and commits the file pointer with all public outputs. Unchanged vectors receive no update on a repeated run. A failed transaction rolls back all protected changes. PostgreSQL connection loss around commit, or failed post-commit verification, produces an operator hold rather than automatically replaying an uncertain workload. `verify` is read-only and never labels.
+
+One ordinary `last-good.tar` contains the previous derived-table dump, model file and checksummed manifest. Model files retain only current and previous; temporary backup/recovery files are removed. A pre-restoration backup additionally needs the preserved original implementation and ordinary full-database backup: automated `restore-last-good` deliberately rejects a migration-era model without a file manifest. Source records, labels and billing ledgers are never deleted by this recovery helper. Restored data is transactional and population-checked. Backup hashing/extraction streams bounded chunks; passwords are never put in subprocess arguments.
+
+Terminal execution history older than 30 days is pruned while keeping at least 30 terminal records and all recent/active records. Existing cumulative cloud accounting is excluded from pruning. `ops/predictive-logrotate.conf.example` prepares ordinary bounded file logging; it is not installed. No full historical training/prediction/vector populations accumulate in database archives.
+
+## Validation and limits
+
+The test harness uses PostgreSQL 18.6/pgvector on a private Unix socket, no TCP listener, 64 MiB shared buffers, 4 MiB work memory and 12 connections. Each end-to-end test creates and drops a distinct disposable database, refusing non-private host paths. It asserts `embedding_v2` is absent before and after the workload. Embeddings and Plex responses are synthetic; cloud providers are mocked.
+
+Final full offline/public-only PostgreSQL run: **1,189 passed, 316 opt-in skips, 89 subtests, one existing FastAPI deprecation warning**. The four labeling/settings/export suites separately passed **135 tests** with real temporary SQL and mocked providers. No failing tests remain. The full suite peaked at 393,392 KiB child-process RSS (about 384 MiB); this is a synthetic test measurement, not a production worker projection. With an empty checkout environment, the browser-cookie test additionally needs its secure-cookie test configuration before application collection; use the explicit synthetic environment below rather than inheriting production settings. Initial failures in obsolete architecture assertions were updated for the intended replacement; a missing disposable pgvector extension, a temporary-table repeat bug and a missing provenance import were corrected and rerun.
+
+The executable checks cover both confirmed retired-episode patterns, multiple watches, aliases, retrospective updates/maturity, negative waiting periods, future exclusions, `watch_sim`, narrow Friends containment, ambiguous identities and predictor-field isolation. End-to-end tests exercise three genuine XGBoost fits per workload, publication, unchanged-vector reuse, >128-row interruption/mismatch, source/incumbent drift, encoder failure, competing writers, actual backend termination before and after commit, model corruption, ordinary last-good restoration and bounded execution logs. A static import-closure test traverses the web, worker, collector and labeling entry points and rejects any dependency on the retired package or schema SQL.
+
+Synthetic evidence is recorded in `predictive-restoration-synthetic.json`: 322 observations, 173 media/110 watch/two user vectors, 98 predictions and 3,920 retained SHAP values. Chronological fit/validation is 248/66 (validation 32 positive, 34 negative); grouped fit/validation is 196/12 (eight positive, four negative). Both synthetic balanced accuracies are 1.0 because the mocked vectors deliberately encode their class. This verifies the plumbing; it says nothing about real recommendation accuracy. Four grouped negatives cannot support a reliable real-world estimate. The final model uses all 322 observations and has no independent test score.
+
+No full production-data rebuild, local Gemma inference, real recommendation review, live API qualification, 40-minute daily timing or production rollback drill was performed. The host read showed only about 3.2 GiB available of 15.8 GiB; this cannot support a defensible production-sized concurrent worker/database allocation. Retain the qualification requirements for explicit worker/database limits, >=20% host memory headroom, and measured worker RSS below 70% of its allocation. The prior proposed 6 GiB worker allowance (4.2 GiB RSS gate), with separately allocated database capacity, remains an allocation prerequisite rather than a claim that this implementation needs that much. The small synthetic measurements must not be extrapolated to the real workload.
+
+Real-data acceptance must inspect both classes, uncertainty, score distributions, calibration, supervision-source/user concentration, top-20 movie/episode and show concentration. Saved incumbent/rebuilt lists are reranked on their shared eligible saved population by `ranking_comparison`; differences in candidate availability are reported separately. No defensible historical common cohort has been run in this branch, and no previous model is declared more accurate. Current metadata/source revision availability, selected labels, missing-library history coverage and repeated validation remain limitations. The full cohort reconciliation must investigate changed counts instead of forcing 9,291 or 9,301 rows.
+
+## Reproduction and remaining qualification
+
+These commands are instructions for a disposable destination, not authorization for production:
+
+```bash
+cd /path/to/restoration-checkout
+# Keep an empty, ignored .env here so dotenv cannot discover another checkout's credentials.
+PYTHON=/home/jmnovak/projects/plexintel/plexenv/bin/python
+export PYTHONDONTWRITEBYTECODE=1
+export DATABASE_URL='postgresql:///postgres?host=/tmp/nonexistent'
+export SESSION_COOKIE_SECURE=true
+export SESSION_SECRET=synthetic-offline-session-key
+"$PYTHON" -m pytest -q -p no:cacheprovider tests
+```
+
+For SQL tests, create an unprivileged temporary PostgreSQL cluster under `/tmp/plexintel-restoration-pg-XXXXXX`, private socket only, with the limits above. Install pgvector in its test `postgres` database. Set `PLEXINTEL_RESTORATION_TEST_DSN` to that private socket for `tests/test_predictive_publication.py`. Set `PLEXINTEL_LABELING_TEST_DATABASE_URL` to it for the labeling suite; its temporary-ledger tests additionally require `DATABASE_URL` set to that same disposable cluster and `PLEXINTEL_TEST_TEMP_DB=1`. Run `test_labeling_policy.py`, `test_pipeline_labeling.py`, `test_semantic_labeling.py`, and `test_dimension_label_export.py`. No real provider credentials are needed. Stop the temporary cluster afterward.
+
+A full rebuild requires an approved disposable destination with explicit resource allocations and a protected ordinary backup restored with **public tables only**. Do not restore the migration schema. Apply `001_public_provenance.sql` and the revised `005_semantic_dimension_labeling.sql` in that isolated database. Capture an exact source snapshot using `source.read_snapshot`, verified grouped starts/stops using `source.event_availability`, a complete Plex catalog and all detailed metadata requested by the existing `Resolver`. Save privately with this JSON shape:
+
+```json
+{"snapshot": {"media": [], "events": [], "feedback": [], "legacy_watch_ids": [], "as_of": "offset timestamp"},
+ "plex": {"complete_catalog": true, "catalog": [], "metadata": []}, "encoder_digest": "installed SHA-256"}
+```
+
+Populate arrays from the actual captured evidence; empty placeholders are not a qualifying replay. Preserve unverified ends as unknown. Include resolved show/season/replacement metadata. The replay adapter refuses incomplete current metadata, does not turn a missing captured record into a historical 404, and validates the supplied snapshot against the isolated source rows. Credentials and private histories belong only in protected ignored files. The initial incumbent AP baseline JSON must contain its exact `model_sha256` and `average_precision`.
+
+```bash
+DATABASE_URL="$ISOLATED_DSN" "$PYTHON" scripts/predictive_pipeline.py daily \
+  --execute --frozen-inputs /private/capture.json --encoder-host http://approved-isolated-encoder:11434 \
+  --no-labeling --artifacts /private/predictor-rebuild \
+  --incumbent-evaluation /private/incumbent-evaluation.json
+```
+
+Use `--allow-stored-history` only when approving the documented stored descriptive fallback. This never authorizes fabricated identity. The installed local Gemma digest must match the capture. All inference, fitting and publication in this command target the isolated environment. Review the private latest evaluation/config and model/source/dataset hashes, reconcile canonical uniqueness/distributions/splits, inspect attribution and rankings, and repeat with unchanged inputs to verify inference reuse. Exercise source failure, quality failure, connection loss and last-good restore. Normal incremental predictive work must finish <=2,400 seconds on a comparable workload; initial full regeneration is exempt. Cloud work has separate timing/accounting and cannot consume the predictive budget.
+
+## Reversible cutover preparation — not executed
+
+1. Obtain explicit approvals and an approved deployment revision. Preserve actual running code/config/model checksums, a complete ordinary database backup (including the untouched old schema for rollback), public derived-table exports and model bytes; verify restore on disposable infrastructure. Do not assume a Git branch identifies already imported production code. Leave scheduling and cloud labeling disabled.
+2. Complete full-data isolated qualification and owner ranking review. Approve the source snapshot, resource allocation, incumbent comparison, quality evidence and measured incremental latency. Validate real API/explanation behavior with stale-label rejection and actual backup/restore timings. Resolve source/identity/cohort failures before accepting the model.
+3. Under a separately approved controlled window, apply the small public migrations and execute the reviewed initial rebuild against production only after that execution is explicitly approved. Existing predictions remain committed until atomic replacement. The initial full rebuild can be long; arrange the deployment/publication window so old generation-aware administration and new label semantics are not mixed. Keep the preserved serving implementation available until the switch is verified. Approve deployment of the reviewed application/driver revision, environment/model-artifact path and ordinary log rotation; no source receipt is automatically approved or registered by this implementation.
+4. Run `scripts/predictive_pipeline.py verify` with the approved production destination, check model/source/contract hashes, recommendation counts and eligibility, API responses, dimensions, explanations and stale-label rejection. A verification command has no provider or workload side effect. After the first restoration publication, last-good recovery is `restore-last-good --execute --artifacts /private/predictor` under separate recovery approval. For the initial cutover rollback, restore the preserved public outputs/function definitions and original serving code/model from the ordinary backup; the old schema has not been removed.
+5. Qualify an incremental daily run, then obtain separate scheduler approval. Authorize labeling independently with explicit cumulative budget/request limits and inspect reserved versus measured cost; do not reset historical accounting. Only after sustained successful serving, rollback readiness and an external dependency inventory should retirement of `embedding_v2` be proposed for separate approval. No drop/rename/migration of that schema is included here.
+
+Recommendations: **GO** for reviewing/accepting the restoration code and synthetic isolated workflow. **HOLD** for production-sized rebuild acceptance, deployment, production database cutover, schema retirement, scheduler activation and cloud activation until their distinct prerequisites and approvals are satisfied.
+
+Changed paths are enumerated in `predictive-restoration-files.txt`. The primary implementation is `api/predictive/`, the direct CLI and shell launcher; shared labeling/API adapters and their regression tests were updated for public provenance. Historical migration references are preserved outside the active import closure.

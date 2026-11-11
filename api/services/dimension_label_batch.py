@@ -87,8 +87,8 @@ def candidates(conn, evidence):
             WHERE NULLIF(BTRIM(saved.label),'') IS NOT NULL AND '''+compatible_label_sql())
         completed = {r[0] for r in cur.fetchall()}
         cur.execute('''SELECT DISTINCT ON (dimension) dimension,result->>'prompt_sha256' FROM embedding_dimension_assessments
-            WHERE config_id=%s AND outcome='abstained' AND result->'provenance'->>'generation_id'=%s
-            ORDER BY dimension,assessment_id DESC''',(ctx['config_id'],ctx['generation_id']))
+            WHERE config_id=%s AND outcome='abstained' AND result->'provenance'->>'feature_space_id'=%s
+            ORDER BY dimension,assessment_id DESC''',(ctx['config_id'],ctx['feature_space_id']))
         abstained = dict(cur.fetchall())
     eligible,ineligible = [],dict(paused=len(paused),insufficient_contrast=0)
     for position,dimension in enumerate(ranked,1):
@@ -113,7 +113,7 @@ def choose(eligible, args):
         lookup = {r['dimension']:r for r in eligible}
         invalid = [d for d in dimensions if d not in lookup or not scope(lookup[d])]
         if invalid:
-            raise ValueError('Selected dimensions have no eligible current-generation contrast, are paused, or fall outside scope: '+str(invalid))
+            raise ValueError('Selected dimensions have no eligible current-feature-space contrast, are paused, or fall outside scope: '+str(invalid))
         rows = [lookup[d] for d in dict.fromkeys(dimensions)]
     else:
         rows = [r for r in eligible if scope(r)]
@@ -148,16 +148,16 @@ def persist_result(conn, context, row, result, model, *, regenerate=False, sourc
         if current_context(conn)!=context:
             raise ValueError('Production provenance changed during labeling; candidate not saved')
         before = original.get_existing_label_row(cur,dimension)
-        cur.execute('SELECT config_id,generation_id,contract_hash,encoder_digest FROM embedding_labels WHERE dimension=%s',(dimension,))
+        cur.execute('SELECT config_id,feature_space_id,contract_hash,encoder_digest FROM embedding_labels WHERE dimension=%s',(dimension,))
         previous = cur.fetchone()
-        incompatible = previous is not None and tuple(previous)!=(context['config_id'],context['generation_id'],context['contract_hash'],context['encoder_digest'])
+        incompatible = previous is not None and tuple(previous)!=(context['config_id'],context['feature_space_id'],context['contract_hash'],context['encoder_digest'])
         saved,outcome = original.save_label_result(cur,dimension,result,review_mode=regenerate or incompatible,dim_type=row['side'],
             minimum_label_coverage_percent=row['prompt'].get('minimum_label_coverage_percent',original.MINIMUM_LABEL_COVERAGE_PERCENT),
             maximum_low_overlap_percent=row['prompt'].get('maximum_low_overlap_percent',original.MAXIMUM_LOW_OVERLAP_PERCENT))
         if saved:
-            cur.execute('''UPDATE embedding_labels SET config_id=%s,generation_id=%s,contract_hash=%s,
+            cur.execute('''UPDATE embedding_labels SET config_id=%s,feature_space_id=%s,contract_hash=%s,
                 encoder_digest=%s,interpretation_model=%s,needs_review=needs_review OR %s WHERE dimension=%s''',
-                (context['config_id'],context['generation_id'],context['contract_hash'],context['encoder_digest'],model,
+                (context['config_id'],context['feature_space_id'],context['contract_hash'],context['encoder_digest'],model,
                  result.get('validation_status')=='needs_review',dimension))
         elif result.get('label')==original.UNCLEAR_LABEL:
             outcome = 'abstained'
@@ -173,8 +173,8 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
     ctx = evidence.context
     batch_id = str(uuid4())
     with conn.cursor() as cur:
-        cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,generation_id,model,dimensions,forecast,pricing,budget_usd)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''',(batch_id,ctx['config_id'],ctx['generation_id'],args.label_model,
+        cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing,budget_usd)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''',(batch_id,ctx['config_id'],ctx['feature_space_id'],args.label_model,
             Json([r['dimension'] for r in selected]),Json(prediction),Json(asdict(pricing)),args.budget_usd))
     conn.commit()
     automation=getattr(args,'automation',None)
@@ -363,7 +363,7 @@ def main(argv=None):
         args.model_source='CLI override' if args.label_model else 'Setup: labeling.ollama_model'
         args.label_provider,args.label_model=gpt.resolve_label_backend(args.label_provider,args.label_model)
         if args.label_provider!='ollama':
-            p.error('The current-generation labeling workflow requires Ollama; select the Label Provider in Setup or pass --label-provider ollama')
+            p.error('The current-feature-space labeling workflow requires Ollama; select the Label Provider in Setup or pass --label-provider ollama')
         try:
             pricing=pricing_for_model(args.label_model,args.input_price,args.cached_input_price,args.output_price)
         except ValueError as exc:

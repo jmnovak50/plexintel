@@ -202,10 +202,13 @@ def test_deployment_receipt_requires_existing_admin_auth(monkeypatch):
     from api.embedding_generation import runtime
     route=next(r for r in admin_routes.router.routes if r.path=='/admin/embedding-generation/status')
     assert any(dep.call is admin_routes.require_admin for dep in route.dependant.dependencies)
-    monkeypatch.setattr(runtime,'active_generation',lambda:None)
+    from unittest.mock import MagicMock
+    from api.predictive import artifacts
+    conn=MagicMock();monkeypatch.setattr(admin_routes,'connect_db',lambda:conn)
+    monkeypatch.setattr(artifacts,'current_config',lambda _:None)
     result=admin_routes.embedding_generation_deployment_status(admin_user={'is_admin':True})
-    assert result['generation_api']==1 and result['active_generation'] is None
-    assert len(result['deployed_code_sha256'])==64
+    assert result['generation_api']==0 and result['active_generation'] is None
+    assert result['architecture']=='public-text-predictor/1.0'
 
 
 def test_api_only_distribution_can_hash_without_offline_scripts(tmp_path,monkeypatch):

@@ -153,18 +153,12 @@ def test_interrupted_structured_stage_stops_its_clock_but_keeps_evidence():
     assert result['metrics']=={'rows':10} and result['message']=='Worker interrupted'
 
 
-def test_title_recovery_uses_child_receipt_and_only_catalog_media():
+def test_live_stage_details_use_existing_public_logs_without_migration_queries():
     child=dict(stage_key='media_text',status='success',stdout_tail=json.dumps(event('media_text','success')))
-    run=dict(run_id=999,status='failed',stages=[dict(stage_key='embeddinggemma2_generation',stdout_tail=None),child])
-    conn=FakeConnection([dict(installed=True,requests=True,items=True)],[[historical_journal()],
-        [dict(run_id=RID,rating_key='42',title='Fictional Beacon',show_title='Fictional Series',media_type='episode',total=301)]])
-    enrich_runs(conn.cursor(),[run])
-    assert run['production_run_id']==RID and run['embedded_media_total']==301
-    assert run['embedded_media'][0]['title']=='Fictional Beacon'
-    assert set(run['embedded_media'][0])=={'rating_key','title','show_title','media_type'}
-    query=conn.executed[-1][0]
-    assert "r.kind='media_text'" in query and "r.status='succeeded'" in query and 'position<=200' in query
-    assert all(s.lstrip().startswith('SELECT') or s.lstrip().startswith('WITH') for s,_ in conn.executed)
+    run=dict(run_id=999,status='success',stages=[dict(stage_key='predictive_daily',stdout_tail=None),child])
+    conn=FakeConnection([]);enrich_runs(conn.cursor(),[run])
+    assert run['stage_details'][0]['stage_key']=='media_text'
+    assert conn.executed==[]
 
 
 def test_cancellation_closes_active_stage_and_marks_unreached_work_skipped(monkeypatch,tmp_path):
@@ -207,24 +201,12 @@ def historical_journal():
         users_rebuilt=18,dataset=dict(rows=9303,skips=dict(label_policy=533,limited_history=42),watch_coverage=dict(quarantined_watch_events=277)))
 
 
-def test_historical_run_expansion_is_read_only_correlated_and_honest_about_missing_data():
-    carrier=dict(stage_key='embeddinggemma2_generation',stdout_tail='truncated line\n'+json.dumps(dict(run_id=RID,promotion_id='committed')))
-    run=dict(run_id=326,status='success',stages=[carrier]);original=deepcopy(run['stages'])
-    conn=FakeConnection([{'installed':'embedding_v2.production_runs'}],[[historical_journal()]])
+def test_historical_logs_remain_visible_without_querying_retired_journals():
+    run=dict(stages=[dict(stage_key='embeddinggemma2_generation',stdout_tail='original log')])
+    before=deepcopy(run['stages']);conn=FakeConnection([])
     enrich_runs(conn.cursor(),[run])
-    details={s['stage_key']:s for s in run['stage_details']}
-    assert len(details)==len(STAGES) and run['stages']==original
-    assert details['media_text']['metrics']['inferred']==228
-    assert details['media_text']['duration_seconds']==354
-    assert details['training_data']['duration_seconds'] is None
-    assert details['shap']['duration_seconds'] is None
-    assert details['publication']['status']=='success'
-    assert details['verification']['status']=='not_recorded'
-    assert run['semantic_labeling']['status']=='disabled'
-    assert all(s.lstrip().startswith('SELECT') for s,_ in conn.executed)
-    assert conn.executed[-1][1]==((RID,),)
-    legacy=dict(stages=[dict(stage_key='batch_label',stdout_tail='legacy log')]);before=deepcopy(legacy)
-    enrich_runs(conn.cursor(),[legacy]);assert legacy==before
+    assert run['stages']==before and 'not queried' in run['stage_detail_note']
+    assert conn.executed==[]
 
 
 def test_uncorrelated_history_preserves_original_log_instead_of_guessing_by_time():

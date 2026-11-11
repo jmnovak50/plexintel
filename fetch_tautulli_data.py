@@ -700,14 +700,14 @@ def store_watch_history(conn, cursor, watch_history, *, source_grouping, raise_o
 
 def run_incremental_load(*, embed=True):
     if embed:
-        from api.embedding_generation.runtime import assert_legacy_allowed
+        from api.predictive.retired import assert_legacy_allowed
         assert_legacy_allowed()
     print("🔁 Running incremental update...")
 
     conn, cursor = connect_to_db()
     if not conn:
         print("❌ ERROR: Could not connect to database.")
-        return
+        raise RuntimeError('Source database connection unavailable')
 
     # Clear before listing libraries so Admin/manual pipeline runs see newly-added
     # media that Tautulli may still be serving from its cached metadata views.
@@ -1258,7 +1258,7 @@ def generate_media_embeddings(batch_size: int | None = None):
       - media_embeddings.embedding is pgvector `vector(768)`
       - Ollama (embeddinggemma) is reachable via embed_texts()
     """
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.predictive.retired import assert_legacy_allowed
     assert_legacy_allowed()
     print("🧠 Generating media embeddings...")
 
@@ -1393,7 +1393,7 @@ def generate_watch_embeddings(batch_size: int | None = None):
     Uses library + genre/actor/director context to build the text.
     Assumes watch_embeddings.embedding is vectors.vector(768).
     """
-    from api.embedding_generation.runtime import assert_legacy_allowed
+    from api.predictive.retired import assert_legacy_allowed
     assert_legacy_allowed()
     print("🧠 Generating watch embeddings via Ollama (EmbeddingGemma)...")
 
