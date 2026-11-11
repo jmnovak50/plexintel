@@ -83,7 +83,7 @@ def enrich_runs(cur, runs):
     for run in runs:
         carriers = [s for s in run['stages'] if s['stage_key']=='embeddinggemma2_generation']
         if not carriers:continue
-        run['semantic_labeling'] = dict(status='disabled', reason='Legacy semantic dimension labeling is incompatible with Gemma 2. SHAP explanations remain enabled.')
+        run['semantic_labeling'] = dict(status='disabled', reason='No automatic post-publication labeling receipt was recorded for this historical run. Manual current-generation labeling remains available.')
         children = [event_details(s) for s in run['stages'] if s['stage_key'] in STAGE_NAMES]
         if children:
             run['stage_details'] = sorted(children, key=lambda s:list(STAGE_NAMES).index(s['stage_key']))
@@ -107,12 +107,13 @@ def enrich_runs(cur, runs):
     cur.execute("""SELECT run_id,status,stages,promotion_id,summary->'counts' AS counts,
         summary->'reconciliation' AS reconciliation,summary->'scoring' AS scoring,
         summary->'training_dataset' AS dataset,summary->'inference' AS inference,
-        summary->'users_rebuilt' AS users_rebuilt FROM embedding_v2.production_runs
+        summary->'users_rebuilt' AS users_rebuilt,summary->'semantic_labeling' AS semantic_labeling FROM embedding_v2.production_runs
         WHERE run_id IN %s""", (tuple(wanted),))
     for journal in cur.fetchall():
         for run in wanted[journal['run_id']]:
             if 'stage_details' not in run:run['stage_details'] = historical_details(journal)
             run['publication_id'] = journal['promotion_id']
+            if journal.get('semantic_labeling'):run['semantic_labeling']=journal['semantic_labeling']
     if hasattr(row, 'get') and row.get('requests') and row.get('items'):
         # Catalog titles only. Never expose watch-event IDs, owners, prompts or vectors.
         cur.execute('''WITH media AS (

@@ -1,4 +1,4 @@
-# Manual semantic dimension labeling
+# Semantic dimension labeling
 
 The original HIGH-versus-LOW labeling workflow is restored for the active
 EmbeddingGemma 2 text generation. It reads **Ollama Label Model in Setup**
@@ -6,12 +6,145 @@ EmbeddingGemma 2 text generation. It reads **Ollama Label Model in Setup**
 Ollama integration. Both batch labeling and Dimension Explorer review use this
 setting. An explicit CLI `--label-model` overrides it for that invocation only.
 The resolved model and configuration source are shown in the forecast and stored
-with results. No labeling stage is added to the daily pipeline. Operators
-initiate batches or individual Dimension Explorer reviews manually.
+with results. Manual batches and Dimension Explorer reviews remain available.
+The local integration adds an optional post-publication daily stage using this
+same implementation; it is not deployed or enabled by this document.
 
 Labels are approximate semantic interpretations of coordinates. They are not
 proven causal explanations of XGBoost predictions. Prediction probabilities,
 ranking, training data, embedding arithmetic and SHAP computations are unchanged.
+
+## Optional automatic daily stage
+
+The daily CLI calls `pipeline_labeling.run_after_publication()` only after the
+existing worker has published and completed final verification. The adapter
+reuses `Evidence`, `candidates`, `choose`, forecasting, `execute`, `UsageLedger`
+and existing persistence/governance. There is no second labeler, embedding
+inference or classifier fit. It shares the existing execution lock and verifies
+the exact successful run/publication/model before evidence or provider work.
+
+The stage runs synchronously after the predictive workload, but its failures do
+not block or invalidate publication. Its outcome is independently visible as
+`semantic_labels`, in the production journal's `semantic_labeling` summary and
+the existing admin pipeline views. Batch summaries retain selected/saved,
+abstained, failed and unprocessed counts, usage and conservative costs. Interrupts
+retain committed batch summaries when available; unavailable metering remains
+explicit. The parent/model run stays successful after an optional-stage error.
+Verification-only recovery (exit 76) starts no labeling and changes no unrelated
+run's labeling record. Core and complete worker durations are reported separately.
+
+| Setting / existing control | Automatic behavior |
+| --- | --- |
+| `pipeline.labeling_enabled` | Existing enablement switch; **insufficient by itself**, including its historical `true` value |
+| `pipeline.labeling_cloud_authorized` | New standing authorization, default **false**. Explicitly permits transmission of the existing prompt evidence to the configured cloud interpreter; viewer names are aliased, but titles and engagement evidence remain potentially sensitive |
+| `pipeline.labeling_budget_usd` | New cumulative automatic reserved/estimated USD ceiling, default **0** |
+| `pipeline.labeling_request_limit` | New cumulative automatic provider-attempt limit, default **0**; includes retries, pending and interrupted requests |
+| `labeling.provider`, `labeling.ollama_model` | Existing Setup provider/model. Current-generation batches require `ollama`; normal Gemma 4 choice is `gemma4:31b-cloud`. Unknown model pricing blocks requests |
+| `labeling.ollama_host`, `ollama.host`, `ollama.api_key` / key file | Existing label endpoint, fallback host and credentials; never the embedding model setting |
+| `pipeline.label_batch_limit`, `pipeline.label_dim_type` | Existing per-publication selection limit (default 25) and media/user/all scope |
+| `pipeline.label_selection_mode` | Existing current-generation `eligible` or `importance` selection. Legacy `coverage`/`hybrid` are rejected with an optional-stage failure, not silently reinterpreted; `label_coverage_share` is therefore not used here |
+| `pipeline.refresh_existing_labels` | Existing explicit refresh control, default false. Compatible saved labels and identical-prompt abstentions are reused by default. Refresh is bounded to selected dimensions and skips outcomes already saved/abstained for that publication |
+| `labeling.max_output_tokens`, advanced labeling settings | Existing output cap, evidence counts, HIGH coverage, LOW overlap, and governance rules |
+| Existing batch parser/provider retry controls | Three attempts and fail-fast threshold three by default; transient retries use the existing backoff, permanent errors stop retrying. Automatic attempts for the same generation/dimension/prompt are counted across batches, so restarting cannot reset the three-attempt allowance |
+
+The three new settings appear through the existing generic Pipeline settings UI;
+no new screen or configuration subsystem is required. Their environment aliases
+are `PIPELINE_LABELING_CLOUD_AUTHORIZED`, `PIPELINE_LABELING_BUDGET_USD` and
+`PIPELINE_LABELING_REQUEST_LIMIT`. Enablement, authorization and positive limits
+must all hold before requests. The four controls resolve in one strict database
+read; environment defaults apply only after a successful read establishes that
+no stored override exists. An unavailable database or malformed policy blocks
+requests rather than falling back to stale environment authorization or limits.
+
+Automatic accounting uses the existing batch/request tables. Batch forecast JSON
+records scope `daily-semantic-labeling/1`, run/publication and prompt hashes.
+One advisory-locked reservation transaction sums all automatic requests across
+every batch UUID, model/publication change and restart before inserting a new
+reservation. Old pending attempts stay charged. Automatic successes retain at
+least their original conservative reservation; larger metered estimates are
+charged. Budgets are **not daily allowances**: an operator must explicitly raise
+the cumulative ceilings to authorize more work. Manual CLI budgets remain their
+existing separate per-batch scope. Do not delete usage history to reset a limit.
+The existing read-only `--usage` report adds an `automatic` total, separate from
+manual batches, so cumulative pending/retry consumption can be reconciled.
+
+Each reservation rereads the complete policy **after** acquiring the cumulative
+accounting lock, using the same READ COMMITTED transaction as the durable request
+insert. A short SHARE lock on the settings table prevents policy updates and
+inserts for missing keys until that reservation commits. Settings-lock contention
+fails closed immediately (`NOWAIT`); an old REPEATABLE READ snapshot is rejected.
+Thus a committed revocation/reduction before reservation cannot be bypassed by
+earlier startup settings. No settings lock spans cloud I/O. Reservation commit is
+the authorization boundary: later policy changes govern subsequent reservations
+and cannot cancel a request already admitted. Unrelated generic settings retain
+their existing fallback behavior; no settings schema or admin screen changed.
+
+These controls enforce request counts and a conservative estimated ledger ceiling,
+not an exact provider invoice: token estimation, prices and provider billing can
+differ, and one response can report consumption above its reservation. No further
+request starts once the cap is exhausted. Use provider-side spending/credit controls
+when an invoice-level ceiling is required. All rates remain model-specific; no new
+price lookup or provider request occurs merely to configure this integration.
+
+Terminal same-publication outcomes are reused from the run journal or batch ledger,
+including a crash between batch completion and journal annotation. Partial refresh
+reuses saved/abstained assessments; exhausted prompts are skipped so other dimensions
+can progress. New assessments are tagged `daily-pipeline`; manual assessments keep
+their existing source. Label, generation, contract, encoder, model/publication and
+SHAP provenance checks remain in the existing implementation.
+
+Before unattended enablement: review/commit/deploy the final source under separate
+approval, explicitly register its matching deployment receipt, verify the existing
+`005_semantic_dimension_labeling.sql` ledger/provenance schema, confirm endpoint/model
+and pricing, grant standing evidence-transmission authorization and set finite
+cumulative limits. Choose supported selection settings. Scheduling remains disabled;
+real cloud requests and scheduler activation still need separate approval. No new
+schema migration, production receipt or live batch was created by this local work.
+
+Local integration validation, November 11, 2026: **342 focused tests passed**
+(28 opt-in skips), **1,082 full offline tests passed** (303 skips, 89 subtests;
+one existing FastAPI/ORJSON warning), and **29 automatic-label adapter checks
+passed** with PostgreSQL enabled (20 mocked adapter checks and nine real
+temporary-table ledger/engine checks). Cloud responses were mocked throughout.
+The PostgreSQL cases cover new UUIDs, pending reservations, true retry numbering,
+exhausted prompts, authorization revocation, labels, abstentions, errors and
+interruptions. Cached batch reuse reports zero new requests. Numeric hardening
+and canonical-identity regression tests remain passing.
+
+Relevant reproduction from the repository root:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PLEXINTEL_TEST_TEMP_DB=0 \
+PLEXINTEL_LABELING_TEST_DATABASE_URL='' PLEXINTEL_AGENT_SERVICE_TOKEN_FILE='' \
+PLEXINTEL_AGENT_SERVICE_SCOPES=plexintel.read \
+  plexenv/bin/python -m pytest -q -p no:cacheprovider tests
+
+PYTHONDONTWRITEBYTECODE=1 PLEXINTEL_TEST_TEMP_DB=1 \
+PLEXINTEL_AGENT_SERVICE_TOKEN_FILE='' \
+  plexenv/bin/python -m pytest -q -p no:cacheprovider tests/test_pipeline_labeling.py
+```
+
+The second command creates only synthetic, connection-private PostgreSQL tables;
+it does not opt into the separate permanent-schema manual-label tests. No real
+provider, embedding regeneration, production fitting, deployment or scheduling
+action is part of these tests.
+
+Authorization-correction validation, November 11, 2026: **157 targeted tests
+passed**, including the settings, labeling and PostgreSQL policy tests; **1,092
+full offline tests passed**, with 316 opt-in skips, 89 subtests and the existing
+ORJSON deprecation warning. All SQL tests in that targeted run used a disposable
+local PostgreSQL cluster, including isolated schemas and connection-private
+tables; they did not connect to production. New cases assert zero provider calls
+on settings outages with authorized environment values, conflicting stored
+revocation, invalid policy, committed budget/request reductions, revocation while
+waiting for reservation admission, settings-write contention, stale transaction
+snapshots, connection loss and reservation commit failure. Authorized operation
+and cumulative pending charges across restarted ledgers remain covered. Reproduce
+the new SQL cases only with `PLEXINTEL_LABELING_TEST_DATABASE_URL` pointing to an
+explicitly disposable test database; that existing opt-in fixture creates and
+drops isolated test schemas. Run `tests/test_labeling_policy.py` alongside the
+labeling/settings suites. No real cloud request, production write, commit,
+deployment, receipt registration or scheduling change was performed.
 
 ## Operator commands on birch
 

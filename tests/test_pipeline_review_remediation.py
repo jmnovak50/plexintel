@@ -187,7 +187,7 @@ def test_old_committed_recovery_is_durable_and_exposed_by_cli(pending_run,monkey
     monkeypatch.setattr(text_production,'daily',Mock(return_value=result))
     with pytest.raises(SystemExit) as outcome:cli.main(['daily'])
     assert outcome.value.code==run_safety.VERIFICATION_ONLY_EXIT
-    receipt=json.loads(capsys.readouterr().out)
+    receipt=json.loads(capsys.readouterr().out.splitlines()[-1])
     assert receipt['verification_only'] and receipt['outcome']=='verification_only'
 
 

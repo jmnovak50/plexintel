@@ -19,6 +19,7 @@ STAGES = (
     ('shap', 'SHAP explanation generation'),
     ('publication', 'Production publication'),
     ('verification', 'Final verification'),
+    ('semantic_labels', 'Optional semantic dimension labeling'),
 )
 STAGE_NAMES = dict(STAGES)
 STATUSES = {'pending', 'started', 'success', 'failed', 'cancelled', 'skipped', 'not_recorded'}
@@ -29,6 +30,7 @@ METRICS = {'expected', 'completed', 'failed', 'pending', 'succeeded', 'reused', 
            'chronological_balanced_accuracy', 'chronological_average_precision',
            'show_balanced_accuracy', 'quality_passed', 'new_media', 'new_watch_events',
            'quarantined', 'verified_vectors', 'poster_requests', 'seconds', 'requests'}
+METRICS.update({'successes','abstentions','input_tokens','output_tokens','total_tokens','estimated_cost_usd'})
 
 
 def clean_metrics(values):

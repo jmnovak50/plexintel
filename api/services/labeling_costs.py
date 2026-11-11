@@ -150,8 +150,9 @@ def failure_signature(diagnostic):
 
 
 class UsageLedger:
-    def __init__(self, conn, batch_id, pricing, budget=None):
+    def __init__(self, conn, batch_id, pricing, budget=None, *, automation=None):
         self.conn,self.batch_id,self.pricing,self.budget = conn,batch_id,pricing,budget
+        self.automation=automation
 
     def total_cost(self):
         with self.conn.cursor() as cur:
@@ -162,6 +163,28 @@ class UsageLedger:
         estimate = estimate_input(system,prompt)
         reserve_input = max(estimate['high'],math.ceil(estimate['expected']*max(1,input_ratio)*1.25))
         reserved = self.pricing.cost(reserve_input,output_limit)
+        if self.automation:
+            with self.conn.cursor() as cur:
+                # One durable reservation transaction across every automatic batch.
+                cur.execute('SELECT pg_advisory_xact_lock(184726,51)')
+                # Read after waiting, on this transaction. The policy resolver
+                # locks settings until the request reservation commits, so a
+                # committed revocation/reduction cannot use stale admission caps.
+                caps=self.automation['limits'](self.conn)
+                cur.execute('''SELECT COALESCE(SUM(r.estimated_cost_usd),0),COUNT(*) FROM embedding_label_requests r
+                    JOIN embedding_label_batches b USING(batch_id) WHERE b.forecast->>'automation_scope'=%s''',
+                    (self.automation['scope'],))
+                cost,requests=cur.fetchone()
+                if Decimal(str(cost))+Decimal(str(reserved))>Decimal(str(caps['budget_usd'])) or requests>=caps['request_limit']:
+                    raise BudgetExceeded('Cumulative automatic labeling budget/request limit reached')
+                cur.execute('''SELECT COUNT(*) FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
+                    WHERE b.forecast->>'automation_scope'=%s AND b.generation_id=%s AND r.dimension=%s
+                    AND b.forecast->'automation_prompts'->>%s=%s''',
+                    (self.automation['scope'],self.automation['generation_id'],dimension,str(dimension),self.automation['prompts'][str(dimension)]))
+                prior_attempts=cur.fetchone()[0]
+                if prior_attempts>=self.automation['max_attempts']:
+                    raise BudgetExceeded('Automatic per-prompt attempt limit reached across batches')
+                attempt=prior_attempts+1
         consumed = self.total_cost()
         if self.budget is not None and Decimal(str(consumed))+Decimal(str(reserved))>Decimal(str(self.budget)):
             raise BudgetExceeded('Budget would be exceeded by the next request reservation')
@@ -184,6 +207,10 @@ class UsageLedger:
             cost = self.pricing.cost(usage['input_tokens'] if usage['input_tokens'] is not None else reserved_input,
                                     usage['output_tokens'] if usage['output_tokens'] is not None else reserved_output,
                                     usage['cached_input_tokens'] or 0)
+            if self.automation:
+                # Never release an automatic reservation merely because usage is
+                # missing/discounted. Higher measured estimates are still charged.
+                cost=max(cost,self.pricing.cost(reserved_input,reserved_output))
             cur.execute('''UPDATE embedding_label_requests SET status=%s,input_tokens=%s,cached_input_tokens=%s,
                 output_tokens=%s,estimated_cost_usd=%s,error_code=%s,completed_at=now() WHERE request_id=%s''',
                 ('failed' if error else 'succeeded',usage['input_tokens'],usage['cached_input_tokens'],usage['output_tokens'],cost,
@@ -222,6 +249,8 @@ def usage_report(conn, batch_id=None):
         batches = cur.fetchall()
     result = dict(batches=len(batches),requests=len(rows),provider_invoice_available=False,
                   billing_limitation='USD is a configurable-price estimate, not an invoice. Missing counts stay unknown; pending/unknown requests retain conservative cost reservations.')
+    if any(b['forecast'].get('automation_scope') for b in batches):
+        result['automatic_cost_basis']='Automatic attempts charge at least their conservative reservation, including metered successes; cumulative caps do not reset per batch or publication.'
     from collections import Counter
     result['failure_codes']=dict(Counter(r['error_code'] for r in rows if r['error_code']))
     def totals(group):
@@ -241,6 +270,8 @@ def usage_report(conn, batch_id=None):
             estimated_cost_usd=float(sum(r['estimated_cost_usd'] for r in group)),
             token_totals_are_complete=len(measured)==len(group))
     result.update(media=totals([r for r in rows if r['side']=='media']),user=totals([r for r in rows if r['side']=='user']),combined=totals(rows))
+    automatic={b['batch_id'] for b in batches if b['forecast'].get('automation_scope')}
+    if automatic:result['automatic']=totals([r for r in rows if r['batch_id'] in automatic])
     result['batch_details'] = [dict(batch_id=b['batch_id'],status=b['status'],model=b['model'],summary=b['summary'],pricing=b['pricing'],
         forecast=b['forecast'],created_at=b['created_at'].isoformat()) for b in batches]
     if batch_id:

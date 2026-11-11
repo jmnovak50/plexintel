@@ -141,7 +141,7 @@ def workload_forecast(eligible, selected, pricing, args, observations):
                 all_remaining=forecast(remaining,pricing,**common))
 
 
-def persist_result(conn, context, row, result, model, *, regenerate=False):
+def persist_result(conn, context, row, result, model, *, regenerate=False, source='manual-batch'):
     import batch_label_embeddings as original
     dimension = row['dimension']
     with conn.cursor() as cur:
@@ -161,7 +161,7 @@ def persist_result(conn, context, row, result, model, *, regenerate=False):
                  result.get('validation_status')=='needs_review',dimension))
         elif result.get('label')==original.UNCLEAR_LABEL:
             outcome = 'abstained'
-        record_assessment(cur,dimension,source='manual-batch',provider='ollama',model=model,
+        record_assessment(cur,dimension,source=source,provider='ollama',model=model,
             prompt=dict(row['prompt'],provenance=context),result=result,saved=saved,outcome=outcome,
             before=before,after=original.get_existing_label_row(cur,dimension))
     conn.commit()
@@ -177,13 +177,16 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
             VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''',(batch_id,ctx['config_id'],ctx['generation_id'],args.label_model,
             Json([r['dimension'] for r in selected]),Json(prediction),Json(asdict(pricing)),args.budget_usd))
     conn.commit()
-    ledger = UsageLedger(conn,batch_id,pricing,args.budget_usd)
+    automation=getattr(args,'automation',None)
+    assessment_source='daily-pipeline' if automation else 'manual-batch'
+    ledger = UsageLedger(conn,batch_id,pricing,args.budget_usd,**({'automation':automation} if automation else {}))
     summary = dict(batch_id=batch_id,selected=len(selected),successes=0,failures=0,abstentions=0,skipped=0)
     side_completed = dict(media=0,user=0)
     status = 'completed'
     refined = False
     started = []
     previous_failure=None;consecutive_failures=0
+    interruption=None
     try:
         for position,row in enumerate(selected,1):
             dimension = row['dimension']
@@ -210,8 +213,9 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     result=validate_sample_counts(result,row['prompt'])
                     if result.get('sample_count_mismatch'):
                         raise LabelingError('LABEL_COVERAGE_MISMATCH','label_validation','Reported coverage does not match the examples sent.')
-                except BudgetExceeded:
+                except BudgetExceeded as exc:
                     status = 'budget_stopped'
+                    summary['stop_reason']=str(exc)
                     emit(dict(event='budget_stop',batch_id=batch_id,next_dimension=dimension,consumed_estimated_usd=ledger.total_cost()))
                     break
                 except Exception as exc:
@@ -229,7 +233,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     result = dict(processing_error=True,validation_status='invalid',label=gpt.UNCLEAR_LABEL,batch_id=batch_id,
                         error_code=diagnostic['code'],error_diagnostics=diagnostic,provenance=ctx,prompt_sha256=prompt_hash(row['prompt']))
                     outcome='provider_error' if diagnostic['category']=='provider' else 'response_error'
-                    record_assessment(cur,dimension,source='manual-batch',provider='ollama',model=args.label_model,
+                    record_assessment(cur,dimension,source=assessment_source,provider='ollama',model=args.label_model,
                         prompt=dict(row['prompt'],provenance=ctx),result=result,saved=False,outcome=outcome,before=None,after=None)
                     conn.commit()
                     emit(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,error=diagnostic))
@@ -245,10 +249,10 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                 result.update(provenance=ctx,prompt_sha256=prompt_hash(row['prompt']),batch_id=batch_id)
                 if args.save_label:
                     saved,outcome = persist_result(conn,ctx,row,result,args.label_model,
-                        regenerate=args.regenerate or args.selection_mode=='review')
+                        regenerate=args.regenerate or args.selection_mode=='review',source=assessment_source)
                 else:
                     saved,outcome = False,'candidate_not_saved'
-                    record_assessment(cur,dimension,source='manual-batch',provider='ollama',model=args.label_model,
+                    record_assessment(cur,dimension,source=assessment_source,provider='ollama',model=args.label_model,
                         prompt=dict(row['prompt'],provenance=ctx),result=result,saved=False,outcome=outcome,before=None,after=None)
                     conn.commit()
                 if result.get('label')==gpt.UNCLEAR_LABEL:
@@ -264,7 +268,8 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                 usage = usage_report(conn,batch_id)
                 emit(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,
                           tokens=usage['combined'],successes=summary['successes'],failures=summary['failures'],abstentions=summary['abstentions']))
-    except BaseException:
+    except BaseException as exc:
+        interruption=exc
         status = 'interrupted'
         raise
     finally:
@@ -272,6 +277,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
         if status=='completed' and summary['failures']:
             status='completed_with_errors' if summary['successes'] or summary['abstentions'] else 'failed'
         summary['status']=status
+        summary['unprocessed']=max(0,summary['selected']-sum(summary[k] for k in ('successes','failures','abstentions','skipped')))
         usage = usage_report(conn,batch_id)
         count = summary['successes']+summary['abstentions']
         summary.update(usage=usage['combined'],average_tokens_per_completed_dimension=(usage['combined']['input_tokens']+usage['combined']['output_tokens'])/count if count else None,
@@ -286,6 +292,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
         with conn.cursor() as cur:
             cur.execute('UPDATE embedding_label_batches SET status=%s,summary=%s,completed_at=now() WHERE batch_id=%s',(status,Json(summary),batch_id))
         conn.commit()
+        if interruption is not None:interruption.labeling_summary=dict(summary)
         emit(dict(final_status=status,**summary))
     return summary
 

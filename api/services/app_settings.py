@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import requests
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
+from psycopg2 import sql
 
 from api.db.connection import connect_db
 
@@ -373,7 +374,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default="gemma4:31b-cloud",
         env_aliases=("OLLAMA_LABEL_MODEL", "LABEL_MODEL"),
         description=(
-            "Interpretation model for manual semantic dimension labeling. gemma4:31b-cloud uses the signed-in "
+            "Interpretation model for manual and explicitly authorized automatic semantic dimension labeling. gemma4:31b-cloud uses the signed-in "
             "Ollama daemon or the authenticated Cloud API. This does not change the embedding encoder."
         ),
     ),
@@ -1165,8 +1166,8 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=True,
         env_aliases=("PIPELINE_LABELING_ENABLED",),
         description=(
-            "When enabled, the pipeline runs the SHAP dimension labeling stage after scoring. Disable this when labels "
-            "are managed manually or LLM labeling should not run during scheduled pipeline jobs."
+            "Enables optional labeling after verified model publication. The Gemma 2 path additionally requires standing "
+            "cloud authorization and positive cumulative USD/request limits. Disable when labels are managed manually."
         ),
     ),
     _setting(
@@ -1187,6 +1188,15 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "pipeline jobs."
         ),
     ),
+    _setting('pipeline.labeling_cloud_authorized','pipeline','Authorize unattended cloud labeling','boolean',default=False,
+             env_aliases=('PIPELINE_LABELING_CLOUD_AUTHORIZED',),
+             description='Standing authorization to send the existing anonymized semantic-label evidence to the configured Ollama cloud label model after verified publication. Enable Batch Labeling alone is insufficient.'),
+    _setting('pipeline.labeling_budget_usd','pipeline','Cumulative automatic labeling budget (USD)','float',default=0.,minimum=0.,
+             env_aliases=('PIPELINE_LABELING_BUDGET_USD',),
+             description='Cumulative estimated/reserved USD ceiling for all automatic batches, including interrupted attempts. Does not reset per batch, publication or restart. Increase explicitly to authorize more consumption; provider invoices can differ from estimates.'),
+    _setting('pipeline.labeling_request_limit','pipeline','Cumulative automatic labeling request limit','integer',default=0,minimum=0,
+             env_aliases=('PIPELINE_LABELING_REQUEST_LIMIT',),
+             description='Maximum total automatic provider attempts, including retries and pending/interrupted requests, across all batches and restarts. Zero blocks automatic requests.'),
     _setting(
         "pipeline.label_batch_limit",
         "pipeline",
@@ -1258,6 +1268,10 @@ SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFINITI
 
 class SettingsValidationError(ValueError):
     pass
+
+
+class SettingsUnavailableError(RuntimeError):
+    """A strict settings read could not establish authoritative database state."""
 
 
 def load_settings_env() -> None:
@@ -1569,17 +1583,61 @@ def ensure_settings_bootstrap() -> None:
         conn.close()
 
 
+def _fetch_setting_rows_strict(keys, *, conn=None, lock=False):
+    """One database snapshot; never reinterpret an unavailable DB as absent rows.
+
+    A reservation uses its own READ COMMITTED transaction and a short SHARE
+    table lock. This also covers absent keys: concurrent inserts/updates/deletes
+    must serialize before or after the reservation commit, not between its
+    policy read and durable request insert. No lock spans provider I/O.
+    """
+    if conn is None:
+        if lock:
+            raise ValueError('A settings reservation lock requires the caller transaction')
+        owned = None
+        try:
+            owned = connect_db()
+            owned.set_session(readonly=True, isolation_level='READ COMMITTED')
+            return _fetch_setting_rows_strict(keys, conn=owned)
+        except Exception:
+            raise SettingsUnavailableError('Authoritative settings database unavailable') from None
+        finally:
+            if owned is not None:
+                owned.close()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if lock:
+                cur.execute("SELECT current_setting('transaction_isolation') AS isolation")
+                if cur.fetchone()['isolation'] != 'read committed':
+                    raise SettingsUnavailableError('Settings reservation requires READ COMMITTED')
+                cur.execute(sql.SQL('LOCK TABLE {} IN SHARE MODE NOWAIT').format(sql.Identifier(*SETTINGS_TABLE.split('.'))))
+            cur.execute(sql.SQL('''SELECT key, raw_value, source, updated_at, updated_by, description
+                FROM {} WHERE key = ANY(%s)''').format(sql.Identifier(*SETTINGS_TABLE.split('.'))), (list(keys),))
+            return {row['key']: row for row in cur.fetchall()}
+    except Exception:
+        raise SettingsUnavailableError('Authoritative settings database unavailable') from None
+
+
 def resolve_settings(
     *,
     keys: Iterable[str] | None = None,
     overrides: dict[str, Any] | None = None,
+    require_database: bool = False,
+    conn=None,
+    lock: bool = False,
 ) -> dict[str, EffectiveSetting]:
     selected_definitions = (
         [get_setting_definition(key) for key in keys]
         if keys is not None
         else list(SETTING_DEFINITIONS)
     )
-    rows = _fetch_setting_rows(definition.key for definition in selected_definitions)
+    keys = [definition.key for definition in selected_definitions]
+    if require_database:
+        rows = _fetch_setting_rows_strict(keys, conn=conn, lock=lock)
+    else:
+        if conn is not None or lock:
+            raise ValueError('Caller transaction/lock requires strict database resolution')
+        rows = _fetch_setting_rows(keys)
     override_map = overrides or {}
     resolved: dict[str, EffectiveSetting] = {}
 

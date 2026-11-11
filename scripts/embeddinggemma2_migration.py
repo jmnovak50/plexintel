@@ -542,14 +542,19 @@ def daily(store,config,*,pipeline_lock_held=False):
     result=text_daily(store,config,collect=collect,plex_factory=source.plex,cache=CACHE,
         publication_lock=publication_lock,pipeline_lock_held=pipeline_lock_held,
         progress=lambda value:print(canonical(value),flush=True))
+    from api.services.pipeline_labeling import run_after_publication
+    run_after_publication(store,result,publication_lock=publication_lock,pipeline_lock_held=pipeline_lock_held,
+                          output=lambda value:print(canonical(value),flush=True))
     summary=result['summary']
     print(canonical(dict(run_id=result['run_id'],generation_id=result['generation_id'],promotion_id=result['promotion_id'],
         verification_only=bool(result.get('verification_only')),outcome='verification_only' if result.get('verification_only') else 'daily_completed',
+        semantic_labeling=result['summary'].get('semantic_labeling'),
         counts=summary['counts'],inference=summary['inference'],poster_inference_requests=0,
         scoring=summary['scoring'],stages=summary['stages'],model_before=summary['model_before'],model_after=summary['model_after'],
         no_new_shadow_generation=True,elapsed_seconds=summary['elapsed_seconds'],
-        total_elapsed_seconds=summary.get('elapsed_seconds_total',summary['elapsed_seconds']),
-        semantic_labeling='disabled; incompatible legacy dimension labeler')))
+        core_elapsed_seconds=summary.get('elapsed_seconds_total',summary['elapsed_seconds']),
+        total_elapsed_seconds=summary.get('elapsed_seconds_total',summary['elapsed_seconds'])
+            +(summary.get('semantic_labeling') or {}).get('seconds',0.))))
     return result
 
 

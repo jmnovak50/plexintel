@@ -87,7 +87,7 @@ def test_actual_subprocess_emits_ten_stages_without_launching_any_pipeline(monke
     assert set(observers[0].events)==dict(STAGES).keys()
     assert all(v['status']=='success' for v in observers[0].events.values())
     assert any(b['stage_key']!='embeddinggemma2_generation' for b in beats)
-    assert len([s for s,_ in conn.executed if 'INSERT INTO' in s])==10
+    assert len([s for s,_ in conn.executed if 'INSERT INTO' in s])==len(STAGES)
     assert (tmp_path/'pipeline.log').read_text().count('verification')>0
 
 
@@ -213,7 +213,7 @@ def test_historical_run_expansion_is_read_only_correlated_and_honest_about_missi
     conn=FakeConnection([{'installed':'embedding_v2.production_runs'}],[[historical_journal()]])
     enrich_runs(conn.cursor(),[run])
     details={s['stage_key']:s for s in run['stage_details']}
-    assert len(details)==10 and run['stages']==original
+    assert len(details)==len(STAGES) and run['stages']==original
     assert details['media_text']['metrics']['inferred']==228
     assert details['media_text']['duration_seconds']==354
     assert details['training_data']['duration_seconds'] is None
@@ -272,7 +272,7 @@ def test_real_private_sql_observer_and_stage_payloads(store,monkeypatch):
     observer.accept(event('watch'));observer.accept(event('watch','success',message='text only'))
     observer.finish(cancelled=False,returncode=1)
     rows=store.query('SELECT * FROM pg_temp.observed_stages ORDER BY stage_id',many=True)
-    assert len(rows)==10
+    assert len(rows)==len(STAGES)
     watch=event_details(next(r for r in rows if r['stage_key']=='watch'))
     assert watch['status']=='success' and watch['duration_seconds']==1
     assert next(r for r in rows if r['stage_key']=='verification')['status']=='skipped'
