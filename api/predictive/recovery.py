@@ -315,4 +315,3 @@ class Resolver:
         reference['_poster_sources']=[{k:r.get(k) for k in ('type','ratingKey','thumb')} for r in sources if r]
         provenance=dict(policy=POLICY,components=origins,raw_inputs=raws,raw_inputs_hash=fingerprint(raws))
         return value,reference,provenance
-

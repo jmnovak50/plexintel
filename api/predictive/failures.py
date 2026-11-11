@@ -36,4 +36,3 @@ def classify_failure(exc):
 def failure_message(exc):
     if isinstance(exc,ContractError):return str(exc).splitlines()[0][:240]
     return 'Pipeline stopped ('+type(exc).__name__+'); inspect private diagnostics'
-

@@ -16,8 +16,8 @@
     "chronological_balanced_accuracy": true,
     "show_balanced_accuracy": true
   },
-  "model_sha256": "027766aa539b7195e72b51e6f4a0ccdcd70819726ddc79c667565f922d6984a9",
-  "predictive_seconds": 4.285894571003155,
+  "model_sha256": "f17fc2d13675024871da9b38f90f6c93a0617fe85f2e964b9d057762fa5c0b71",
+  "predictive_seconds": 4.141716975995223,
   "software_versions": {
     "joblib": "1.5.3",
     "numpy": "2.4.6",
@@ -26,7 +26,7 @@
     "scikit-learn": "1.9.0",
     "xgboost": "3.3.0"
   },
-  "source_sha256": "0c65339c194a4f0ca4e51838fee9e686c112ad214ceb22e12eeb00cf17e87288",
+  "source_sha256": "02a6511c7afe2bda6f0e58de21ce31749a2ae652b4f400240c1cfb8e8c733dbb",
   "splits": {
     "chronological": {
       "average_precision": 1.0,

@@ -96,3 +96,5 @@ Use `--allow-stored-history` only when approving the documented stored descripti
 Recommendations: **GO** for reviewing/accepting the restoration code and synthetic isolated workflow. **HOLD** for production-sized rebuild acceptance, deployment, production database cutover, schema retirement, scheduler activation and cloud activation until their distinct prerequisites and approvals are satisfied.
 
 Changed paths are enumerated in `predictive-restoration-files.txt`. The primary implementation is `api/predictive/`, the direct CLI and shell launcher; shared labeling/API adapters and their regression tests were updated for public provenance. Historical migration references are preserved outside the active import closure.
+
+Commit sequence: `f576410` extracts the predictor; `6c0d579` connects public storage, serving, labeling and qualification evidence. The final polish normalizes two module endings without changing their parsed AST and refreshes the source-bound synthetic model/report. Its end-to-end publication/repeat/failure/restore check passed again (one test, 14.07 seconds). The branch-wide whitespace check is clean.
