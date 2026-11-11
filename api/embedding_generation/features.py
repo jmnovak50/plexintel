@@ -358,6 +358,21 @@ def training_plan(generation, media, identity=None, *, progress=lambda value: No
     return rows, dict(skips)
 
 
+def planned_text_rows(generation,media,watches,plan,identity,*,progress=lambda value:None):
+    """The shared text row assembly, also usable without retaining dependency graphs."""
+    events_by_owner=defaultdict(list)
+    for event in generation['snapshot']['events']:events_by_owner[event['username']].append(event)
+    for index,fields in enumerate(plan):
+        if index%32==0:progress(dict(stage='historical-features',expected=len(plan),completed=index,failed=0))
+        row=feature_row(generation,media,watches,events_by_owner[fields['owner']],fields['owner'],
+                        fields['media_key'],fields['prediction_at'],identity=identity)
+        if row is None:raise ContractError('Historical feature support differs from training plan')
+        row.update(fields)
+        row['dependencies']['supervision_policy']=SUPERVISION_POLICY
+        yield row
+    progress(dict(stage='historical-features',expected=len(plan),completed=len(plan),failed=0))
+
+
 def training_rows(generation,media,watches,posters,*,progress=lambda value:None):
     snapshot=generation['snapshot']
     events=snapshot['events']
@@ -366,17 +381,7 @@ def training_rows(generation,media,watches,posters,*,progress=lambda value:None)
     if text_only(generation['contract']):
         identity=CanonicalTitles(media)
         plan,skips=training_plan(generation,media,identity,progress=progress)
-        rows=[]
-        for index,fields in enumerate(plan):
-            if index%32==0:progress(dict(stage='historical-features',expected=len(plan),completed=index,failed=0))
-            row=feature_row(generation,media,watches,events_by_owner[fields['owner']],fields['owner'],
-                            fields['media_key'],fields['prediction_at'],identity=identity)
-            if row is None:raise ContractError('Historical feature support differs from training plan')
-            row.update(fields)
-            row['dependencies']['supervision_policy']=SUPERVISION_POLICY
-            rows.append(row)
-        progress(dict(stage='historical-features',expected=len(plan),completed=len(plan),failed=0))
-        return rows,skips
+        return list(planned_text_rows(generation,media,watches,plan,identity,progress=progress)),skips
     # Inactive multimodal experiments retain their existing literal-key policy.
     pairs=defaultdict(list)
     for event in events:

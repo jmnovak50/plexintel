@@ -7,7 +7,6 @@ import json
 import time
 import joblib
 import numpy as np
-from pgvector import Vector
 from psycopg2 import sql
 from psycopg2.extras import Json
 from .contracts import ContractError,FEATURE_VERSION,LABEL_VERSION,canonical,cosine,fingerprint,utc,text_only,TEXT_FEATURE_VERSION
@@ -29,31 +28,22 @@ def populations(store,gid):
 
 
 def dataset(store,gid,*,progress=lambda value:None):
+    from .training_integrity import ARTIFACT,insert_row,manifest,serialized_row
     g,media,watches,posters=populations(store,gid)
     rows,skips=training_rows(g,media,watches,posters,progress=progress)
     if not rows:raise ContractError('No leakage-safe examples; no fallback to legacy training rows')
     text_mode=text_only(g['contract'])
     table='text_training_rows' if text_mode else 'modality_training_rows'
     store.query(sql.SQL('DELETE FROM {} WHERE generation_id=%s').format(store.table(table)),(gid,))
+    materialized=[]
     for i,row in enumerate(rows,1):
         if row['dependencies']['generation_id']!=gid or row['dependencies']['contract_hash']!=g['contract_hash']:
             raise ContractError('Training dependency provenance mismatch')
-        fields={k:v for k,v in row.items() if k not in ('embedding','dependencies')}
-        values=row['embedding']
-        if text_mode:
-            store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(store.table(table)),
-                (gid,row['owner'],row['media_key'],row['prediction_at'],row['label_available_at'],row['label'],
-                 Vector(values),Json({k:v for k,v in fields.items() if k!='poster_missing'}),Json(row['dependencies'])))
-        else:
-            store.query(sql.SQL('INSERT INTO {} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(store.table('modality_training_rows')),
-                (gid,row['owner'],row['media_key'],row['prediction_at'],row['label_available_at'],row['label'],
-                 Vector(values[:768]),None if row['poster_missing'] else Vector(values[768:1536]),Vector(values[1536:]),Json(fields),Json(row['dependencies'])))
+        materialized.append(insert_row(store,gid,row,text_mode))
         if i%32==0 or i==len(rows):progress(dict(stage='training-dataset',expected=len(rows),completed=i,failed=0))
     hasher=hashlib.sha256()
     for row in rows:
-        serialized={**{k:v for k,v in row.items() if k!='embedding'},
-            'embedding':[float(v) if np.isfinite(v) else None for v in row['embedding']]}
-        hasher.update(canonical(serialized).encode());hasher.update(b'\n')
+        hasher.update(serialized_row(row))
     summary=dict(rows=len(rows),skips=skips,feature_version=g['contract']['features'],label_version=LABEL_VERSION,
         dataset_hash=hasher.hexdigest(),hash_format='canonical-rows-jsonl/1.0',watch_coverage=g['snapshot']['watch_coverage'],
         retrospective_metadata_assumption='Captured descriptive metadata (current Plex or explicitly approved stored history); point-in-time metadata snapshots do not exist. Mutable ratings/popularity/outcomes are excluded.')
@@ -65,7 +55,10 @@ def dataset(store,gid,*,progress=lambda value:None):
             feedback_provenance=dict(Counter(r['feedback_provenance'] for r in rows)),
             auxiliary_feedback_conflicts=sum(r['auxiliary_feedback_conflicts'] for r in rows),
             retrospective_feedback_assumption='Submission cutoff is not actual first viewing. Unrecorded earlier exposure may influence later history; legacy actions lack original semantic provenance.')
-    store.artifact(gid,'dataset.json',canonical(summary).encode(),dict(contract_hash=g['contract_hash']));store.conn.commit()
+    data=canonical(summary).encode();data_sha=hashlib.sha256(data).hexdigest()
+    store.artifact(gid,'dataset.json',data,dict(contract_hash=g['contract_hash']))
+    store.artifact(gid,ARTIFACT,canonical(manifest(g,summary,materialized,data_sha)).encode(),dict(contract_hash=g['contract_hash']))
+    store.conn.commit()
     return rows,summary
 
 

@@ -116,7 +116,7 @@ class PipelineRetentionTests(unittest.TestCase):
         self.assertIn("retention_rank > %s", sql)
         self.assertIn("schedule_key IS DISTINCT FROM %s", sql)
         self.assertIn("DELETE FROM public.pipeline_runs", sql)
-        self.assertEqual(params[0], ("cancelled", "failed", "success"))
+        self.assertEqual(params[0], ("cancelled", "failed", "success", "verification_only"))
         self.assertEqual(params[1], 25)
         self.assertEqual(params[2], "daily:current")
 
@@ -137,6 +137,11 @@ class PipelineRetentionTests(unittest.TestCase):
 
 
 class PipelineStageTests(unittest.TestCase):
+    def setUp(self):
+        # These tests exercise an explicitly verified legacy installation.
+        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
+        active.start();self.addCleanup(active.stop)
+
     def test_build_pipeline_stages_uses_label_batch_setting_defaults(self):
         with patch.object(pipeline_service, "get_setting_value", side_effect=lambda _key, default=None: default):
             stages = pipeline_service.build_pipeline_stages()

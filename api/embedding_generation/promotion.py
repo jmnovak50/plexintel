@@ -69,9 +69,12 @@ def archive(store,promotion,live_schema):
 
 
 @block_writers
-def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',source_check=None,legacy_model=None,failpoint=None):
+def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',source_check=None,legacy_model=None,failpoint=None,expected_incumbent=None):
     if live_schema not in ('public','pg_temp'):raise ContractError('Unexpected publication schema')
     generation=store.generation(gid)
+    if expected_incumbent is None:expected_incumbent=getattr(store,'incumbent_revision',None)
+    if getattr(store,'run_id',None) and expected_incumbent is None:
+        raise ContractError('Daily publication requires an exact incumbent revision')
     if not approved or generation['scope']!='full' or generation['status']!='validated':
         raise ContractError('Explicit GO/approval and a fully validated FULL generation are required')
     if deployed_code!=code_hash():raise ContractError('Approved deployed code hash differs from implementation')
@@ -80,6 +83,9 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
         or generation['validation']['evaluation_sha256']!=store.artifact(gid,'evaluation.json')['sha256']):
         raise ContractError('Validated production model/evaluation contract changed')
     bundle,vocab=load_bundle(store,gid)
+    from .training_integrity import verify_materialization
+    if generation['validation'].get('training')!=verify_materialization(store,gid,bundle):
+        raise ContractError('Validated training materialization changed')
     text_mode=text_only(generation['contract'])
     legacy_model=Path(legacy_model or ROOT/'xgb_model.pkl')
     legacy_sha=hashlib.sha256(legacy_model.read_bytes()).hexdigest()
@@ -97,6 +103,11 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
             control=store.query(sql.SQL('SELECT * FROM {} WHERE singleton FOR UPDATE').format(store.table('control')))
             if control['active_generation']!=generation['base_generation']:
                 raise ContractError('Active generation changed since staging; rebase the shadow generation')
+            if expected_incumbent is not None:
+                from .run_safety import incumbent_revision
+                current=store.query(sql.SQL('SELECT generation_id,publication_id,model_sha256 FROM {} WHERE singleton FOR UPDATE').format(store.table('production_state')))
+                if not current or incumbent_revision(current)!=expected_incumbent:
+                    raise ContractError('Incumbent publication/model revision changed before publication')
             if source_check is None:
                 if live_schema!='public':raise ContractError('Test source check required')
                 for table in ('library','watch_history','user_feedback'):
@@ -105,6 +116,10 @@ def promote(store,gid,*,approved=False,deployed_code=None,live_schema='public',s
             else:current=source_check()
             if current!=generation['source_hash']:
                 raise ContractError('Source inventory/history/feedback drifted; refresh and revalidate before cutover')
+            training_table='text_training_rows' if text_mode else 'modality_training_rows'
+            cur.execute(sql.SQL('LOCK TABLE {} IN SHARE MODE').format(store.table(training_table)))
+            if generation['validation']['training']!=verify_materialization(store,gid,bundle):
+                raise ContractError('Training materialization changed before publication')
             counts,hashes=archive(store,publication,live_schema)
             store.query(sql.SQL('INSERT INTO {}(promotion_id,generation_id,previous_generation,archive_counts,archive_hashes,legacy_model_sha256) VALUES(%s,%s,%s,%s,%s,%s)')
                 .format(store.table('promotions')),(publication,gid,control['active_generation'],Json(counts),Json(hashes),legacy_sha))

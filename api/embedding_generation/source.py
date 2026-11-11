@@ -26,7 +26,8 @@ def settings():
           'user_embeddings.engagement_threshold','training.watch_embed_min_engagement',
           'scoring.watched_engagement_threshold','training.movie_revisit_pending_days',
           'training.tv_revisit_pending_days','training.interested_sample_weight',
-          'training.watched_like_sample_weight','training.negative_sample_weight','training.feedback_bonus']
+          'training.watched_like_sample_weight','training.negative_sample_weight','training.feedback_bonus',
+          'pipeline.max_attempts']
     values={k:v.value for k,v in resolve_settings(keys=keys).items()}
     if float(values['training.watch_embed_min_engagement'])!=0.5:
         raise ContractError('Changed watch qualification requires a separately versioned contract')

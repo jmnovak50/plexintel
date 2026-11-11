@@ -23,6 +23,7 @@ from psycopg2.extras import RealDictCursor
 from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
 from api.embedding_generation.progress import EVENT, STAGES, STAGE_NAMES, EventReader, clean_metrics, event_details
+from api.embedding_generation.run_safety import VERIFICATION_ONLY_EXIT,classify_failure,failure_message
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENV_PYTHON = REPO_ROOT / "plexenv" / "bin" / "python"
@@ -38,7 +39,7 @@ PIPELINE_CANCEL_GRACE_SECONDS_ENV = "PIPELINE_CANCEL_GRACE_SECONDS"
 DEFAULT_CANCEL_POLL_SECONDS = 2.0
 DEFAULT_CANCEL_GRACE_SECONDS = 10.0
 PIPELINE_CANCEL_RECONCILE_GRACE_SECONDS_ENV = "PIPELINE_CANCEL_RECONCILE_GRACE_SECONDS"
-TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled"}
+TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled", "verification_only"}
 SCHEDULE_TERMINAL_STATUSES = {"success", "cancelled"}
 ACTIVE_SCHEDULE_STATUSES = {"started", "cancel_requested"}
 PIPELINE_PROCESS_MARKERS = (
@@ -555,7 +556,7 @@ def _signal_pid_process_group(
             return False
 
 
-def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
+def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None, execution_lock_held: bool = False) -> int:
     grace_seconds = _env_float(
         PIPELINE_CANCEL_RECONCILE_GRACE_SECONDS_ENV,
         DEFAULT_CANCEL_GRACE_SECONDS,
@@ -576,9 +577,10 @@ def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
                 last_heartbeat_at,
                 current_pid,
                 current_stage_key,
-                cancel_requested_at
+                cancel_requested_at,
+                EXISTS(SELECT 1 FROM public.pipeline_run_stages s WHERE s.run_id=public.pipeline_runs.run_id) AS has_stages
             FROM public.pipeline_runs
-            WHERE (status = 'cancel_requested' OR (status='started' AND current_pid IS NOT NULL))
+            WHERE status IN ('cancel_requested','started')
             {run_filter}
             ORDER BY cancel_requested_at ASC NULLS FIRST
             """,
@@ -592,10 +594,14 @@ def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
         pid = row.get("current_pid")
         stage_key = row.get("current_stage_key") or "active stage"
         if row.get('status') == 'started':
+            # A null PID after dispatch may hide a live, unregistered child.
+            # Only a provably pre-dispatch row is eligible for null-PID cleanup.
+            if pid is None and (row.get('current_stage_key') or row.get('has_stages')):continue
             # Heartbeat age alone never means failure: a live worker may be busy.
             if (str(row.get('delivery_type', '')).startswith('content_discovery_')
                     or not _is_older_than(row.get('last_heartbeat_at'), 30)
-                    or _process_exists(pid) or _pipeline_execution_locked()):
+                    or (pid is not None and _process_exists(pid))
+                    or (not execution_lock_held and _pipeline_execution_locked())):
                 continue
             note = ('Worker process disappeared before completion (for example after a backend restart). '
                     'Completion time is unknown; this record was reconciled now. '
@@ -603,8 +609,11 @@ def _reconcile_cancel_requested_runs(conn, *, run_id: int | None = None) -> int:
             with conn.cursor() as cur:
                 cur.execute('''UPDATE public.pipeline_runs SET status='failed',completed_at=now(),
                     current_pid=NULL,current_stage_key=NULL,notes=CONCAT_WS(E'\\n',NULLIF(notes,''),%s)
-                    WHERE run_id=%s AND status='started' AND current_pid=%s
-                      AND last_heartbeat_at IS NOT DISTINCT FROM %s RETURNING run_id''',
+                    WHERE run_id=%s AND status='started' AND current_pid IS NOT DISTINCT FROM %s
+                      AND last_heartbeat_at IS NOT DISTINCT FROM %s
+                      AND (current_pid IS NOT NULL OR NOT EXISTS
+                        (SELECT 1 FROM public.pipeline_run_stages s WHERE s.run_id=public.pipeline_runs.run_id))
+                    RETURNING run_id''',
                     (note, rid, pid, row.get('last_heartbeat_at')))
                 if cur.fetchone() is None:
                     continue  # The controller advanced after our observation.
@@ -874,7 +883,7 @@ def _run_stage_process(
             observe(drain=True)
             retain_live_output()
             if observer and not observation_failed:
-                try:observer.finish(cancelled=cancelled, returncode=proc.returncode)
+                try:observer.finish(cancelled=cancelled, returncode=0 if proc.returncode==VERIFICATION_ONLY_EXIT else proc.returncode)
                 except Exception as exc:_log_run_event(run_id, 'Stage observation incomplete: '+type(exc).__name__)
 
             elapsed_seconds = time.monotonic() - started_monotonic
@@ -1017,6 +1026,31 @@ def _has_active_run_for_schedule_key(conn, schedule_key: str) -> bool:
         return cur.fetchone() is not None
 
 
+def _scheduled_retry_state(conn, schedule_key: str, *, now_utc: datetime | None = None) -> dict[str, Any] | None:
+    """Count durable attempts across worker restarts; only exit 75 is retryable."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*) OVER() AS failures,r.completed_at,
+            (SELECT s.exit_code FROM public.pipeline_run_stages s WHERE s.run_id=r.run_id
+                AND s.status='failed'
+                ORDER BY CASE s.stage_key WHEN 'controller_dispatch' THEN 2
+                    WHEN 'embeddinggemma2_generation' THEN 1 ELSE 0 END DESC,s.stage_id DESC LIMIT 1) AS exit_code
+            FROM public.pipeline_runs r WHERE r.schedule_key=%s AND r.status='failed'
+            ORDER BY r.run_id DESC LIMIT 1""",(schedule_key,))
+        row=cur.fetchone()
+    if row is None:return None
+    if not isinstance(row,dict):row=dict(zip(('failures','completed_at','exit_code'),row))
+    if row['exit_code']!=75:return dict(status='requires_operator',schedule_key=schedule_key)
+    limit=int(get_setting_value('pipeline.max_attempts',default=3))
+    if row['failures']>=limit:return dict(status='retry_exhausted',schedule_key=schedule_key)
+    delay=int(get_setting_value('pipeline.retry_backoff_seconds',default=300))
+    completed=row['completed_at']
+    if completed is None:return dict(status='requires_operator',schedule_key=schedule_key)
+    now=now_utc or datetime.now(ZoneInfo('UTC'))
+    retry_at=completed+timedelta(seconds=delay)
+    if now<retry_at:return dict(status='retry_backoff',schedule_key=schedule_key,retry_at=retry_at.isoformat())
+    return None
+
+
 def run_scheduled_pipeline(*, triggered_by: str | None = None) -> dict[str, Any]:
     enabled = get_setting_value("pipeline.enabled", default=False)
     if not enabled:
@@ -1033,6 +1067,8 @@ def run_scheduled_pipeline(*, triggered_by: str | None = None) -> dict[str, Any]
             return {"status": "already_ran", "schedule_key": schedule_key}
         if _has_active_run_for_schedule_key(conn, schedule_key):
             return {"status": "already_running", "schedule_key": schedule_key}
+        blocked=_scheduled_retry_state(conn,schedule_key)
+        if blocked:return blocked
     finally:
         conn.close()
 
@@ -1042,6 +1078,29 @@ def run_scheduled_pipeline(*, triggered_by: str | None = None) -> dict[str, Any]
         schedule_key=schedule_key,
         invocation_source="app-scheduler",
     )
+
+
+def _finalize_controller_failure(run_id: int, exc: Exception) -> bool:
+    """Best effort after dispatch/controller failure; never overrides completion."""
+    failure=classify_failure(exc)
+    note=json.dumps(dict(outcome='controller_failed',error=failure_message(exc),**failure))
+    try:
+        with _pipeline_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.pipeline_runs SET status='failed',notes=%s,
+                    completed_at=now(),last_heartbeat_at=now(),current_pid=NULL,current_stage_key=NULL
+                    WHERE run_id=%s AND status='started' RETURNING run_id""",(note,run_id))
+                if cur.fetchone() is None:return False
+                cur.execute("""INSERT INTO public.pipeline_run_stages
+                    (run_id,stage_key,status,exit_code,completed_at,stderr_tail)
+                    VALUES(%s,'controller_dispatch','failed',%s,now(),%s)""",
+                    (run_id,75 if failure['retryable'] else 78,note))
+                cur.execute("""UPDATE public.pipeline_run_stages SET status='failed',completed_at=now()
+                    WHERE run_id=%s AND status='started'""",(run_id,))
+        return True
+    except Exception:
+        # The abandoned null-PID row is reconciled only when old and unlocked.
+        return False
 
 
 def run_pipeline(
@@ -1062,11 +1121,13 @@ def run_pipeline(
     try:
         if schedule_key is not None and delivery_type == "scheduled":
             with _pipeline_connection() as conn:
-                _reconcile_cancel_requested_runs(conn)
+                _reconcile_cancel_requested_runs(conn,execution_lock_held=True)
                 if _has_terminal_scheduled_run_for_schedule_key(conn, schedule_key):
                     return {"status": "already_ran", "schedule_key": schedule_key}
                 if _has_active_run_for_schedule_key(conn, schedule_key):
                     return {"status": "already_running", "schedule_key": schedule_key}
+                blocked=_scheduled_retry_state(conn,schedule_key)
+                if blocked:return blocked
 
         with _pipeline_connection() as conn:
             with conn.cursor() as cur:
@@ -1164,6 +1225,7 @@ def run_pipeline(
             stage_status = (
                 "cancelled"
                 if proc_result.cancelled
+                else "verification_only" if proc_result.returncode == VERIFICATION_ONLY_EXIT
                 else "success" if proc_result.returncode == 0 else "failed"
             )
             if not proc_result.output_logged:
@@ -1204,8 +1266,19 @@ def run_pipeline(
                 _log_run_event(run_id, note)
                 break
 
+            if proc_result.returncode == VERIFICATION_ONLY_EXIT:
+                note=json.dumps(dict(outcome='verification_only',fresh_workload_completed=False))
+                with _pipeline_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE public.pipeline_runs SET status='verification_only',notes=%s,
+                            completed_at=now(),last_heartbeat_at=now(),current_stage_key=NULL,current_pid=NULL
+                            WHERE run_id=%s""",(note,run_id))
+                break  # This schedule slot still needs a fresh daily workload.
+
             if proc_result.returncode != 0:
                 note = f"Stage {stage_key} exited with code {proc_result.returncode}"
+                note += ('; transient failure, automatic retry subject to limits/backoff'
+                         if proc_result.returncode==75 else '; automatic retry blocked: operator review required')
                 with _pipeline_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
@@ -1259,7 +1332,14 @@ def run_pipeline(
             result = {"status": "cancelled", "run_id": run_id}
         elif final_status == "success":
             result = {"status": "success", "run_id": run_id}
+        elif final_status == 'verification_only':
+            result = dict(status='verification_only',run_id=run_id,fresh_workload_completed=False)
         return result
+    except Exception as exc:
+        if run_id is not None:
+            persisted=_finalize_controller_failure(run_id,exc)
+            return dict(status='failed',run_id=run_id,failure_persisted=persisted,**classify_failure(exc))
+        raise
     finally:
         pipeline_lock.release()
 

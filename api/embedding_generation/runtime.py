@@ -11,11 +11,20 @@ TRANSITION=ROOT/'artifacts/embeddinggemma2/transition.json'
 
 
 def active_generation():
-    if not MARKER.is_file():return None
+    if TRANSITION.exists():raise RuntimeError('Embedding publication is in progress; activation state is unavailable')
     from api.db.connection import connect_db
     conn=connect_db()
     try:
+        conn.set_session(readonly=True)
         with conn.cursor() as cur:
+            if not MARKER.is_file():
+                cur.execute("SELECT to_regclass('embedding_v2.control')")
+                if cur.fetchone()[0] is None:return None
+                cur.execute('SELECT active_generation FROM embedding_v2.control WHERE singleton')
+                row=cur.fetchone()
+                if not row:raise RuntimeError('Embedding generation control is missing; refusing legacy fallback')
+                if row[0]:raise RuntimeError('Active generation exists without its installation marker; refusing legacy fallback')
+                return None
             cur.execute('SELECT active_generation FROM embedding_v2.control WHERE singleton')
             row=cur.fetchone()
             if not row:raise RuntimeError('Embedding generation control is missing')
@@ -58,7 +67,7 @@ def publication_barrier():
 
 def code_hash():
     paths=sorted((ROOT/'api/embedding_generation').glob('*.py'))
-    paths+=[ROOT/'scripts/embeddinggemma2_migration.py',ROOT/'scripts/register_dimension_config.py',ROOT/'api/services/pipeline_service.py',ROOT/'api/services/pipeline_visibility.py',ROOT/'api/routes/pipeline_admin_routes.py',ROOT/'api/routes/admin_routes.py',ROOT/'run_daily_pipeline.sh',
+    paths+=[ROOT/'scripts/embeddinggemma2_migration.py',ROOT/'scripts/register_dimension_config.py',ROOT/'api/services/app_settings.py',ROOT/'api/services/pipeline_service.py',ROOT/'api/services/pipeline_visibility.py',ROOT/'api/routes/pipeline_admin_routes.py',ROOT/'api/routes/admin_routes.py',ROOT/'run_daily_pipeline.sh',
             *sorted((ROOT/'api/db/migrations/optional/embedding_generation').glob('*.sql')),
             *[ROOT/path for path in ('api/services/dimension_config.py','api/services/dimension_explorer.py',
                 'api/services/recommendation_query_service.py','api/routes/dimension_admin_routes.py',

@@ -103,6 +103,8 @@ def validate_generation(store,gid,*,quality_go=False,missing_art_limit=0,progres
     missing=counts['media_poster']['missing']
     if missing>missing_art_limit:raise ContractError('Explicit missing-art allowance required')
     bundle,_=load_bundle(store,gid)
+    from .training_integrity import verify_materialization
+    training=verify_materialization(store,gid,bundle)
     dimensions=json.loads(bytes(store.artifact(gid,'dimensions.json')['data']))
     if dimensions['embedding_features']!=bundle['feature_names'][:sum(bundle['dimensions'])] or dimensions['model_sha256']!=store.artifact(gid,'model.pkl')['sha256']:
         raise ContractError('Dimension metadata belongs to a different model/layout')
@@ -127,6 +129,6 @@ def validate_generation(store,gid,*,quality_go=False,missing_art_limit=0,progres
     if not quality_go:raise ContractError('Quality GO decision is required; vector validity alone is insufficient')
     result=dict(counts=counts,watch_coverage=snapshot['watch_coverage'],missing_art=missing,quality_go=True,
         contract_hash=generation['contract_hash'],model_sha256=store.artifact(gid,'model.pkl')['sha256'],
-        evaluation_sha256=quality['sha256'],scope=generation['scope'],feature_version=bundle['feature_version'])
+        evaluation_sha256=quality['sha256'],scope=generation['scope'],feature_version=bundle['feature_version'],training=training)
     store.query(sql.SQL("UPDATE {} SET validation=%s,status='validated' WHERE generation_id=%s").format(store.table('generations')),(Json(result),gid))
     store.conn.commit();return result

@@ -73,6 +73,10 @@ class FakeIncrementalConnection:
 
 
 class TautulliWatchReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
+        active.start();self.addCleanup(active.stop)
+
     def test_incremental_load_clears_cache_before_listing_libraries(self):
         conn = FakeIncrementalConnection()
         events = []
@@ -226,6 +230,10 @@ class FakeUserEmbeddingConnection:
 
 
 class UserEmbeddingRebuildTests(unittest.TestCase):
+    def setUp(self):
+        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
+        active.start();self.addCleanup(active.stop)
+
     def test_rebuild_clears_stale_user_embeddings_before_insert(self):
         conn = FakeUserEmbeddingConnection(
             media_embeddings={

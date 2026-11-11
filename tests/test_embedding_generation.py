@@ -178,6 +178,10 @@ def test_missing_poster_negative_cache_is_persistent(tmp_path,movie):
 
 def test_publication_barrier_blocks_legacy_and_cleans_failure(tmp_path,monkeypatch):
     from api.embedding_generation import runtime
+    from unittest.mock import MagicMock
+    conn=MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value=(None,)
+    monkeypatch.setattr('api.db.connection.connect_db',lambda:conn)
     monkeypatch.setattr(runtime,'TRANSITION',tmp_path/'transition.json')
     monkeypatch.setattr(runtime,'MARKER',tmp_path/'absent.json')
     monkeypatch.setattr(runtime,'legacy_writer_pids',lambda:[])

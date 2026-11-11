@@ -360,6 +360,18 @@ def dispatch_stage(store,gid,args,config):
 
 def main(argv=None):
     parser=argument_parser();args=parser.parse_args(argv)
+    if args.operation!='daily':return _main(args,parser)
+    from api.embedding_generation.run_safety import classify_failure,failure_message,VERIFICATION_ONLY_EXIT
+    try:result=_main(args,parser)
+    except Exception as exc:
+        failure=classify_failure(exc)
+        print(canonical(dict(error=failure_message(exc),**failure)),flush=True)
+        raise SystemExit(75 if failure['retryable'] else 78) from None
+    if result and result.get('verification_only'):raise SystemExit(VERIFICATION_ONLY_EXIT)
+    return result
+
+
+def _main(args,parser):
     if args.num_thread is not None and args.operation!='media-poster':parser.error('--num-thread is supported only for media-poster')
     if args.thread_validation is not None and (args.operation!='media-poster' or args.num_thread is None):
         parser.error('--thread-validation requires media-poster --num-thread')
@@ -367,8 +379,9 @@ def main(argv=None):
     read_only={'preflight','coverage','status','verify','inspect','export'}
     if args.operation not in read_only|{'smoke','daily'} and not args.approved_production_change:
         parser.error('THIS stage requires operator approval and --approved-production-change')
-    conn=connect_db()
+    conn=None;primary_error=None;completed_result=None
     try:
+        conn=connect_db()
         if args.operation in read_only|{'benchmark-threads'}:conn.set_session(readonly=True)
         if args.operation=='coverage':
             conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
@@ -406,7 +419,9 @@ def main(argv=None):
             print(canonical(dict(receipt=str(target),**result)))
             if result['recommended_threads'] is None:raise ContractError('No reduced thread setting passed vector compatibility; resume override remains blocked')
             return
-        if args.operation=='daily':daily(store,config,pipeline_lock_held=args.pipeline_lock_held);return
+        if args.operation=='daily':
+            completed_result=daily(store,config,pipeline_lock_held=args.pipeline_lock_held)
+            return completed_result
         if args.operation=='create':
             started=time.monotonic();last=[-100.]
             def creating(value):
@@ -495,7 +510,18 @@ def main(argv=None):
             with publication_lock(args.pipeline_lock_held):result=promote(store,gid,approved=True,deployed_code=receipt['deployed_code_sha256'])
         else:result=dispatch_stage(store,gid,args,config)
         print(canonical(result))
-    finally:conn.close()
+    except BaseException as exc:
+        primary_error=exc
+        raise
+    finally:
+        if conn is not None:
+            try:conn.close()
+            except Exception:
+                if primary_error is None:
+                    if completed_result and completed_result.get('promotion_id'):
+                        from api.embedding_generation.run_safety import RunFailure
+                        raise RunFailure('COMPLETION_CLEANUP','Cleanup failed after a recorded publication/recovery; operator review required') from None
+                    raise
 
 
 
@@ -518,11 +544,13 @@ def daily(store,config,*,pipeline_lock_held=False):
         progress=lambda value:print(canonical(value),flush=True))
     summary=result['summary']
     print(canonical(dict(run_id=result['run_id'],generation_id=result['generation_id'],promotion_id=result['promotion_id'],
+        verification_only=bool(result.get('verification_only')),outcome='verification_only' if result.get('verification_only') else 'daily_completed',
         counts=summary['counts'],inference=summary['inference'],poster_inference_requests=0,
         scoring=summary['scoring'],stages=summary['stages'],model_before=summary['model_before'],model_after=summary['model_after'],
         no_new_shadow_generation=True,elapsed_seconds=summary['elapsed_seconds'],
         total_elapsed_seconds=summary.get('elapsed_seconds_total',summary['elapsed_seconds']),
         semantic_labeling='disabled; incompatible legacy dimension labeler')))
+    return result
 
 
 def yield_to_existing_pipeline():

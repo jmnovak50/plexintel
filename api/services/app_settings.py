@@ -1120,6 +1120,12 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "in-app launches share a lock and refuse duplicate execution."
         ),
     ),
+    _setting('pipeline.max_attempts','pipeline','Maximum automatic attempts','integer',default=3,
+             minimum=1,maximum=10,env_aliases=('PIPELINE_MAX_ATTEMPTS',),
+             description='Total scheduled attempts per slot and maximum failed recoveries of one saved run. Does not enable scheduling.'),
+    _setting('pipeline.retry_backoff_seconds','pipeline','Transient failure retry delay','integer',default=300,
+             minimum=60,maximum=86400,env_aliases=('PIPELINE_RETRY_BACKOFF_SECONDS',),
+             description='Minimum delay before another scheduled attempt after an explicitly retryable failure. Other failures require operator review.'),
     _setting(
         "pipeline.weekly_day",
         "pipeline",

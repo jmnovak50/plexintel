@@ -266,24 +266,31 @@ def test_text_source_refresh_does_not_create_poster_work(store,encoder,tmp_path,
     assert cli.report(store,gid)['preparation_counts']['poster']['pending']==0
 
 
-@pytest.mark.parametrize('resumed',[False,True])
-@pytest.mark.parametrize('bad_quality',[False,True])
-def test_canonical_run_orchestration_resumes_without_new_shadow_or_duplicate_sync(encoder,tmp_path,monkeypatch,resumed,bad_quality):
+@pytest.mark.parametrize('resumed,bad_quality,fault',[
+    (False,False,None),(True,False,None),(False,True,None),(True,True,None),
+    (True,False,'verification'),(True,False,'commit'),(True,False,'journal'),(True,False,'validation')])
+def test_canonical_run_orchestration_resumes_without_new_shadow_or_duplicate_sync(encoder,tmp_path,monkeypatch,resumed,bad_quality,fault):
     from contextlib import nullcontext
     from dataclasses import asdict
     from unittest.mock import MagicMock
     from psycopg2 import sql
+    import psycopg2
     from api.embedding_generation import production_run as module,text_production,backfill,operator,model,promotion,io,runtime
     contract=text_contract(__import__('api.embedding_generation.contracts',fromlist=['contract']).contract(encoder))
-    state=dict(generation_id='existing',model_sha256='before',contract=contract,evaluation=dict(chronological=dict(average_precision=.9)))
+    state=dict(generation_id='existing',publication_id='incumbent',model_sha256='before',contract=contract,evaluation=dict(chronological=dict(average_precision=.9)))
+    monkeypatch.setattr(module,'assert_preflight',Mock())
     monkeypatch.setattr(text_production,'load_production',lambda store:(state,{},None))
-    monkeypatch.setattr(text_production,'verify_current_production',lambda store:{'verified':True,'counts':{'media_text':{'succeeded':1}},'generation_id':'existing','publication_id':'published','model_sha256':'after'})
+    verified={'verified':True,'counts':{'media_text':{'succeeded':1}},'generation_id':'existing','publication_id':'published','model_sha256':'after'}
+    initial=dict(verified,publication_id='incumbent',model_sha256='before')
+    verifier=Mock(side_effect=[initial,psycopg2.OperationalError('server closed the connection unexpectedly')] if fault in ('verification','journal') else [initial,verified])
+    monkeypatch.setattr(text_production,'verify_current_production',verifier)
     base=dict(library_counts={'movie':1},media_keys=['1'],watch_ids=['1'],media_embedding_keys=['1'],watch_embedding_keys=['1'])
     snapshot=dict(_db_hash='source',media=[{'rating_key':1}],events=[],watch_coverage={})
     completed={k:1 for k in ('source_sync','metadata','media_text','watch','users','training','scoring')} if resumed else {}
-    run=dict(run_id='resume',base_model_sha256='before',stages=completed,summary={'before':base},snapshot=snapshot)
+    run=dict(run_id='resume',base_model_sha256='before',stages=completed,summary={'before':base,'incumbent_revision':dict(generation_id='existing',publication_id='incumbent',model_sha256='before')},snapshot=snapshot)
     def query(statement,*args,**kwargs):
         text=str(statement)
+        if fault=='journal' and "status='failed'" in text:raise psycopg2.OperationalError('disconnected fixture')
         if 'production_runs' in text and 'status IN' in text:return run if resumed else None
         if 'SELECT *' in text and 'production_runs' in text:return run
         if 'production_run_requests' in text:return []
@@ -292,6 +299,8 @@ def test_canonical_run_orchestration_resumes_without_new_shadow_or_duplicate_syn
     store=MagicMock();store.query.side_effect=query;store.table.side_effect=lambda name:sql.Identifier('pg_temp',name)
     monkeypatch.setattr(module,'baseline',lambda store:base)
     worker=MagicMock();worker.hydrate.return_value='existing'
+    worker.context_resources={}
+    if fault=='validation':worker.validate.side_effect=ContractError('Invalid fixture materialization')
     worker.counts.return_value={k:dict(expected=1,succeeded=1,failed=0,pending=0) for k in ('media_text','watch','user')}
     worker.items.return_value=[{'timing':{'rebuilt':True}}]
     good=dict(chronological=dict(balanced_accuracy=.4 if bad_quality else .6,average_precision=.9),show_grouped=dict(metrics=dict(balanced_accuracy=.6)))
@@ -305,7 +314,10 @@ def test_canonical_run_orchestration_resumes_without_new_shadow_or_duplicate_syn
     monkeypatch.setattr(backfill,'run_media_poster',Mock(side_effect=AssertionError('No posters')))
     monkeypatch.setattr(operator,'require_preparation',Mock());monkeypatch.setattr(operator,'approve_review',Mock())
     monkeypatch.setattr(text_production,'train_text',Mock());monkeypatch.setattr(model,'score',Mock())
+    from api.embedding_generation import training_integrity
+    restore=Mock();monkeypatch.setattr(training_integrity,'restore_text_rows',restore)
     monkeypatch.setattr(promotion,'promote',Mock(return_value=dict(promotion_id='published',generation_id='existing')))
+    if fault=='commit':promotion.promote.side_effect=psycopg2.OperationalError('server closed the connection unexpectedly')
     monkeypatch.setattr(io,'Ollama',Mock())
     import subprocess
     process=Mock(return_value=Mock(returncode=0,stdout='',stderr=''));monkeypatch.setattr(subprocess,'run',process)
@@ -315,9 +327,22 @@ def test_canonical_run_orchestration_resumes_without_new_shadow_or_duplicate_syn
     if bad_quality:
         with pytest.raises(ContractError,match='quality gates'):execute()
         promotion.promote.assert_not_called();return
+    if fault:
+        from api.embedding_generation.run_safety import RunFailure
+        with pytest.raises(RunFailure) as error:execute()
+        assert error.value.retryable==(fault!='validation')
+        updates=[c for c in store.query.call_args_list if "status='failed'" in str(c.args[0])]
+        assert len(updates)==1
+        recovery=updates[0].args[1][1].adapted['recovery']
+        assert recovery['attempts']==1 and recovery['requires_operator']==(fault=='validation')
+        assert 'promotion_id' not in str(updates[0].args[0])  # Preserve any durable commit receipt.
+        restore.assert_called_once();text_production.train_text.assert_not_called()
+        return
     result=execute()
     assert result['generation_id']=='existing' and result['summary']['no_new_shadow_generation']
     assert result['summary']['poster_inference_requests']==0
     assert process.call_count==(0 if resumed else 1)
     assert stages==([] if resumed else ['prepare_metadata','run_media_text','run_watches','run_users'])
     assert '--no-embeddings' in process.call_args.args[0] if not resumed else True
+    assert restore.call_count==int(resumed)
+    assert text_production.train_text.call_count==int(not resumed)

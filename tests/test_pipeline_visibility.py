@@ -134,7 +134,7 @@ def test_dead_worker_reconciliation_is_guarded_and_changes_only_run_metadata(mon
     updates=[s for s,_ in conn.executed if s.lstrip().startswith('UPDATE')]
     assert bool(updates)==(expected==1 or advanced)
     assert not any('embedding_v2' in s or 'recommendations' in s or 'shap_' in s for s in updates)
-    assert any('pipeline_run_stages' in s for s in updates)==bool(expected)
+    assert any(s.lstrip().startswith('UPDATE public.pipeline_run_stages') for s in updates)==bool(expected)
 
 
 def test_dead_child_with_controller_still_holding_lock_is_not_reconciled(monkeypatch):

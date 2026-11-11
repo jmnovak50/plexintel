@@ -18,7 +18,7 @@ from psycopg2 import sql
 from psycopg2.extras import Json
 import pytest
 
-from api.embedding_generation.contracts import Encoder,ContractError,contract,fingerprint,metadata,media_text,watch_text,IMAGE_VERSION,embedding_input_hash
+from api.embedding_generation.contracts import Encoder,ContractError,contract,text_contract,fingerprint,metadata,media_text,watch_text,IMAGE_VERSION,embedding_input_hash
 from api.embedding_generation.store import Store
 from api.embedding_generation.io import Plex
 from api.embedding_generation.backfill import prepare_metadata,prepare_posters,run_media_text,run_media_poster,run_watches,run_users
@@ -153,10 +153,10 @@ def test_304_and_persistent_cache_reuse(store,encoder,tmp_path):
     assert all(r['poster']['state']=='available' for r in store.items(gid,'media_poster'))
 
 
-def synthetic_ready(store,encoder,*,missing_keys=()):
+def synthetic_ready(store,encoder,*,missing_keys=(),text_mode=False,example_count=120):
     base=datetime(2020,1,1,tzinfo=timezone.utc)
     media=[];events=[]
-    for index in range(1,121):
+    for index in range(1,example_count+1):
         raw=dict(type='movie',title=f'Fixture {index}',duration=6000000,year=2000+index%20,
                  Genre=[{'tag':'Comedy' if index%2 else 'Drama'}])
         media.append(dict(rating_key=index,media_type='movie',plex_guid=f'plex://movie/fixture-{index}',
@@ -166,7 +166,8 @@ def synthetic_ready(store,encoder,*,missing_keys=()):
             available_at=(day+timedelta(hours=2)).isoformat(),observed_at='2026-01-01T00:00:00+00:00',
             played_seconds=4800 if index%2 else 600,percent_complete=80 if index%2 else 10))
     snapshot=dict(media=media,events=events,legacy_watch_ids=[],feedback=[],as_of='2026-01-01T00:00:00+00:00')
-    gid=store.create(contract(encoder),snapshot,scope='full')
+    spec=text_contract(contract(encoder)) if text_mode else contract(encoder)
+    gid=store.create(spec,snapshot,scope='full')
     poster=dict(state='available',content_sha256='c'*64,preprocessing=IMAGE_VERSION)
     specification=store.generation(gid)['contract']
     for row in media:
@@ -176,11 +177,12 @@ def synthetic_ready(store,encoder,*,missing_keys=()):
         store.upsert_source(gid,'media_text',key,row,semantic_hash=digest)
         store.preparation(gid,key,'metadata',status='succeeded',content_hash=digest)
         poster_hash=fingerprint({k:poster[k] for k in ('state','content_sha256','preprocessing')})
-        store.preparation(gid,key,'poster',status='succeeded',content_hash=poster_hash)
+        if not text_mode:store.preparation(gid,key,'poster',status='succeeded',content_hash=poster_hash)
         store.complete(gid,'media_text',key,unit(row['rating_key']%20),embedding_input_hash(specification,'media_text',metadata=row['metadata']),timing=dict(model=encoder.reference))
         image_hash=embedding_input_hash(specification,'media_poster',poster_hash=poster_hash)
-        if row['rating_key'] in missing_keys:store.complete_missing_poster(gid,key,image_hash,poster)
-        else:store.complete(gid,'media_poster',key,unit((row['rating_key']+5)%20),image_hash,poster=poster,timing=dict(model=encoder.reference))
+        if not text_mode:
+            if row['rating_key'] in missing_keys:store.complete_missing_poster(gid,key,image_hash,poster)
+            else:store.complete(gid,'media_poster',key,unit((row['rating_key']+5)%20),image_hash,poster=poster,timing=dict(model=encoder.reference))
     for row in events:
         parent=media[row['rating_key']-1]
         input_hash=embedding_input_hash(specification,'watch',text=watch_text(row,parent['metadata']),
@@ -190,7 +192,7 @@ def synthetic_ready(store,encoder,*,missing_keys=()):
     store.conn.commit();run_users(store,gid)
     legacy=dict(media={str(r['rating_key']):unit((r['rating_key']+10)%20) for r in media},
                 watch={str(e['watch_id']):unit((e['rating_key']+10)%20) for e in events})
-    evaluation=train(store,gid,legacy_populations=legacy)
+    evaluation=train(store,gid,legacy_populations=None if text_mode else legacy)
     scoring=score(store,gid)
     return gid,evaluation,scoring
 

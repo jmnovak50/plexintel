@@ -15,6 +15,7 @@ from psycopg2.extras import Json
 from .store import Store
 from .contracts import ContractError,fingerprint,vector
 from .source import serializable
+from .run_safety import SAFETY_VERSION,RunFailure,assert_preflight,classify_failure,failure_message,incumbent_revision
 
 WORK={'generations','items','dependencies','artifacts','training_rows','text_training_rows',
       'modality_training_rows','predictions','preparations','preparation_attempts','inference_requests','operator_reviews'}
@@ -25,6 +26,21 @@ class ProductionRun(Store):
     def __init__(self,durable,run_id,*,live_schema="public"):
         super().__init__(durable.conn,durable.schema)
         self.durable=durable;self.run_id=run_id;self.live_schema=live_schema
+        self.context_resources=dict(samples=0,max_own_locks=0,max_total_locks=0,peak_rss_kib=0)
+
+    def observe_resources(self,phase,completed):
+        import resource
+        row=self.query('SELECT count(*) FILTER(WHERE pid=pg_backend_pid()) AS own,count(*) AS total FROM pg_locks')
+        self.context_resources.update(samples=self.context_resources['samples']+1,
+            max_own_locks=max(self.context_resources['max_own_locks'],row['own']),
+            max_total_locks=max(self.context_resources['max_total_locks'],row['total']),
+            peak_rss_kib=max(self.context_resources['peak_rss_kib'],resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+            last_phase=phase,completed=completed)
+
+    def context_batch(self,phase,completed):
+        if completed%128==0:
+            self.observe_resources(phase,completed)
+            self.conn.commit()  # Only connection-private work has changed.
 
     def table(self,name):
         return sql.Identifier('pg_temp','production_work_'+name) if name in WORK else self.durable.table(name)
@@ -85,6 +101,7 @@ class ProductionRun(Store):
     def hydrate(self,state,snapshot):
         """Read all vectors from physical production, overlay only durable run deltas."""
         gid=state['generation_id']
+        self.incumbent_revision=incumbent_revision(state)
         # Ancestor contracts are audit lineage, not runtime vector/model sources.
         parent=gid;ancestors=[]
         while parent:
@@ -97,12 +114,14 @@ class ProductionRun(Store):
                       user=len(self.profile_sources(snapshot,state['contract']['profile_threshold'])))
         self.query(sql.SQL("UPDATE {} SET status='building',contract=%s,contract_hash=%s,snapshot=%s,source_hash=%s,expected=%s,base_generation=%s WHERE generation_id=%s")
             .format(self.table('generations')),(Json(state['contract']),state['contract_hash'],Json(snapshot),snapshot['_db_hash'],Json(expected),gid,gid))
-        for row in snapshot['media']:self.upsert_source(gid,'media_text',str(row['rating_key']),row)
-        for event in snapshot['events']:
+        for index,row in enumerate(snapshot['media'],1):
+            self.upsert_source(gid,'media_text',str(row['rating_key']),row);self.context_batch('media-source',index)
+        for index,event in enumerate(snapshot['events'],1):
             self.upsert_source(gid,'watch',str(event['watch_id']),event,owner=event['username'],media_key=str(event['rating_key']),semantic_hash=fingerprint({k:v for k,v in event.items() if k!='observed_at'}))
+            self.context_batch('watch-source',index)
         for owner,source in self.profile_sources(snapshot,state['contract']['profile_threshold']).items():self.upsert_source(gid,'user',owner,source,owner=owner)
         canonical=self.query(sql.SQL('SELECT * FROM {}').format(self.durable.table('production_inputs')),many=True)
-        for entry in canonical:
+        for index,entry in enumerate(canonical,1):
             kind,key,old=entry['kind'],entry['item_key'],entry['record']
             current=self.query(sql.SQL('SELECT * FROM {} WHERE generation_id=%s AND kind=%s AND item_key=%s').format(self.table('items')),(gid,kind,key))
             if current is None or kind=='watch' and current['semantic_hash']!=old['semantic_hash']:continue
@@ -111,8 +130,9 @@ class ProductionRun(Store):
             if not physical:raise ContractError('Canonical production vector is missing')
             record=dict(old,source={**old['source'],**current['source']} if kind=='media_text' else old['source'],timing=dict(inherited=True))
             self.restore_item(record,physical['embedding'])
+            self.context_batch('canonical-context',index)
         checkpoints=self.query(sql.SQL('SELECT * FROM {} WHERE run_id=%s').format(self.durable.table('production_run_items')),(self.run_id,),many=True)
-        for checkpoint in checkpoints:
+        for index,checkpoint in enumerate(checkpoints,1):
             record=checkpoint['record'];embedding=checkpoint['embedding']
             if record.get('_reuse_production_vector'):
                 table,column={'media_text':('media_embeddings','rating_key'),'watch':('watch_embeddings','watch_id'),'user':('user_embeddings','username')}[record['kind']]
@@ -120,10 +140,12 @@ class ProductionRun(Store):
             self.restore_item(record,embedding)
             prep=checkpoint['preparation']
             if prep:super().preparation(gid,record['item_key'],'metadata',status=prep['status'],content_hash=prep['content_hash'],provenance=prep['provenance'],timing=prep['timing'])
+            self.context_batch('checkpoint-context',index)
         for artifact in self.query(sql.SQL('SELECT * FROM {} WHERE run_id=%s').format(self.durable.table('production_run_artifacts')),(self.run_id,),many=True):
             Store.artifact(self,gid,artifact['name'],bytes(artifact['data']),artifact['metadata'])
         self.query(sql.SQL('INSERT INTO {} SELECT %s,owner,media_key,probability,cosine,rank,shap FROM {} WHERE run_id=%s')
             .format(self.table('predictions'),self.durable.table('production_run_predictions')),(gid,self.run_id))
+        self.observe_resources('context-complete',len(canonical)+len(checkpoints))
         self.conn.commit();return gid
 
     def restore_item(self,record,embedding):
@@ -155,30 +177,62 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
     from .text_production import load_production,train_text,verify_current_production
     from .io import Ollama
     from .contracts import Encoder
-    from .backfill import prepare_metadata,run_media_text,run_watches,run_users,safe_error
+    from .backfill import prepare_metadata,run_media_text,run_watches,run_users
     from .operator import approve_review,require_preparation
     from .model import score
     from .promotion import promote
     from .progress import Reporter
     monitor=Reporter(progress);progress=monitor
     overall_started=time.perf_counter()
-    production=load_production(durable)
-    if production is None:raise ContractError('Canonical text-only production must be active')
-    state,_,_=production;gid=state['generation_id']
     with publication_lock(pipeline_lock_held):
-        verify_current_production(durable)
-        pending=durable.query(sql.SQL("SELECT * FROM {} WHERE generation_id=%s AND status IN ('running','failed') ORDER BY created_at LIMIT 1").format(durable.table('production_runs')),(gid,))
+        production=load_production(durable)
+        if production is None:raise ContractError('Canonical text-only production must be active')
+        state,bundle,_=production;gid=state['generation_id']
+        incumbent=incumbent_revision(state)
+        assert_preflight(durable,state,bundle)
+        verified=verify_current_production(durable)
+        if incumbent_revision(verified)!=incumbent:
+            raise RunFailure('INCUMBENT_CHANGED','Incumbent changed during baseline verification')
+        pending=durable.query(sql.SQL("""SELECT * FROM {} WHERE generation_id=%s AND
+            (status IN ('running','failed') OR (status='succeeded' AND promotion_id=%s
+                AND summary->>'run_safety'=%s AND NOT summary ? 'final_verification'))
+            ORDER BY created_at LIMIT 1""").format(durable.table('production_runs')),(gid,state.get('publication_id'),SAFETY_VERSION))
         if pending:
             run=pending;run_id=run['run_id']
-            if run['base_model_sha256']!=state['model_sha256']:raise ContractError('Pending run belongs to a different production model')
+            if run.get('promotion_id'):
+                # Commit may have succeeded before verification or the client failed.
+                # Never hydrate/refit/republish an already committed run.
+                if (str(run['promotion_id'])!=str(state.get('publication_id'))
+                    or run['summary'].get('model_after')!=state['model_sha256']):
+                    raise RunFailure('PUBLISHED_RUN_SUPERSEDED','Published recovery run differs from current production; operator review required')
+                monitor.bind(run_id)
+                with monitor.span('verification'):
+                    verified=verify_current_production(durable)
+                    if (str(verified['publication_id'])!=str(run['promotion_id'])
+                        or verified['model_sha256']!=state['model_sha256']):
+                        raise RunFailure('PUBLICATION_VERIFICATION','Committed production receipt differs from recovery run')
+                monitor.done('verification',verified_vectors=sum(v['succeeded'] for v in verified['counts'].values()),poster_requests=0)
+                summary=dict(run['summary'],final_verification=verified,verification_only_recovery=True,outcome='verification_only')
+                durable.query(sql.SQL("UPDATE {} SET status='succeeded',summary=%s,error=NULL,finished_at=clock_timestamp() WHERE run_id=%s").format(durable.table('production_runs')),(Json(summary),run_id));durable.conn.commit()
+                return dict(run_id=run_id,generation_id=gid,promotion_id=run['promotion_id'],summary=summary,verification_only=True)
+            if run['base_model_sha256']!=state['model_sha256']:
+                raise RunFailure('STALE_BASE_MODEL','Pending run belongs to a different production model; operator review required')
+            if run['summary'].get('incumbent_revision')!=incumbent:
+                raise RunFailure('STALE_INCUMBENT_REVISION','Saved run lacks a matching exact incumbent revision; operator review required')
+            recovery=run['summary'].get('recovery',{})
+            if (recovery.get('requires_operator')
+                or run.get('status')=='failed' and not recovery.get('retryable')
+                or recovery.get('attempts',0)>=config.get('pipeline.max_attempts',3)):
+                raise RunFailure('RECOVERY_REQUIRES_OPERATOR','Saved run exhausted recovery or requires operator review')
         else:
             run_id=str(uuid4())
             durable.query(sql.SQL("INSERT INTO {}(run_id,generation_id,base_model_sha256,status,summary) VALUES(%s,%s,%s,'running',%s)").format(durable.table('production_runs')),
-                          (run_id,gid,state['model_sha256'],Json(dict(before=baseline(durable)))))
+                          (run_id,gid,state['model_sha256'],Json(dict(before=baseline(durable),run_safety=SAFETY_VERSION,incumbent_revision=incumbent))))
             durable.conn.commit();run=durable.query(sql.SQL('SELECT * FROM {} WHERE run_id=%s').format(durable.table('production_runs')),(run_id,))
         monitor.bind(run_id)
         progress(dict(stage='production-run',run_id=run_id,generation_id=gid,resumed=bool(pending)))
         stages=dict(run['stages']);summary=dict(run['summary'] or {});started=time.perf_counter()
+        summary['run_safety']=SAFETY_VERSION
         def phase(name,operation):
             from contextlib import nullcontext
             logical={'source_sync':'source_sync','watch':'watch','users':'users'}.get(name)
@@ -212,7 +266,9 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
                         if row and fingerprint({k:v for k,v in event.items() if k!='observed_at'})==row['semantic_hash']:event['observed_at']=row['source'].get('observed_at',event['observed_at'])
                     durable.query(sql.SQL('UPDATE {} SET snapshot=%s WHERE run_id=%s').format(durable.table('production_runs')),(Json(snapshot),run_id));durable.conn.commit()
                 else:snapshot=run['snapshot']
-                work=ProductionRun(durable,run_id);work.install_work();work.hydrate(state,snapshot)
+                work=ProductionRun(durable,run_id)
+                summary['context_resources']=work.context_resources
+                work.install_work();work.hydrate(state,snapshot)
                 stages['context']=stages.get('context',0)+time.perf_counter()-context_started
                 client=Ollama(config['ollama.host'],Encoder(**state['contract']['encoder']),timeout=config['ollama.timeout_s']);client.verify_pinned()
                 plex=plex_factory(config,cache)
@@ -247,6 +303,8 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
             monitor.done('source_sync',new_media=len({str(r['rating_key']) for r in snapshot['media']}-set(before['media_keys'])),new_watch_events=snapshot['watch_coverage'].get('source_watch_events',len(before['watch_ids']))-len(before['watch_ids']),quarantined=snapshot['watch_coverage'].get('quarantined_watch_events',0))
             for gate in ('text','profiles'):approve_review(work,gid,gate,'Approved canonical text-only production run; no poster dependency')
             if 'training' in stages:
+                from .training_integrity import restore_text_rows
+                restore_text_rows(work,gid,progress=progress)
                 monitor.skip('training_data')
                 monitor.skip('train_model',previous_seconds=stages['training'])
             phase('training',lambda:train_text(work,gid,progress=progress,monitor=monitor))
@@ -289,7 +347,7 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
             durable.query(sql.SQL('UPDATE {} SET summary=%s WHERE run_id=%s').format(durable.table('production_runs')),(Json(summary),run_id));durable.conn.commit()
             deployed=durable.query(sql.SQL('SELECT deployed_code_sha256 FROM {} WHERE singleton').format(durable.table('control')))['deployed_code_sha256']
             with monitor.span('publication'):
-                result=promote(work,gid,approved=True,deployed_code=deployed)
+                result=promote(work,gid,approved=True,deployed_code=deployed,expected_incumbent=incumbent)
             monitor.done('publication',message='Committed publication '+result['promotion_id'])
             with monitor.span('verification'):
                 verified=verify_current_production(durable)
@@ -298,8 +356,23 @@ def execute(durable,config,*,collect,plex_factory,cache,publication_lock,pipelin
                     raise ContractError('Published generation/model changed before final verification')
             monitor.done('verification',verified_vectors=sum(v['succeeded'] for v in verified['counts'].values()),poster_requests=0)
             summary['stage_details']=monitor.details
+            summary['final_verification']=verified
+            summary['outcome']='daily_completed'
             summary['elapsed_seconds_total']=time.perf_counter()-overall_started
             durable.query(sql.SQL('UPDATE {} SET summary=%s,finished_at=clock_timestamp() WHERE run_id=%s').format(durable.table('production_runs')),(Json(summary),run_id));durable.conn.commit()
             return dict(run_id=run_id,**result,summary=summary)
         except BaseException as exc:
-            durable.conn.rollback();durable.query(sql.SQL("UPDATE {} SET status='failed',error=%s WHERE run_id=%s").format(durable.table('production_runs')),(safe_error(exc),run_id));durable.conn.commit();raise
+            failure=classify_failure(exc)
+            attempts=summary.get('recovery',{}).get('attempts',0)+1
+            summary['recovery']=dict(failure,attempts=attempts,
+                requires_operator=not failure['retryable'] or attempts>=config.get('pipeline.max_attempts',3))
+            try:
+                durable.conn.rollback()
+                durable.query(sql.SQL("UPDATE {} SET status='failed',error=%s,summary=%s WHERE run_id=%s").format(durable.table('production_runs')),
+                    (failure_message(exc),Json(summary),run_id));durable.conn.commit()
+            except Exception:
+                # A disconnected client cannot reliably annotate the journal.
+                # The durable promotion_id and safety marker decide commit recovery.
+                pass
+            if isinstance(exc,(KeyboardInterrupt,SystemExit)):raise
+            raise RunFailure(failure['code'],failure_message(exc),retryable=failure['retryable']) from None

@@ -1864,6 +1864,11 @@ class LabelCoveragePromptTests(unittest.TestCase):
 
 
 class ReviewCsvExportTests(unittest.TestCase):
+    def setUp(self):
+        # Export fixtures explicitly exercise an inactive legacy installation.
+        active=patch('api.embedding_generation.runtime.active_generation',return_value=None)
+        active.start();self.addCleanup(active.stop)
+
     class FakeCursor:
         def __init__(self):
             self.executed = []
