@@ -47,6 +47,13 @@ def test_active_web_daily_collection_and_labeling_closure_has_zero_migration_dep
     assert not any('embedding_generation' in path.parts for path in seen)
 
 
+def test_admin_subprocess_allowlist_and_config_tool_have_no_migration_dependency():
+    from api.routes.admin_routes import ALLOWED_SCRIPTS
+    seen=closure([ROOT/name for name in ALLOWED_SCRIPTS]+[ROOT/'scripts/register_dimension_config.py'])
+    assert ROOT/'label_embeddings.py' in seen
+    assert ROOT/'api/services/dimension_label_batch.py' in seen
+
+
 def test_encoder_is_text_only_digest_pinned_and_has_no_fallback():
     session=Mock()
     responses=[dict(models=[dict(name='embeddinggemma-2:latest',digest='a'*64)]),dict(capabilities=['embedding']),

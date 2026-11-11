@@ -79,7 +79,7 @@ class ProfileContext:
             self.watch_by_title[key][1] += 1
             self.watch_events.append((key, [str(event['watch_id']), row['input_hash'], available(event).isoformat()]))
 
-def feature_row(inputs, media, watches, events, owner, target, cutoff, *, excluded_keys=(), context=None, identity=None):
+def feature_row(inputs, media, watches, events, owner, target, cutoff, *, excluded_keys=(), context=None, identity=None, dependencies=True):
     """Use only events completed/observed before cutoff, excluding target key.
 
     For a prospective never-watched candidate, the user half equals its complete
@@ -105,15 +105,16 @@ def feature_row(inputs, media, watches, events, owner, target, cutoff, *, exclud
     count = context.watch_count - sum((value[1] for value in removed))
     watch_sum = context.watch_sum - sum((value[0] for value in removed), np.zeros(768))
     watch_sim = cosine(watch_sum / count, parent['embedding']) if count else 0.0
-    used_events = [value for key, value in context.watch_events if key not in target_aliases]
     description = parent['source']['metadata']
     fused = np.concatenate([vector(parent['embedding']), mean]).astype(np.float32)
     if fused.shape != (1536,) or not np.isfinite(fused).all():
         raise ContractError('Invalid text/user feature layout')
-    dependencies = dict(feature_space_id=space, contract_hash=inputs['contract_hash'], cutoff=utc(cutoff).isoformat(), target_excluded=target, profile_keys=keys, media_text_hash=parent['input_hash'], profile_hashes=[[k, media[k]['input_hash']] for k in keys], watch_events=used_events, feature_version=inputs['contract']['features'])
-    if identity:
-        dependencies.update(identity_policy=IDENTITY_POLICY, canonical_target=identity.identity(target), target_aliases=sorted(target_aliases), identity_index_hash=identity.signature)
-    return dict(owner=owner, media_key=target, embedding=fused, genres=description['genres'] or (description.get('show_context') or {}).get('genres', []), directors=description['directors'], year=description['year'], watch_sim=watch_sim, history_titles=len(keys), media_type=description['media_type'], dependencies=dependencies, show_key=identity.group(target) if identity else str(parent['source'].get('show_rating_key') or target), **dict(canonical_identity=identity.identity(target), identity_policy=IDENTITY_POLICY) if identity else {})
+    details=None
+    if dependencies:
+        details = dict(feature_space_id=space, contract_hash=inputs['contract_hash'], cutoff=utc(cutoff).isoformat(), target_excluded=target, profile_keys=keys, media_text_hash=parent['input_hash'], profile_hashes=[[k, media[k]['input_hash']] for k in keys], watch_events=[value for key,value in context.watch_events if key not in target_aliases], feature_version=inputs['contract']['features'])
+        if identity:
+            details.update(identity_policy=IDENTITY_POLICY, canonical_target=identity.identity(target), target_aliases=sorted(target_aliases), identity_index_hash=identity.signature)
+    return dict(owner=owner, media_key=target, embedding=fused, genres=description['genres'] or (description.get('show_context') or {}).get('genres', []), directors=description['directors'], year=description['year'], watch_sim=watch_sim, history_titles=len(keys), media_type=description['media_type'], dependencies=details, show_key=identity.group(target) if identity else str(parent['source'].get('show_rating_key') or target), **dict(canonical_identity=identity.identity(target), identity_policy=IDENTITY_POLICY) if identity else {})
 
 def label_for(events, feedback, runtime, kind, as_of, *, movie_days=21, tv_days=14):
     """Port of active legacy label rules, intentionally retaining 0.60, not 0.70."""
@@ -320,10 +321,22 @@ def planned_text_rows(inputs, media, watches, plan, identity, *, progress=lambda
         yield row
     progress(dict(stage='historical-features', expected=len(plan), completed=len(plan), failed=0))
 
-def training_rows(inputs,media,watches,*,progress=lambda value:None):
+def compact_row(row, media, watches, identity):
+    """Check the full dependency graph, keep its exact digest, then release it."""
+    dependencies=row.pop('dependencies')
+    aliases=identity.aliases(row['media_key'])
+    if set(dependencies['profile_keys']) & aliases:
+        raise ContractError('Canonical target leaked into profile')
+    if any(str(watches[w[0]]['source']['rating_key']) in aliases for w in dependencies['watch_events']):
+        raise ContractError('Canonical target leaked into watch similarity')
+    row['dependency_hash']=fingerprint(dependencies)
+    return row
+
+
+def training_rows(inputs,media,watches,*,compact=False,progress=lambda value:None):
     identity=CanonicalTitles(media)
     plan,skips=training_plan(inputs,media,identity,progress=progress)
-    return list(planned_text_rows(inputs,media,watches,plan,identity,progress=progress)),skips
+    return [compact_row(row,media,watches,identity) if compact else row for row in planned_text_rows(inputs,media,watches,plan,identity,progress=progress)],skips
 
 
 class Vocabulary:
@@ -355,16 +368,17 @@ class Vocabulary:
             +[f'decade_{d}' for d in self.decades]+['watch_sim'])
 
     def transform(self,rows):
-        values=[]
-        for row in rows:
+        values=np.empty((len(rows),len(self.names)),dtype=np.float32)
+        for index,row in enumerate(rows):
             data=np.asarray(row['embedding'],dtype=np.float32)
             if data.shape!=(1536,) or not np.isfinite(data).all():
                 raise ContractError('Expected exactly 768 text and 768 user coordinates')
             decade=int(row['year'])//10*10 if row['year'] is not None else None
-            values.append(list(data)+[int(g in row['genres']) for g in self.genres]
+            values[index,:1536]=data
+            values[index,1536:]=([int(g in row['genres']) for g in self.genres]
                 +[int(d in row['directors']) for d in self.directors]
                 +[int(decade==d) for d in self.decades]+[row['watch_sim']])
-        return np.asarray(values,dtype=np.float32).reshape(len(rows),len(self.names))
+        return values
 
 
 def chronological_split(rows):

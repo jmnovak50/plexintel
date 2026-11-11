@@ -27,8 +27,12 @@ def settings():
           'scoring.watched_engagement_threshold','training.movie_revisit_pending_days',
           'training.tv_revisit_pending_days','training.interested_sample_weight',
           'training.watched_like_sample_weight','training.negative_sample_weight','training.feedback_bonus',
+          'training.engagement_threshold','training.enable_feedback','training.use_sample_weight',
+          'scoring.shap_targeting_strategy','scoring.shap_max_items','scoring.shap_max_items_overall',
+          'scoring.shap_max_items_movie','scoring.shap_max_items_tv','scoring.shap_raw_min_dims',
+          'scoring.shap_raw_max_dims','scoring.shap_raw_cumabs_target','scoring.shap_prune_days',
           'pipeline.max_attempts']
-    values={k:v.value for k,v in resolve_settings(keys=keys).items()}
+    values={k:v.value for k,v in resolve_settings(keys=keys,require_database=True).items()}
     if float(values['training.watch_embed_min_engagement'])!=0.5:
         raise ContractError('Changed watch qualification requires a separately versioned contract')
     if float(values['scoring.watched_engagement_threshold'])!=0.5:
@@ -37,6 +41,10 @@ def settings():
                          ('training.negative_sample_weight',5.),('training.feedback_bonus',.1)]:
         if float(values[key])!=expected:
             raise ContractError('Changed label weights require a separately versioned label contract')
+    if float(values['training.engagement_threshold'])!=.6:
+        raise ContractError('Configured training engagement threshold differs from the approved 0.60 label contract')
+    if values['training.enable_feedback'] is not True or values['training.use_sample_weight'] is not True:
+        raise ContractError('The approved supervised policy requires feedback and sample weights; conflicting configuration requires explicit review')
     return values
 
 
@@ -84,7 +92,7 @@ def read_snapshot(conn, *, media_keys=None, max_events=None):
         if any(r['rating_key'] is None for r in media):
             raise ContractError('Orphan legacy media vectors require explicit reconciliation')
         cur.execute('''SELECT wh.watch_id,we.watch_id AS legacy_watch_id,wh.username,wh.rating_key,wh.watched_at,
-            wh.played_duration AS played_seconds,wh.percent_complete,wh.observed_at
+            wh.played_duration AS played_seconds,wh.percent_complete
             FROM public.watch_history wh FULL JOIN public.watch_embeddings we USING(watch_id)
             WHERE (%s::integer[] IS NULL OR wh.rating_key=ANY(%s)) ORDER BY wh.watch_id''',(media_keys,media_keys))
         events=[dict(r) for r in cur.fetchall()]

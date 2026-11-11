@@ -171,6 +171,15 @@ def persist_result(conn, context, row, result, model, *, regenerate=False, sourc
 def execute(conn, evidence, eligible, selected, pricing, args, prediction):
     import gpt_utils as gpt
     ctx = evidence.context
+    manual=not bool(getattr(args,'automation',None))
+    if manual:
+        from api.services.pipeline_labeling import limits,SCOPE
+        caps=limits(conn)
+        args.budget_usd=min(args.budget_usd,caps['budget_usd']) if args.budget_usd is not None else caps['budget_usd']
+        prompts={str(r['dimension']):prompt_hash(r['prompt']) for r in selected}
+        args.automation=dict(scope=SCOPE,feature_space_id=ctx['feature_space_id'],
+            prompts=prompts,max_attempts=args.max_attempts,limits=limits)
+        prediction=dict(prediction,automation_scope=SCOPE,automation_prompts=prompts)
     batch_id = str(uuid4())
     with conn.cursor() as cur:
         cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing,budget_usd)
@@ -178,7 +187,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
             Json([r['dimension'] for r in selected]),Json(prediction),Json(asdict(pricing)),args.budget_usd))
     conn.commit()
     automation=getattr(args,'automation',None)
-    assessment_source='daily-pipeline' if automation else 'manual-batch'
+    assessment_source='manual-batch' if manual else 'daily-pipeline'
     ledger = UsageLedger(conn,batch_id,pricing,args.budget_usd,**({'automation':automation} if automation else {}))
     summary = dict(batch_id=batch_id,selected=len(selected),successes=0,failures=0,abstentions=0,skipped=0)
     side_completed = dict(media=0,user=0)

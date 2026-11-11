@@ -40,7 +40,6 @@ def db():
                 assert match,table
                 cur.execute(match.group())
             cur.execute('''ALTER TABLE library ADD COLUMN plex_guid text;
-                ALTER TABLE watch_history ADD COLUMN observed_at timestamptz;
                 CREATE TABLE user_feedback(id serial,username text,rating_key integer,feedback text,suppress boolean,
                     created_at timestamptz,modified_at timestamptz);
                 CREATE TABLE embedding_feature_config(config_id text PRIMARY KEY,metadata jsonb,active boolean);
@@ -82,14 +81,14 @@ def populate(conn):
         ident=0
         for owner in ('viewer-one','viewer-two'):
             ident+=1
-            cur.execute('INSERT INTO watch_history(watch_id,username,rating_key,watched_at,played_duration,percent_complete,observed_at) VALUES(%s,%s,2,%s,4800,80,%s)',
-                (ident,owner,base,base+timedelta(hours=1)))
+            cur.execute('INSERT INTO watch_history(watch_id,username,rating_key,watched_at,played_duration,percent_complete) VALUES(%s,%s,2,%s,4800,80)',
+                (ident,owner,base))
             for key in range(3,164):
                 at=base+timedelta(days=key)
                 if key%3==0:
                     ident+=1;played=600 if key%2 else 4800
-                    cur.execute('INSERT INTO watch_history(watch_id,username,rating_key,watched_at,played_duration,percent_complete,observed_at) VALUES(%s,%s,%s,%s,%s,%s,%s)',
-                        (ident,owner,key,at,played,played/60,at+timedelta(hours=1)))
+                    cur.execute('INSERT INTO watch_history(watch_id,username,rating_key,watched_at,played_duration,percent_complete) VALUES(%s,%s,%s,%s,%s,%s)',
+                        (ident,owner,key,at,played,played/60))
                 else:
                     value=('never_watch' if key%2 else 'interested') if key%5==0 else ('watched_dislike' if key%2 else 'watched_like')
                     cur.execute('INSERT INTO user_feedback(username,rating_key,feedback,suppress,created_at,modified_at) VALUES(%s,%s,%s,true,%s,%s)',
@@ -97,8 +96,15 @@ def populate(conn):
     conn.commit()
     snapshot=source.read_snapshot(conn);conn.rollback()
     snapshot['as_of']='2021-01-01T00:00:00+00:00'
+    from api.services.app_settings import get_setting_definition
+    snapshot['_fixture_policy']={k:get_setting_definition(k).default for k in (
+        'scoring.shap_targeting_strategy','scoring.shap_max_items','scoring.shap_max_items_overall',
+        'scoring.shap_max_items_movie','scoring.shap_max_items_tv','scoring.shap_raw_min_dims',
+        'scoring.shap_raw_max_dims','scoring.shap_raw_cumabs_target')}
     for event in snapshot['events']:
-        event['verified_started_at']=event['watched_at'];event['available_at']=event['observed_at']
+        event['verified_started_at']=event['watched_at']
+        # Explicit synthetic upstream stop receipt, separate from public storage.
+        event['available_at']=(datetime.fromisoformat(event['watched_at'])+timedelta(hours=1)).isoformat()
     plex=Mock();plex.catalog.return_value=list(raw.values());plex.metadata.side_effect=lambda key:raw[str(key)]
     return snapshot,plex,Encoder()
 
@@ -112,7 +118,7 @@ def digest(conn):
 def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,monkeypatch):
     import api.predictive.runner as runner
     snapshot,plex,encoder=populate(db)
-    result=run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+    result=run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     config=current_config(db);db.commit()
     assert result['verified'] and result['counts']['training_data']>128
     assert result['summary']['observations']['retrospective_explicit_feedback']>0
@@ -125,7 +131,7 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
         cur.execute('SELECT ctid::text FROM media_embeddings WHERE rating_key=4');physical=cur.fetchone()[0]
     db.commit()
     # Repeat reads exactly the same saved vector/provenance inputs; no inference.
-    result2=run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+    result2=run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     assert encoder.calls==calls
     with db.cursor() as cur:
         cur.execute('SELECT ctid::text FROM media_embeddings WHERE rating_key=4');assert cur.fetchone()[0]==physical
@@ -139,7 +145,7 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
         return real_publish(*args,**kwargs,failpoint=failure)
     monkeypatch.setattr(runner,'publish',interrupted)
     with pytest.raises(RuntimeError,match='interruption'):
-        run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+        run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     assert digest(db)==before;db.commit()
     assert verify(db,current_config(db))==result2['counts'];db.commit()
     with db.cursor() as cur:
@@ -148,7 +154,7 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
     # A corrupted model file is rejected before any new daily work.
     active=current_config(db);db.commit();Path(active['model_path']).write_bytes(b'corrupt')
     with pytest.raises(ContractError,match='checksum'):
-        run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+        run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     assert digest(db)==before;db.commit()
     from api.predictive.publication import restore_last_good
     restored=restore_last_good(db,tmp_path)
@@ -183,7 +189,7 @@ def test_revision_or_source_drift_after_staging_fails_before_publication(db,tmp_
         return real_publish(conn,config,incumbent,source_hash,**kwargs)
     monkeypatch.setattr(runner,'publish',changed)
     with pytest.raises(ContractError,match='changed during preparation'):
-        run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+        run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     assert digest(db)==before
 
 
@@ -192,7 +198,7 @@ def test_encoder_failure_preserves_published_recommendations(db,tmp_path):
     with db.cursor() as cur:cur.execute("INSERT INTO recommendations(id,username,rating_key,predicted_probability,rank) VALUES(1,'saved',1,.42,1)")
     db.commit();before=digest(db);db.commit()
     with pytest.raises(RuntimeError,match='encoder unavailable'):
-        run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+        run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     assert digest(db)==before
 
 
@@ -220,12 +226,12 @@ def test_real_connection_loss_does_not_automatically_replay_a_possible_publicati
     monkeypatch.setattr(runner,'publish',lost)
     try:
         with pytest.raises(ContractError) as error:
-            run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,output=lambda _:None)
+            run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,output=lambda _:None)
         assert not classify_failure(error.value)['retryable']
         cloud.assert_not_called()
         if when=='commit':assert digest(other)==before
         else:
-            assert digest(other)!=before
+            assert digest(other)!=before,str(error.value)
             assert verify(other,current_config(other))['training_data']>128
     finally:other.close()
 
@@ -240,7 +246,7 @@ def test_training_vector_mismatch_after_first_staging_batch_fails_closed(db,tmp_
         conn.commit();return real_publish(conn,*args,**kwargs)
     monkeypatch.setattr(runner,'publish',corrupt)
     with pytest.raises(ContractError,match='materialization'):
-        run(db,tmp_path,frozen_source=snapshot,plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+        run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     with db.cursor() as cur:
         cur.execute('SELECT count(*) FROM recommendations');assert cur.fetchone()[0]==0
 
@@ -267,3 +273,38 @@ def test_additive_migration_preserves_existing_vector_values(db):
         cur.execute(Path('api/db/migrations/optional/simple_predictor/001_public_provenance.sql').read_text())
         cur.execute('SELECT embedding::text FROM training_data WHERE id=99');assert cur.fetchone()[0]==before
         cur.execute('SELECT to_regnamespace(%s)',('embedding_v2',));assert cur.fetchone()[0] is None
+
+
+def test_actual_public_projection_has_no_observation_column_and_does_not_invent_times(db):
+    snapshot,_,_=populate(db)
+    raw=source.read_snapshot(db)
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='watch_history' AND column_name='observed_at'")
+        assert cur.fetchone()[0]==0
+    assert all('observed_at' not in e and 'available_at' not in e for e in raw['events'])
+    from api.predictive.features import available
+    assert all(available(e) is None for e in raw['events'])
+    assert all(available(e) is not None for e in snapshot['events'])
+
+
+def test_association_projection_preserves_serialized_inputs_and_full_source_drift_detection(db):
+    from api.predictive.recovery import load_associations,iter_associations,historical_raw
+    from api.predictive.contracts import metadata,media_text
+    from api.predictive.publication import source_signature
+    snapshot,_,_=populate(db)
+    with db.cursor() as cur:
+        for i in range(30):
+            cur.execute('INSERT INTO actors(id,name) VALUES(%s,%s)',(i+1,'Fixture actor '+str(i)))
+            cur.execute('INSERT INTO media_actors(media_id,actor_id,cast_order) VALUES(2,%s,%s)',(i+1,i))
+    db.commit()
+    # Normalization aliases before the serializer cap must not lose actor 21.
+    with db.cursor() as cur:cur.execute("UPDATE actors SET name='  Fixture actor 0  ' WHERE id=2")
+    db.commit()
+    full=dict(iter_associations(db,['2']));bounded=load_associations(db,['2'])
+    assert len(full['2']['cast'])==30 and len(bounded['2']['cast'])==20
+    row=next(r for r in snapshot['media'] if r['rating_key']==2)
+    assert media_text(metadata(historical_raw(row,full['2'])))==media_text(metadata(historical_raw(row,bounded['2'])))
+    before=source_signature(db)
+    with db.cursor() as cur:cur.execute("UPDATE actors SET name='Changed beyond serializer limit' WHERE id=30")
+    assert source_signature(db)!=before
+    assert media_text(metadata(historical_raw(row,load_associations(db,['2'])['2'])))==media_text(metadata(historical_raw(row,bounded['2'])))

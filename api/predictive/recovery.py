@@ -4,6 +4,7 @@ Identity follows a stable Plex GUID, never a title search. Historical fallback
 uses captured library fields and separately captured stored semantic associations.
 """
 from datetime import datetime, timezone
+from uuid import uuid4
 from psycopg2.extras import RealDictCursor
 from .contracts import ContractError, fingerprint, metadata,utc,MEDIA_VERSION,POSTER_HIERARCHY
 from .io import SourceError
@@ -149,20 +150,35 @@ def context_keys(sources,keys):
     return sorted(result)
 
 
-def load_associations(conn, keys):
+def iter_associations(conn, keys, *, cast_limit=None):
     """Read the existing genre/cast/director associations without schema helpers."""
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    with conn.cursor(name='predictor_associations_'+uuid4().hex,cursor_factory=RealDictCursor) as cur:
         cur.execute('''SELECT l.rating_key,
             ARRAY(SELECT g.name FROM public.media_genres mg JOIN public.genres g ON g.id=mg.genre_id
                   WHERE mg.media_id=l.rating_key ORDER BY g.name) AS genres,
             ARRAY(SELECT d.name FROM public.media_directors md JOIN public.directors d ON d.id=md.director_id
                   WHERE md.media_id=l.rating_key ORDER BY d.name) AS directors,
-            COALESCE((SELECT jsonb_agg(jsonb_build_object('tag',a.name,'order',ma.cast_order)
-                         ORDER BY ma.cast_order NULLS LAST,a.name)
-                      FROM public.media_actors ma JOIN public.actors a ON a.id=ma.actor_id
-                      WHERE ma.media_id=l.rating_key),'[]'::jsonb) AS cast
-            FROM public.library l WHERE l.rating_key=ANY(%s)''',([int(k) for k in keys],))
-        return {str(r['rating_key']):dict(r) for r in cur.fetchall()}
+            COALESCE((SELECT jsonb_agg(jsonb_build_object('tag',ma.name,'order',ma.cast_order)
+                         ORDER BY ma.cast_order NULLS LAST,ma.name)
+                      FROM (SELECT a.name,ma.cast_order FROM public.media_actors ma JOIN public.actors a ON a.id=ma.actor_id
+                      WHERE ma.media_id=l.rating_key ORDER BY ma.cast_order NULLS LAST,a.name LIMIT %s) ma),'[]'::jsonb) AS cast
+            FROM public.library l WHERE l.rating_key=ANY(%s) ORDER BY l.rating_key''',(cast_limit,[int(k) for k in keys]))
+        while batch:=cur.fetchmany(32):
+            for row in batch:yield str(row['rating_key']),dict(row)
+
+
+def load_associations(conn, keys):
+    # Deduplicate after Unicode/whitespace normalization, exactly as metadata().
+    # SQL LIMIT before this step could silently lose a unique actor after aliases.
+    from .contracts import CAST_LIMIT,names,number
+    result={}
+    for key,row in iter_associations(conn,keys):
+        for actor in row['cast']:
+            if actor.get('order') is not None:number(actor['order'])
+        row['cast']=[dict(tag=name,order=index) for index,name in
+            enumerate(names(row['cast'],ordered=True,limit=CAST_LIMIT))]
+        result[key]=row
+    return result
 
 
 def historical_raw(source, associations):

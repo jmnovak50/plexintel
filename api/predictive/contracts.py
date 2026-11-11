@@ -107,11 +107,14 @@ def cosine(a, b):
     a, b = (vector(a), vector(b))
     return sum((x * y for x, y in zip(a, b))) / math.sqrt(sum((x * x for x in a)) * sum((y * y for y in b)))
 
-def specification(encoder):
+def specification(encoder, *, policy=None):
+    policy=policy or {}
     return dict(encoder=encoder,media_serializer=MEDIA_VERSION,watch_serializer=WATCH_VERSION,
         profile=PROFILE_VERSION,features=FEATURE_VERSION,labels=LABEL_VERSION,ordering='media_text,user',
-        dimensions=768,embedding_dimensions=1536,profile_threshold=.5,watch_threshold=.5,
-        movie_revisit_days=21,tv_revisit_days=14)
+        dimensions=768,embedding_dimensions=1536,
+        profile_threshold=float(policy.get('user_embeddings.engagement_threshold',.5)),watch_threshold=.5,
+        movie_revisit_days=int(policy.get('training.movie_revisit_pending_days',21)),
+        tv_revisit_days=int(policy.get('training.tv_revisit_pending_days',14)))
 
 def modality_contract(spec,kind):
     if kind not in ('media_text','watch','user'):raise ContractError('Only text modalities supported')

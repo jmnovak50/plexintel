@@ -21,7 +21,7 @@ def get_active_config(cur):
     cur.execute('SELECT metadata FROM public.embedding_feature_config WHERE active')
     row = cur.fetchone()
     if not row:
-        raise ValueError('No verified feature configuration. Run scripts/register_dimension_config.py on the model host; see docs/dimension-explorer.md.')
+        raise ValueError('No verified feature configuration. Verify the predictor publication with scripts/predictive_pipeline.py verify; configuration repair requires a reviewed model publication.')
     return row['metadata'] if isinstance(row, dict) else row[0]
 
 

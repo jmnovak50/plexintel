@@ -239,10 +239,10 @@ def test_all_automatic_candidate_modes_and_single_cli_respect_pause(database,mon
         for mode in ['importance','coverage','hybrid','review','eligible']:
             selected,_ = batch.select_automatic_dimensions(cur,limit=10,selection_mode=mode,include_labeled=True)
             assert 769 not in [row['dimension'] for row in selected], mode
-    monkeypatch.setattr(single,'connect_db',connect)
-    with patch.object(single,'_label_single_dimension') as execute:
+    from api.services import dimension_label_batch as current
+    with patch.object(current,'main') as execute:
         single.label_single_dimension(769,generate_label=True,save_label=True)
-        execute.assert_not_called()
+        execute.assert_called_once_with(['--dimension','769','--top-n','10','--label','--save-label'])
 
 
 def test_dispatcher_uses_exact_request_outcome_and_distinguishes_progress(database,monkeypatch,tmp_path):

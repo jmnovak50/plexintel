@@ -23,7 +23,7 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_history=False,
-        incumbent_evaluation=None,collect=True,output=lambda event:print(json.dumps(event),flush=True),label=True):
+        incumbent_evaluation=None,collect=True,policy=None,output=lambda event:print(json.dumps(event),flush=True),label=True):
     started=time.monotonic();directory=Path(directory).resolve()
     directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     reporter=Reporter(output)
@@ -32,6 +32,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         # Exact incumbent pinned under the execution lock, before any work.
         code_sha=source_sha256();software=versions()
         incumbent=current_config(conn);conn.commit()
+        policy=source.settings() if not frozen_source else policy
         incumbent_ap=None
         if incumbent:
             if not re.fullmatch('[a-f0-9]{64}',str(incumbent.get('model_sha256',''))):
@@ -60,11 +61,11 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                     process=subprocess.run([sys.executable,str(ROOT/'fetch_tautulli_data.py'),'--mode','incremental','--no-embeddings'],
                         cwd=ROOT,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1800)
                     if process.returncode:raise ContractError('Source collection failed; previous predictions preserved')
-                config=source.settings()
+                config=policy
                 # One short repeatable-read source snapshot, not a training-long transaction.
                 conn.set_session(isolation_level='REPEATABLE READ',readonly=True)
                 snapshot=source.read_snapshot(conn);snapshot['as_of']=datetime.now(timezone.utc).isoformat()
-                source_hash=source_signature(conn)
+                source_hash=source_signature(conn,snapshot=snapshot)
                 associations=load_associations(conn,[str(r['rating_key']) for r in snapshot['media']])
                 conn.rollback();conn.set_session(isolation_level='READ COMMITTED',readonly=False)
                 source.event_availability(config,snapshot)
@@ -77,7 +78,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                     supplied=[{k:r.get(k) for k in expected} for r,expected in zip(snapshot[field],raw[field])]
                     if len(snapshot[field])!=len(raw[field]) or supplied!=raw[field]:
                         raise ContractError('Frozen replay differs from isolated source rows')
-                source_hash=source_signature(conn)
+                source_hash=source_signature(conn,snapshot=raw)
                 associations=load_associations(conn,[str(r['rating_key']) for r in snapshot['media']]);conn.commit()
             from .history_scope import partition_history
             snapshot=partition_history(snapshot)
@@ -86,7 +87,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             reporter.emit(stage,'started',**metrics)
         # Preparation is in memory and temporary tables; live vectors stay unchanged.
         inputs,media,watches,users,rows,summary=prepare(conn,snapshot,plex,encoder,associations,
-            allow_stored_history=allow_stored_history,progress=progress)
+            allow_stored_history=allow_stored_history,policy=policy,progress=progress)
         conn.commit()
         for stage in ('source_sync','media_text','watch','users','training_data'):reporter.done(stage)
         with reporter.span('train_model'):
@@ -103,7 +104,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         reporter.bind(config['workload_id'])
         install_staging(conn);stage_vectors(conn,media,watches,users);stage_training(conn,rows)
         with reporter.span('score_model'):
-            count=stage_predictions(conn,score(inputs,media,watches,users,bundle,vocabulary,
+            count=stage_predictions(conn,score(inputs,media,watches,users,bundle,vocabulary,policy=policy,
                 progress=lambda **metrics:reporter.emit('score_model','started',**metrics)),config,snapshot['as_of'])
         from .diagnostics import ranking_comparison
         ranking=ranking_comparison(conn);conn.commit()

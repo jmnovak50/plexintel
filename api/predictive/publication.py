@@ -7,6 +7,8 @@ from contextlib import contextmanager
 import hashlib,json,os,subprocess,tempfile,tarfile,shutil
 from psycopg2.extensions import parse_dsn,make_dsn
 from pathlib import Path
+from uuid import uuid4
+from itertools import islice
 import numpy as np
 from pgvector import Vector
 from psycopg2 import sql,OperationalError,InterfaceError
@@ -15,7 +17,7 @@ from .artifacts import current_config,load_model
 from .contracts import ContractError,fingerprint
 from .prepare import TABLES
 from .source import read_snapshot
-from .recovery import load_associations
+from .recovery import iter_associations
 
 PUBLISHED=('media_embeddings','watch_embeddings','user_embeddings','training_data','recommendations',
            'shap_impact','shap_dimension_stats_current','shap_prediction_context','embedding_feature_config')
@@ -39,10 +41,15 @@ def writer_lock(conn):
             except (OperationalError,InterfaceError):pass  # Session loss releases its locks.
 
 
-def source_signature(conn):
-    snapshot=read_snapshot(conn)
-    associations=load_associations(conn,[str(r['rating_key']) for r in snapshot['media']])
-    return fingerprint(dict(snapshot=snapshot,associations=associations))
+def source_signature(conn, *, snapshot=None):
+    snapshot=read_snapshot(conn) if snapshot is None else snapshot
+    # All association values still participate in drift detection. Never retain
+    # the full million-row cast population or its serialized JSON in memory.
+    digest=hashlib.sha256(b'public-source-signature/2\n')
+    digest.update(fingerprint({k:snapshot[k] for k in ('media','events','feedback','legacy_watch_ids')}).encode())
+    for key,row in iter_associations(conn,[str(r['rating_key']) for r in snapshot['media']]):
+        digest.update(fingerprint([key,row]).encode())
+    return digest.hexdigest()
 
 
 def install_staging(conn):
@@ -66,10 +73,10 @@ def insert(conn,table,columns,values):
 def stage_vectors(conn,media,watches,users):
     for kind,rows in [('media_text',media),('watch',watches),('user',users)]:
         table,key=TABLES[kind]
-        items=list(rows.items())
-        for start in range(0,len(items),128):
+        items=iter(rows.items())
+        while batch:=list(islice(items,128)):
             values=[]
-            for item,row in items[start:start+128]:
+            for item,row in batch:
                 provenance={k:v for k,v in row.items() if k not in ('embedding','_cached_vector','_cached_input_hash')}
                 values.append((item if kind=='user' else int(item),Vector(row['embedding']),Json(provenance)))
             insert(conn,table,(key,'embedding','provenance'),values)
@@ -85,7 +92,7 @@ def stage_training(conn,rows):
         for index,r in enumerate(rows[start:start+128],start+1):
             diagnostics={key:r[key] for key in ('canonical_identity','identity_policy','supervision_policy','prediction_at',
                 'label_available_at','observation_kind','feedback_provenance','auxiliary_feedback_count','auxiliary_feedback_conflicts')}
-            diagnostics['dependency_hash']=fingerprint(r['dependencies'])
+            diagnostics['dependency_hash']=r['dependency_hash'] if 'dependency_hash' in r else fingerprint(r['dependencies'])
             diagnostics['feature_sha256']=hashlib.sha256(np.asarray(r['embedding'],dtype='<f4').tobytes()).hexdigest()
             values.append((index,r['owner'],int(r['media_key']),r['label'],Vector(r['embedding']),','.join(r['genres']),
                 '',','.join(r['directors']),r['year'],r['played_duration'],r['media_duration'],r['engagement_ratio'],
@@ -125,31 +132,33 @@ def verify(conn,config,*,prepared=False):
     counts={}
     with conn.cursor() as cur:
         for kind,(table,key) in TABLES.items():
-            cur.execute(sql.SQL('SELECT embedding::text,provenance FROM {}').format(sql.Identifier('pg_temp' if prepared else 'public',
-                'prepared_'+table if prepared else table)))
-            count=0
-            while True:
-                batch=cur.fetchmany(128)
-                if not batch:break
-                for raw,p in batch:
-                    values=np.asarray(json.loads(raw),dtype='<f4')
-                    if (values.shape!=(768,) or not np.isfinite(values).all() or not p
-                        or p.get('feature_space_id')!=config['feature_space_id']
-                        or hashlib.sha256(values.tobytes()).hexdigest()!=p.get('vector_sha256')):
-                        raise ContractError('Published vector provenance/shape mismatch')
-                    count+=1
+            with conn.cursor(name='predictor_verify_'+uuid4().hex) as stream:
+                stream.execute(sql.SQL('SELECT embedding::text,provenance FROM {}').format(sql.Identifier('pg_temp' if prepared else 'public',
+                    'prepared_'+table if prepared else table)))
+                count=0
+                while True:
+                    batch=stream.fetchmany(128)
+                    if not batch:break
+                    for raw,p in batch:
+                        values=np.asarray(json.loads(raw),dtype='<f4')
+                        if (values.shape!=(768,) or not np.isfinite(values).all() or not p
+                            or p.get('feature_space_id')!=config['feature_space_id']
+                            or hashlib.sha256(values.tobytes()).hexdigest()!=p.get('vector_sha256')):
+                            raise ContractError('Published vector provenance/shape mismatch')
+                        count+=1
             counts[table]=count
         for table in ('training_data','recommendations','shap_impact','shap_prediction_context'):
             cur.execute(sql.SQL('SELECT count(*) FROM {}').format(sql.Identifier('pg_temp' if prepared else 'public',
                 'prepared_'+table if prepared else table)));counts[table]=cur.fetchone()[0]
-        cur.execute(f'SELECT embedding::text,diagnostics FROM {prefix}training_data')
-        while True:
-            batch=cur.fetchmany(128)
-            if not batch:break
-            for raw,diagnostics in batch:
-                values=np.asarray(json.loads(raw),dtype='<f4')
-                if values.shape!=(1536,) or not np.isfinite(values).all() or not diagnostics or hashlib.sha256(values.tobytes()).hexdigest()!=diagnostics.get('feature_sha256'):
-                    raise ContractError('Training feature materialization differs from prepared vector')
+        with conn.cursor(name='predictor_verify_training_'+uuid4().hex) as stream:
+            stream.execute(f'SELECT embedding::text,diagnostics FROM {prefix}training_data')
+            while True:
+                batch=stream.fetchmany(128)
+                if not batch:break
+                for raw,diagnostics in batch:
+                    values=np.asarray(json.loads(raw),dtype='<f4')
+                    if values.shape!=(1536,) or not np.isfinite(values).all() or not diagnostics or hashlib.sha256(values.tobytes()).hexdigest()!=diagnostics.get('feature_sha256'):
+                        raise ContractError('Training feature materialization differs from prepared vector')
         cur.execute(f'''SELECT count(*) FROM {prefix}recommendations WHERE predicted_probability NOT BETWEEN 0 AND 1''')
         if cur.fetchone()[0]:raise ContractError('Invalid prediction probabilities')
         cur.execute(f'''SELECT username,diagnostics->>'canonical_identity',count(*) FROM {prefix}training_data

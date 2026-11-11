@@ -464,6 +464,10 @@ def test_sql_complete_batch_accounting_persistence_and_budget_stop(sql_db,monkey
     conn,_=sql_db;_,_,context=context_fixture()
     monkeypatch.setattr(batch,'current_context',lambda conn:context)
     monkeypatch.setattr(batch,'dimension_review_guard',lambda *a:nullcontext(True))
+    from api.services import pipeline_labeling as auto
+    from types import SimpleNamespace
+    caps=dict(zip(auto.POLICY_KEYS,(True,True,1.,100)))
+    monkeypatch.setattr(auto,'resolve_settings',lambda **kw:{k:SimpleNamespace(value=caps[k]) for k in kw['keys']})
     args=parser().parse_args(['--label','--save-label','--label-model','gemma4:31b-cloud']+(['--budget-usd','0'] if stop_at_budget else []))
     row=dict(dimension=0,side='media',completed=False,abstained=False,prompt=dict(prompt_text='Fictional HIGH/LOW batch evidence'))
     eligible=[row];prediction=workload_forecast(eligible,eligible,Pricing(),args,{})
@@ -495,6 +499,10 @@ def test_sql_interruption_keeps_completed_label_and_unknown_request_reservation(
     conn,_=sql_db;_,_,context=context_fixture()
     monkeypatch.setattr(batch,'current_context',lambda conn:context)
     monkeypatch.setattr(batch,'dimension_review_guard',lambda *a:nullcontext(True))
+    from api.services import pipeline_labeling as auto
+    from types import SimpleNamespace
+    caps=dict(zip(auto.POLICY_KEYS,(True,True,1.,100)))
+    monkeypatch.setattr(auto,'resolve_settings',lambda **kw:{k:SimpleNamespace(value=caps[k]) for k in kw['keys']})
     args=parser().parse_args(['--label','--save-label','--label-model','gemma4:31b-cloud'])
     rows=[dict(dimension=i,side='media',completed=False,abstained=False,prompt=dict(prompt_text='Fictional HIGH LOW')) for i in (0,1)]
     calls=[]

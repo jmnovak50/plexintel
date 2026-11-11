@@ -1,7 +1,7 @@
 """Chronological and show-held-out validation, then a distinct all-data fit."""
 from collections import Counter
 from .contracts import ContractError,fingerprint
-from .features import Vocabulary,chronological_split,feature_row,show_heldout_plan,SUPERVISION_POLICY
+from .features import Vocabulary,chronological_split,feature_row,show_heldout_plan,SUPERVISION_POLICY,compact_row
 from .recovery import CanonicalTitles,IDENTITY_POLICY
 from .model import fit,fit_compare
 
@@ -18,8 +18,8 @@ def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda 
             value=feature_row(inputs,media,watches,inputs['snapshot']['events'],row['owner'],row['media_key'],
                 row['prediction_at'],excluded_keys=excluded,identity=identity)
             if value is None:raise ContractError('Grouped profile support changed')
-            value.update({key:value for key,value in row.items() if key not in ('embedding','dependencies','history_titles','watch_sim')})
-            rebuilt.append(value)
+            value.update({key:value for key,value in row.items() if key not in ('embedding','dependencies','dependency_hash','history_titles','watch_sim')})
+            rebuilt.append(compact_row(value,media,watches,identity))
         grouped.append(rebuilt)
     if not all(grouped):raise ContractError('Show-held-out evaluation lacks support')
     show=fit_compare(*grouped,include_poster=False,progress=lambda metrics:progress(**metrics))

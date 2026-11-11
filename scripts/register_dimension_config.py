@@ -22,7 +22,7 @@ def main():
     args = parser.parse_args()
     load_dotenv()
     if not args.inspect_only:
-        from api.embedding_generation.runtime import assert_legacy_allowed
+        from api.predictive.retired import assert_legacy_allowed
         assert_legacy_allowed()
     model_path = Path(args.model)
     # This is the same trusted local artifact used by score_model.py.
