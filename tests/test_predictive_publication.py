@@ -14,7 +14,7 @@ from api.predictive import source
 from api.predictive.artifacts import current_config,load_model
 from api.predictive.contracts import ContractError
 from api.predictive.runner import run
-from api.predictive.publication import PUBLISHED,writer_lock,verify
+from api.predictive.publication import PUBLISHED,writer_lock,verify,install_staging,stage_predictions
 
 
 @pytest.fixture
@@ -44,9 +44,12 @@ def db():
                     created_at timestamptz,modified_at timestamptz);
                 CREATE TABLE embedding_feature_config(config_id text PRIMARY KEY,metadata jsonb,active boolean);
                 CREATE UNIQUE INDEX config_active ON embedding_feature_config(active) WHERE active;
-                CREATE TABLE shap_prediction_context(username text,rating_key integer,config_id text,model_version text,scored_at timestamp);
                 CREATE TABLE embedding_labels(dimension integer,config_id text,generation_id text,contract_hash text,encoder_digest text);
                 CREATE TABLE embedding_label_batches(batch_id text,generation_id text NOT NULL);''')
+            context_migration=Path('api/db/migrations/001_dimension_explorer.sql').read_text()
+            context_ddl=re.search(r'CREATE TABLE IF NOT EXISTS public\.shap_prediction_context \([\s\S]*?\n\);',context_migration)
+            assert context_ddl
+            cur.execute(context_ddl.group())
             cur.execute(Path('api/db/migrations/optional/simple_predictor/001_public_provenance.sql').read_text())
             cur.execute('SELECT to_regnamespace(%s)',('embedding_v2',));assert cur.fetchone()[0] is None
         conn.commit();yield conn
@@ -115,10 +118,45 @@ def digest(conn):
         return cur.fetchone()[0]
 
 
+@pytest.mark.parametrize('explain',[True,False])
+def test_prediction_staging_sets_generation_time_without_changing_snapshot_or_public_rows(db,explain):
+    install_staging(db)
+    snapshot='2021-01-01T00:00:00+00:00'
+    config=dict(config_id='fixture',model_sha256='a'*64)
+    with db.cursor() as cur:
+        cur.execute('''SELECT a.attnotnull,d.adbin IS NULL
+            FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+            WHERE a.attrelid='pg_temp.prepared_shap_prediction_context'::regclass AND a.attname='generated_at' ''')
+        assert cur.fetchone()==(True,True)  # Production constraint, intentionally no copied default.
+    db.commit()
+    before=datetime.now(timezone.utc)
+    predictions=(dict(owner='fixture-viewer',key=i,probability=.75,rank=i,cosine=.5,
+                      shap=[(7,.25)] if explain else []) for i in range(1,130))
+    assert stage_predictions(db,predictions,config,snapshot)==129  # Cross the first 128-row flush.
+    after=datetime.now(timezone.utc)
+    with db.cursor() as cur:
+        cur.execute('SELECT scored_at,generated_at,config_id,model_version FROM prepared_shap_prediction_context')
+        contexts=cur.fetchall()
+        assert len(contexts)==(129 if explain else 0)
+        for scored_at,generated_at,config_id,model_version in contexts:
+            assert scored_at==datetime(2021,1,1)
+            assert before<=generated_at<=after
+            assert (config_id,model_version)==('fixture','a'*64)
+        cur.execute('SELECT count(*),min(predicted_probability),max(predicted_probability) FROM prepared_recommendations')
+        assert cur.fetchone()==(129,.75,.75)
+        cur.execute('SELECT count(*),sum(shap_value) FROM prepared_shap_impact')
+        assert cur.fetchone()==((129,129*.25) if explain else (0,None))
+        for table in ('recommendations','shap_impact','shap_prediction_context'):
+            cur.execute('SELECT count(*) FROM public.'+table)
+            assert cur.fetchone()[0]==0
+
+
 def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,monkeypatch):
     import api.predictive.runner as runner
     snapshot,plex,encoder=populate(db)
+    before_generation=datetime.now(timezone.utc)
     result=run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+    after_generation=datetime.now(timezone.utc)
     config=current_config(db);db.commit()
     assert result['verified'] and result['counts']['training_data']>128
     assert result['summary']['observations']['retrospective_explicit_feedback']>0
@@ -126,6 +164,12 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
     assert result['evaluation']['show_heldout']['negative']>0
     assert all(result['evaluation']['gates'].values())
     assert result['counts']['recommendations']>0 and result['counts']['shap_impact']>0
+    with db.cursor() as cur:
+        cur.execute('SELECT count(*),min(scored_at),max(scored_at),min(generated_at),max(generated_at) FROM public.shap_prediction_context')
+        count,first_score,last_score,first_generated,last_generated=cur.fetchone()
+        assert count==result['counts']['shap_prediction_context']>0
+        assert first_score==last_score==datetime(2021,1,1)
+        assert before_generation<=first_generated<=last_generated<=after_generation
     before=digest(db);db.commit();calls=encoder.calls
     with db.cursor() as cur:
         cur.execute('SELECT ctid::text FROM media_embeddings WHERE rating_key=4');physical=cur.fetchone()[0]

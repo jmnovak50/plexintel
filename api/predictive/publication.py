@@ -4,6 +4,7 @@ No permanent staging populations or activation records. Readers keep seeing the
 last committed recommendations throughout fitting and staging.
 """
 from contextlib import contextmanager
+from datetime import datetime,timezone
 import hashlib,json,os,subprocess,tempfile,tarfile,shutil
 from psycopg2.extensions import parse_dsn,make_dsn
 from pathlib import Path
@@ -105,14 +106,15 @@ def stage_predictions(conn,predictions,config,as_of):
     def flush():
         insert(conn,'recommendations',('id','username','rating_key','predicted_probability','rank','model_name','scored_at','cosine_similarity','explanation'),recommendations)
         insert(conn,'shap_impact',('user_id','rating_key','dimension','shap_value'),shap)
-        insert(conn,'shap_prediction_context',('username','rating_key','config_id','model_version','scored_at'),contexts)
+        insert(conn,'shap_prediction_context',('username','rating_key','config_id','model_version','scored_at','generated_at'),contexts)
         conn.commit();recommendations.clear();shap.clear();contexts.clear()
     for row in predictions:
         count+=1
         recommendations.append((count,row['owner'],row['key'],row['probability'],row['rank'],
             'text-engagement:'+config['model_sha256'],as_of,row['cosine'],''))
         if row['shap']:
-            contexts.append((row['owner'],row['key'],config['config_id'],config['model_sha256'],as_of))
+            # The generation clock is distinct from the prediction snapshot cutoff.
+            contexts.append((row['owner'],row['key'],config['config_id'],config['model_sha256'],as_of,datetime.now(timezone.utc)))
             shap.extend((row['owner'],row['key'],i,v) for i,v in row['shap'])
         if len(recommendations)>=128:flush()
     flush()
