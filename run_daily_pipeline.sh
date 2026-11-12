@@ -8,4 +8,4 @@ mkdir -p -- "$(dirname -- "$LOCK_PATH")"
 exec 9>"$LOCK_PATH"
 flock -n 9 || { echo "Pipeline already running"; exit 75; }
 # The child also holds the database advisory writer lock. No schema/activation lookup.
-exec "$PYTHON" scripts/predictive_pipeline.py daily --execute "$@"
+exec "$PYTHON" scripts/predictive_pipeline.py daily --execute --allow-stored-history "$@"

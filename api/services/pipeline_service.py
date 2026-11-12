@@ -919,7 +919,9 @@ def build_pipeline_stages() -> list[tuple[str, list[str]]]:
     """Ordered stages matching run_daily_pipeline.sh (single source for app runs)."""
     py = _python_executable()
     root = str(REPO_ROOT)
-    return [("predictive_daily", [py, f"{root}/scripts/predictive_pipeline.py", "daily", "--execute"])]
+    # Daily operation retains the explicitly approved historical descriptions;
+    # canonical identity and temporal supervision remain enforced by the worker.
+    return [("predictive_daily", [py, f"{root}/scripts/predictive_pipeline.py", "daily", "--execute", "--allow-stored-history"])]
 
 
 def get_pipeline_schedule_slot(now_utc: datetime | None = None) -> dict[str, Any]:

@@ -144,7 +144,7 @@ class PipelineStageTests(unittest.TestCase):
         key,command=stages[0]
         self.assertEqual(key,'predictive_daily')
         self.assertTrue(command[1].endswith('/scripts/predictive_pipeline.py'))
-        self.assertEqual(command[2:],['daily','--execute'])
+        self.assertEqual(command[2:],['daily','--execute','--allow-stored-history'])
 
 
 class PipelineRefreshStatusTests(unittest.TestCase):
