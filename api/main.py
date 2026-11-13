@@ -73,12 +73,16 @@ app = FastAPI(lifespan=lifespan)
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as ex:
             # Preserve API 404 behavior.
             if ex.status_code == 404 and not path.startswith("api/"):
-                return await super().get_response("index.html", scope)
-            raise
+                response = await super().get_response("index.html", scope)
+            else:
+                raise
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _has_admin_session(request: Request) -> bool:

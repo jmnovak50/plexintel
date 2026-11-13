@@ -1,9 +1,9 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CircleStop, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import AppShell from "../components/AppShell";
 import { ErrorBanner, SuccessBanner } from "../components/StatusBanner";
-import { stageLabels, stageMetrics, stageDuration } from "../utils/pipelineStages";
+import { stageLabels, stageDuration, stageProgress, readablePipelineLog, operatorStages } from "../utils/pipelineStages";
 
 interface AdminMe {
   username: string;
@@ -29,6 +29,8 @@ interface PipelineStage {
   detail_source?: string;
   observed_at?: string;
   timing_active?: boolean;
+  timing_known?: boolean;
+  worker_output?: boolean;
 }
 
 interface PipelineRun {
@@ -73,6 +75,120 @@ function durationMs(started: string | null, completed: string | null) {
   return `${m}m ${s}s`;
 }
 
+interface LogStream {
+  text: string;
+  offset: number;
+  next_offset: number | null;
+  total_characters: number;
+  source: string;
+  note?: string | null;
+  identity: string;
+}
+interface StageLogs { stdout: LogStream; stderr: LogStream }
+
+export function PipelineLog({ stdout, stderr, loading = false }: { stdout: string | null; stderr: string | null; loading?: boolean }) {
+  return <div className="space-y-3">
+    {([['stdout:', stdout], ['stderr:', stderr]] as const).map(([label, text]) => (text || label === 'stdout:') ? <section key={label} aria-label={label}>
+      <h4 className="mb-1 font-mono text-xs font-semibold text-slate-700">{label}</h4>
+      {text ? <pre data-stream={label} className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900/90 p-3 font-mono text-xs leading-5 text-slate-100">{text}</pre>
+        : <p className="text-xs text-slate-500">{loading ? 'Loading retained stdout…' : 'No stdout output was retained for this stage.'}</p>}
+    </section> : null)}
+  </div>;
+}
+
+export function PipelineStageCard({ st, runId, activeRun = false }: { st: PipelineStage; runId?: number; activeRun?: boolean }) {
+  const [open, setOpen] = useState(!st.worker_output);
+  const [logs, setLogs] = useState<StageLogs | null>(null);
+  const [logError, setLogError] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const content = useRef<HTMLDivElement>(null);
+  const scrollPositions = useRef(new Map<string | undefined, { top: number; follow: boolean }>());
+  const progress = stageProgress(st.metrics);
+
+  useLayoutEffect(() => {
+    if (!logs) return;
+    content.current?.querySelectorAll('pre').forEach(el => {
+      const previous = scrollPositions.current.get(el.dataset.stream);
+      el.scrollTop = !previous || previous.follow ? el.scrollHeight : previous.top;
+    });
+  }, [logs]);
+
+  useEffect(() => {
+    if ((!open && !st.worker_output) || runId == null) return;
+    const controller = new AbortController();
+    let busy = false;
+    async function load() {
+      if (busy) return;
+      busy = true;
+      setFetching(true);
+      try {
+        let out = '', err = '', outOffset = 0, errOffset = 0;
+        let outIdentity: string | undefined, errIdentity: string | undefined;
+        let page: StageLogs;
+        let resets = 0;
+        while (true) {
+          const response = await fetch(`/api/admin/pipeline/runs/${runId}/stages/${encodeURIComponent(st.stage_key)}/logs?stdout_offset=${outOffset}&stderr_offset=${errOffset}`, {
+            credentials: 'include', cache: 'no-store', signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(`Unable to load stage output (${response.status})`);
+          page = await response.json();
+          if ((outIdentity && outIdentity !== page.stdout.identity) || page.stdout.offset !== outOffset ||
+              (errIdentity && errIdentity !== page.stderr.identity) || page.stderr.offset !== errOffset) {
+            if (++resets > 3) throw new Error('Retained output changed while loading; close and reopen the stage to retry.');
+            out = ''; err = ''; outOffset = 0; errOffset = 0;
+            outIdentity = undefined; errIdentity = undefined;
+            continue;
+          }
+          out += page.stdout.text;
+          err += page.stderr.text;
+          outIdentity = page.stdout.identity;
+          errIdentity = page.stderr.identity;
+          outOffset = page.stdout.next_offset ?? page.stdout.total_characters;
+          errOffset = page.stderr.next_offset ?? page.stderr.total_characters;
+          if (page.stdout.next_offset == null && page.stderr.next_offset == null) break;
+        }
+        if (controller.signal.aborted) return;
+        scrollPositions.current = new Map(Array.from(content.current?.querySelectorAll('pre') || []).map(el => [el.dataset.stream, {
+          top: el.scrollTop, follow: el.scrollHeight - el.scrollTop - el.clientHeight < 32,
+        }]));
+        setLogs({ stdout: { ...page.stdout, text: out }, stderr: { ...page.stderr, text: err } });
+        setLogError(null);
+      } catch (caught) {
+        if (!controller.signal.aborted) setLogError(caught instanceof Error ? caught.message : 'Unable to load stage output.');
+      } finally {
+        busy = false;
+        if (!controller.signal.aborted) setFetching(false);
+      }
+    }
+    void load();
+    const timer = activeRun ? window.setInterval(() => void load(), 5000) : undefined;
+    return () => { controller.abort(); if (timer) window.clearInterval(timer); };
+  }, [open, runId, st.stage_key, st.status, st.worker_output, activeRun]);
+
+  if (st.worker_output && !logError && (!logs || (!logs.stdout.text && !logs.stderr.text))) return null;
+  const stdout = logs ? logs.stdout.text : readablePipelineLog(st.stdout_tail);
+  const stderr = logs ? logs.stderr.text : readablePipelineLog(st.stderr_tail);
+  return <div className="recs-surface-muted p-3" data-stage-key={st.stage_key}>
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <h3 className="font-medium text-slate-900">{st.worker_output ? `${stageLabels[st.stage_key] || st.stage_key} — unattributed output` : st.label || stageLabels[st.stage_key] || st.stage_key}</h3>
+      <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs ${statusChip(st.status)}`}>{st.status}</span>
+      {st.exit_code != null && <span className="text-xs text-slate-500">exit {st.exit_code}</span>}
+      <span className="text-xs text-slate-500">{stageDuration(st.duration_seconds, st.status, st.started_at, st.completed_at, st.observed_at, st.timing_active, st.timing_known)}</span>
+      {progress && <span className="text-xs text-slate-500">Progress: {progress.percent}% ({progress.completed.toLocaleString()} / {progress.expected.toLocaleString()})</span>}
+    </div>
+    <details className="mt-2" open={open} onToggle={event => { setOpen(event.currentTarget.open); if (!event.currentTarget.open) setFetching(false); }}>
+      <summary className="cursor-pointer text-xs text-slate-600">Stage output{fetching ? ' · Loading…' : ''}</summary>
+      <div ref={content} className="mt-2">
+        {logError && <p role="alert" className="recs-notice-red mb-2">{logError}</p>}
+        {logs?.stdout.note && <p className="mb-2 text-xs text-slate-500">{logs.stdout.note}</p>}
+        {logs?.stderr.note && logs.stderr.note !== logs.stdout.note && <p className="mb-2 text-xs text-slate-500">{logs.stderr.note}</p>}
+        <PipelineLog stdout={stdout} stderr={stderr} loading={fetching && !logs} />
+        {logs && (stdout || stderr) && <p className="mt-2 text-xs text-slate-500">{logError ? 'Previously loaded output; refresh failed.' : fetching ? 'Refreshing output…' : 'All currently available output loaded.'}</p>}
+      </div>
+    </details>
+  </div>;
+}
+
 function statusChip(status: string) {
   switch (status) {
     case "success":
@@ -110,6 +226,8 @@ export default function AdminPipeline() {
   const navigate = useNavigate();
   const [me, setMe] = useState<AdminMe | null>(null);
   const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const initialized = useRef(false);
+  const refreshVersion = useRef(0);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
   const [purging, setPurging] = useState(false);
@@ -128,19 +246,20 @@ export default function AdminPipeline() {
     && retentionCount <= 1000;
 
   const loadRuns = useCallback(async () => {
-    const response = await fetch("/api/admin/pipeline/runs?limit=50", { credentials: "include" });
-    if (!response.ok) {
-      throw new Error(`Unable to load pipeline runs (${response.status})`);
-    }
+    const version = ++refreshVersion.current;
+    const response = await fetch("/api/admin/pipeline/runs?limit=50", { credentials: "include", cache: "no-store" });
+    if (!response.ok) throw new Error(`Unable to load pipeline runs (${response.status})`);
     const data = await response.json();
-    setRuns(data.runs ?? []);
+    const nextRuns: PipelineRun[] = data.runs ?? [];
+    if (version !== refreshVersion.current) return;
+    setRuns(nextRuns);
   }, []);
 
   useEffect(() => {
     let mounted = true;
 
     async function bootstrap() {
-      setLoading(true);
+      if (!initialized.current) setLoading(true);
       setError(null);
       try {
         const meRes = await fetch("/api/admin/me", { credentials: "include" });
@@ -163,7 +282,10 @@ export default function AdminPipeline() {
         if (!mounted) return;
         setError(caught instanceof Error ? caught.message : "Failed to load pipeline monitor.");
       } finally {
-        if (mounted) setLoading(false);
+        if (mounted) {
+          initialized.current = true;
+          setLoading(false);
+        }
       }
     }
 
@@ -389,7 +511,7 @@ export default function AdminPipeline() {
                   ) : (
                     runs.map((run) => (
                       <Fragment key={run.run_id}>
-                        <tr className="hover:bg-amber-50/30">
+                        <tr data-run-id={run.run_id} className="hover:bg-amber-50/30">
                           <td className="whitespace-nowrap px-4 py-3 text-slate-800">{formatDate(run.started_at)}</td>
                           <td className="px-4 py-3 capitalize text-slate-700">{run.delivery_type}</td>
                           <td className="px-4 py-3">
@@ -404,7 +526,7 @@ export default function AdminPipeline() {
                               </div>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-slate-700">{durationMs(run.started_at, run.completed_at)}</td>
+                          <td className="px-4 py-3 text-slate-700">{isActiveRun(run.status) ? stageDuration(undefined, "started", run.started_at) : durationMs(run.started_at, run.completed_at)}</td>
                           <td className="px-4 py-3 text-slate-700">{run.triggered_by || "—"}</td>
                           <td className="max-w-[180px] truncate px-4 py-3 text-xs text-slate-600" title={run.schedule_key || ""}>
                             {run.schedule_key || "—"}
@@ -414,6 +536,8 @@ export default function AdminPipeline() {
                               <button
                                 type="button"
                                 onClick={() => toggleExpand(run.run_id)}
+                                aria-expanded={expandedRunId === run.run_id}
+                                aria-controls={`pipeline-stages-${run.run_id}`}
                                 className="text-sky-700 hover:underline"
                               >
                                 {expandedRunId === run.run_id ? "Hide stages" : "Show stages"}
@@ -436,7 +560,7 @@ export default function AdminPipeline() {
                           </td>
                         </tr>
                         {expandedRunId === run.run_id && (
-                          <tr>
+                          <tr id={`pipeline-stages-${run.run_id}`}>
                             <td colSpan={7} className="px-4 py-4">
                               {run.cancel_requested_at && (
                                 <p className="recs-notice-orange mb-3">
@@ -469,46 +593,11 @@ export default function AdminPipeline() {
                                 </details>
                               )}
                               <div className="space-y-3">
-                                {(run.stage_details || run.stages || []).map((st) => (
-                                  <div key={st.stage_id} className="recs-surface-muted p-3">
-                                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                                      <span className="font-medium text-slate-900">{st.label || stageLabels[st.stage_key] || st.stage_key}</span>
-                                      <span
-                                        className={`inline-flex rounded-full border px-2 py-0.5 text-xs ${statusChip(st.status)}`}
-                                      >
-                                        {st.status}
-                                      </span>
-                                      {st.exit_code !== null && st.exit_code !== undefined && (
-                                        <span className="text-xs text-slate-500">exit {st.exit_code}</span>
-                                      )}
-                                      <span className="text-xs text-slate-500">
-                                        {stageDuration(st.duration_seconds, st.status, st.started_at, st.completed_at, st.observed_at, st.timing_active)}
-                                      </span>
-                                    </div>
-                                    {st.message && <p className="mt-2 text-sm text-slate-600">{st.message}</p>}
-                                    {st.metrics && (
-                                      <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-xs">
-                                        {stageMetrics(st.metrics).map(metric => (
-                                          <div key={metric.key}><dt className="text-slate-500">{metric.label}</dt><dd className="font-medium text-slate-800">{metric.value}</dd></div>
-                                        ))}
-                                      </dl>
-                                    )}
-                                    {(st.stderr_tail || st.stdout_tail) && (
-                                      <details className="mt-2"><summary className="cursor-pointer text-xs text-slate-600">Stage log</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-900/90 p-3 text-xs text-slate-100">
-                                        {st.stderr_tail ? `stderr:\n${st.stderr_tail}\n\n` : ""}
-                                        {st.stdout_tail ? `stdout:\n${st.stdout_tail}` : ""}
-                                      </pre></details>
-                                    )}
-                                  </div>
+                                {operatorStages(run.stages || [], run.stage_details).map((st) => (
+                                  <PipelineStageCard key={st.stage_id} st={st} runId={run.run_id} activeRun={isActiveRun(run.status)} />
                                 ))}
                               </div>
-                              {run.stage_details && (
-                                <details className="mt-4"><summary className="cursor-pointer text-sm text-slate-600">Worker log tail and original execution records</summary>
-                                  {run.stages.filter(st => st.stage_key === "embeddinggemma2_generation").map(st => (
-                                    <pre key={st.stage_id} className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900 p-3 text-xs text-slate-100">{st.stderr_tail || ""}{"\n"}{st.stdout_tail || ""}</pre>
-                                  ))}
-                                </details>
-                              )}
+
                             </td>
                           </tr>
                         )}

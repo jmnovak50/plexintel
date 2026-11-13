@@ -16,7 +16,7 @@ from .train import train
 from .scoring import score
 from .publication import writer_lock,source_signature,install_staging,stage_vectors,stage_training,stage_predictions,publish,verify
 from .recovery import load_associations
-from .progress import Reporter
+from .progress import Reporter,clean_metrics
 from .provenance import source_sha256,versions
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -59,7 +59,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             else:
                 if collect:
                     process=subprocess.run([sys.executable,str(ROOT/'fetch_tautulli_data.py'),'--mode','incremental','--no-embeddings'],
-                        cwd=ROOT,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1800)
+                        cwd=ROOT,timeout=1800)  # Retain collection diagnostics in the existing worker logs.
                     if process.returncode:raise ContractError('Source collection failed; previous predictions preserved')
                 config=policy
                 # One short repeatable-read source snapshot, not a training-long transaction.
@@ -82,18 +82,20 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                 associations=load_associations(conn,[str(r['rating_key']) for r in snapshot['media']]);conn.commit()
             from .history_scope import partition_history
             snapshot=partition_history(snapshot)
-        def progress(stage,**metrics):
-            if 'seconds' in metrics:reporter.elapsed[stage]=metrics['seconds']
-            reporter.emit(stage,'started',**metrics)
+        reporter.done('source_sync',quarantined=snapshot['watch_coverage']['quarantined_watch_events'])
         # Preparation is in memory and temporary tables; live vectors stay unchanged.
         inputs,media,watches,users,rows,summary=prepare(conn,snapshot,plex,encoder,associations,
-            allow_stored_history=allow_stored_history,policy=policy,progress=progress)
+            allow_stored_history=allow_stored_history,policy=policy,progress=reporter.progress)
         conn.commit()
-        for stage in ('source_sync','media_text','watch','users','training_data'):reporter.done(stage)
+        reporter.done('training_data',rows=summary['rows'],
+            label_policy_skips=summary['skips'].get('label_policy',0),
+            limited_history_skips=summary['skips'].get('limited_history',0))
         with reporter.span('train_model'):
             bundle,vocabulary,evaluation=train(inputs,media,watches,rows,summary,incumbent_ap=incumbent_ap,
-                progress=lambda **metrics:reporter.emit('train_model','started',**metrics))
-        reporter.done('train_model')
+                progress=lambda **metrics:reporter.progress('train_model',**metrics))
+        reporter.done('train_model',chronological_balanced_accuracy=evaluation['chronological']['balanced_accuracy'],
+            chronological_average_precision=evaluation['chronological']['average_precision'],
+            show_balanced_accuracy=evaluation['show_heldout']['balanced_accuracy'],quality_passed=all(evaluation['gates'].values()))
         bundle.update(source_sha256=code_sha,software_versions=software)
         model_path,model_hash=save_model(directory,bundle)
         config=model_config(inputs,bundle,model_path,model_hash,evaluation)
@@ -105,11 +107,11 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         install_staging(conn);stage_vectors(conn,media,watches,users);stage_training(conn,rows)
         with reporter.span('score_model'):
             count=stage_predictions(conn,score(inputs,media,watches,users,bundle,vocabulary,policy=policy,
-                progress=lambda **metrics:reporter.emit('score_model','started',**metrics)),config,snapshot['as_of'])
+                progress=lambda **metrics:reporter.progress('score_model',**metrics)),config,snapshot['as_of'])
         from .diagnostics import ranking_comparison
         ranking=ranking_comparison(conn);conn.commit()
-        reporter.done('score_model',predictions=count)
-        reporter.done('shap',message='Measured within scoring; raw-margin embedding contributions retained')
+        reporter.done('score_model',predictions=count,message='Duration includes SHAP generation and staged prediction persistence.')
+        reporter.done('shap',timing_known=False,message='Measured within scoring; raw-margin embedding contributions retained')
         if source_sha256()!=code_sha:raise ContractError('Predictor source changed during execution; no publication')
         with reporter.span('publication'):
             counts=publish(conn,config,incumbent,source_hash,backup_directory=directory)
@@ -120,7 +122,9 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                 conn.commit()
         except Exception:
             raise ContractError('Publication committed but final verification is incomplete; run read-only verify, not an automatic workload retry') from None
-        reporter.done('verification')
+        reporter.done('verification',verified_vectors=sum(counts.get(k,0) for k in ('media_embeddings','watch_embeddings','user_embeddings')))
+        reporter.done('shap',timing_known=False,contexts=counts.get('shap_prediction_context',0),
+            contributions=counts.get('shap_impact',0),message='Measured within scoring; raw-margin embedding contributions retained')
         result=dict(verified=True,run_id=config['workload_id'],promotion_id=config['workload_id'],
             feature_space_id=config['feature_space_id'],model_sha256=model_hash,source_sha256=code_sha,software_versions=config['software_versions'],counts=counts,summary=summary,
             evaluation=evaluation,ranking_comparison=ranking,predictive_seconds=time.monotonic()-started)
@@ -129,6 +133,13 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             from api.services.pipeline_labeling import run_after_publication
             result['semantic_labeling']=run_after_publication(result,output=output)
         else:result['semantic_labeling']=dict(status='skipped',reason='Explicitly disabled for this execution')
+        labeling=result['semantic_labeling']
+        reporter.elapsed['semantic_labels']=labeling.get('seconds',0.)
+        reporter.emit('semantic_labels',
+            'success' if labeling['status'] in ('success','completed','empty') else
+            labeling['status'] if labeling['status'] in ('skipped','failed') else 'not_recorded',
+            timing_known='seconds' in labeling,message=labeling.get('reason'),
+            **clean_metrics(labeling))
         # Optional diagnostics/retention cannot reclassify a committed predictor.
         try:
             from .history import prune

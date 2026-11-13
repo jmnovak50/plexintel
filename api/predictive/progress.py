@@ -55,12 +55,12 @@ class Reporter:
     def bind(self, run_id):
         self.run_id = run_id
 
-    def emit(self, key, status, *, message=None, **metrics):
+    def emit(self, key, status, *, message=None, timing_known=True, **metrics):
         self.metrics.setdefault(key, {}).update(clean_metrics(metrics))
         event = dict(event=EVENT, stage_key=key, status=status,
                      at=datetime.now(timezone.utc).isoformat(),
                      elapsed_seconds=self.elapsed.get(key, 0.) + (self.clock()-self.running[key] if key in self.running else 0.),
-                     timing_active=key in self.running, metrics=dict(self.metrics[key]))
+                     timing_active=key in self.running, timing_known=timing_known, metrics=dict(self.metrics[key]))
         if self.run_id:event['generation_run_id'] = self.run_id
         if message:event['message'] = message[:240]
         self.details[key] = dict(event)
@@ -91,6 +91,23 @@ class Reporter:
     def done(self, key, **metrics):
         status = 'skipped' if key in ('watch', 'users') and self.metrics.get(key, {}).get('checkpoint_reused') else 'success'
         self.emit(key, status, **metrics)
+
+    def progress(self, key, *, phase=None, **metrics):
+        """Adapt existing callbacks without changing work or flooding the monitor."""
+        first = key not in self.details
+        self.metrics.setdefault(key, {}).update(clean_metrics(metrics))
+        if 'seconds' in metrics:
+            self.elapsed[key] = metrics['seconds']
+            self.running.pop(key, None)
+            self.done(key)
+            return
+        if first:
+            self.running.setdefault(key, self.clock())
+        if first or phase or self.clock() - self.last_update >= 1.:
+            self.last_update = self.clock()
+            message = phase if isinstance(phase, str) and phase.startswith(
+                ('boosting round ', 'candidate batch ', 'candidate labels/', 'canonical eligibility')) else None
+            self.emit(key, 'started', message=message)
 
     def skip(self, key, **metrics):
         self.emit(key, 'skipped', checkpoint_reused=True, **metrics)
@@ -148,8 +165,12 @@ def event_details(row):
     except (ValueError, TypeError):return dict(row)
     if not isinstance(event, dict) or event.get('event') != EVENT:return dict(row)
     interrupted = row.get('status') in {'failed','cancelled','skipped'} and event.get('status') == 'started'
+    # Older restored runs timed SHAP within scoring, but emitted a misleading zero.
+    known = event.get('timing_known', True) and not (
+        row['stage_key'] == 'shap' and str(event.get('message', '')).startswith('Measured within scoring'))
     return dict(row, label=STAGE_NAMES.get(row['stage_key'], row['stage_key']),
                 metrics=clean_metrics(event.get('metrics') or {}),
-                duration_seconds=event.get('elapsed_seconds'), message=row.get('stderr_tail') if interrupted else event.get('message'),
+                duration_seconds=event.get('elapsed_seconds') if known else None, timing_known=known,
+                message=row.get('stderr_tail') if interrupted else event.get('message'),
                 timing_active=not interrupted and event.get('timing_active', False), observed_at=event.get('at'),
                 detail_source='structured_events')

@@ -155,7 +155,8 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
     import api.predictive.runner as runner
     snapshot,plex,encoder=populate(db)
     before_generation=datetime.now(timezone.utc)
-    result=run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
+    events=[]
+    result=run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=events.append)
     after_generation=datetime.now(timezone.utc)
     config=current_config(db);db.commit()
     assert result['verified'] and result['counts']['training_data']>128
@@ -164,6 +165,17 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
     assert result['evaluation']['show_heldout']['negative']>0
     assert all(result['evaluation']['gates'].values())
     assert result['counts']['recommendations']>0 and result['counts']['shap_impact']>0
+    from api.predictive.progress import EVENT
+    observed=[e for e in events if e.get('event')==EVENT]
+    final={e['stage_key']:e for e in observed}
+    assert final['train_model']['metrics']['quality_passed'] is True
+    assert final['shap']['metrics']['contributions']==result['counts']['shap_impact']
+    assert final['shap']['timing_known'] is False
+    assert final['semantic_labels']['status']=='skipped'
+    for previous,next_stage in [('source_sync','media_text'),('media_text','watch'),('watch','users'),('users','training_data')]:
+        finished=next(i for i,e in enumerate(observed) if e['stage_key']==previous and e['status']=='success')
+        started=next(i for i,e in enumerate(observed) if e['stage_key']==next_stage and e['status']=='started')
+        assert finished<started
     with db.cursor() as cur:
         cur.execute('SELECT count(*),min(scored_at),max(scored_at),min(generated_at),max(generated_at) FROM public.shap_prediction_context')
         count,first_score,last_score,first_generated,last_generated=cur.fetchone()

@@ -60,6 +60,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
             revisions[str(row['ratingKey'])]=fingerprint({k:row.get(k) for k in
                 ('updatedAt','guid','type','parentRatingKey','grandparentRatingKey')})
     started=time.monotonic()
+    progress('media_text',completed=0,expected=len(sources))
     old=cache(conn,'media_text');media={};stats=Counter()
     for key,source in sources.items():
         previous=(old.get(key) or {}).get('provenance',{}).get('source',{})
@@ -85,6 +86,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
     progress('media_text',seconds=time.monotonic()-started)
     identity=CanonicalTitles(media)
     started=time.monotonic()
+    progress('watch',completed=0,expected=len(snapshot['events']))
     old=cache(conn,'watch');watches={};stats=Counter()
     for event in snapshot['events']:
         key=str(event['rating_key']);watch=str(event['watch_id'])
@@ -93,6 +95,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
         progress('watch',completed=len(watches),expected=len(snapshot['events']),**stats)
     progress('watch',seconds=time.monotonic()-started)
     started=time.monotonic()
+    progress('users',users=0)
     users={};blocked=0
     for owner in sorted({e['username'] for e in snapshot['events']}):
         events=[e for e in snapshot['events'] if e['username']==owner]
@@ -109,6 +112,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
         users[owner]=record(spec,'user',owner,source,mean,digest)
     progress('users',users=len(users),quarantined=blocked,seconds=time.monotonic()-started)
     started=time.monotonic()
+    progress('training_data',completed=0)
     rows,skips=training_rows(inputs,media,watches,compact=True,progress=lambda item:progress('training_data',**{k:v for k,v in item.items() if k!='stage'}))
     if not rows:raise ContractError('No leakage-safe training observations')
     identities=[(r['owner'],r['canonical_identity']) for r in rows]

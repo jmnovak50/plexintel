@@ -9,8 +9,8 @@ import tempfile
 from unittest.mock import Mock
 
 import pytest
-from api.embedding_generation.progress import EVENT,STAGES,Reporter,EventReader,event_details
-from api.embedding_generation.contracts import ContractError
+from api.predictive.progress import EVENT,STAGES,Reporter,EventReader,event_details
+from api.predictive.contracts import ContractError
 from api.services import pipeline_service as service
 from api.services.pipeline_visibility import enrich_runs,historical_details
 from tests.test_pipeline_service import FakeConnection
@@ -296,5 +296,7 @@ def test_real_private_sql_interruption_and_checkpoint_title_recovery(store,monke
     run=dict(stages=[dict(stage_key='embeddinggemma2_generation',stdout_tail=None),
         dict(stage_key='media_text',status='success',stdout_tail=json.dumps(event('media_text','success')))])
     with Cursor() as cur:enrich_runs(cur,[run])
-    assert run['embedded_media_total']==1
-    assert run['embedded_media']==[dict(rating_key='42',title='Fictional Beacon',show_title='Fictional Series',media_type='episode')]
+    # Retired journals are deliberately not a serving dependency. Public events
+    # survive, but private title checkpoints are no longer recoverable here.
+    assert run['stage_details'][0]['stage_key']=='media_text'
+    assert 'embedded_media' not in run

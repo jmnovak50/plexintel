@@ -4,6 +4,7 @@ import threading
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from api.routes.admin_routes import require_admin
 from api.services.pipeline_service import (
@@ -16,6 +17,28 @@ from api.services.pipeline_service import (
 )
 
 router = APIRouter()
+
+
+@router.get("/admin/pipeline/runs/{run_id}/stages/{stage_key}/logs")
+def admin_pipeline_stage_logs(
+    run_id: int,
+    stage_key: str,
+    stdout_offset: int = Query(0, ge=0),
+    stderr_offset: int = Query(0, ge=0),
+    limit: int = Query(131072, ge=1, le=131072),
+    admin_user=Depends(require_admin),
+):
+    from api.services.pipeline_logs import get_stage_logs
+    run = get_pipeline_run(run_id)
+    if run is None:raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        payload = get_stage_logs(run, stage_key, stdout_offset=stdout_offset,
+                                 stderr_offset=stderr_offset, limit=limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Stage not found") from None
+    except OSError:
+        raise HTTPException(status_code=503, detail="Stage output is temporarily unavailable") from None
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 def _serialize_run(row: dict[str, Any]) -> dict[str, Any]:
