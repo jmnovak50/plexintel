@@ -33,6 +33,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         code_sha=source_sha256();software=versions()
         incumbent=current_config(conn);conn.commit()
         policy=source.settings() if not frozen_source else policy
+        reporter.log_titles = policy.get('embeddings.log_titles',True)
         incumbent_ap=None
         if incumbent:
             if not re.fullmatch('[a-f0-9]{64}',str(incumbent.get('model_sha256',''))):
@@ -85,7 +86,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         reporter.done('source_sync',quarantined=snapshot['watch_coverage']['quarantined_watch_events'])
         # Preparation is in memory and temporary tables; live vectors stay unchanged.
         inputs,media,watches,users,rows,summary=prepare(conn,snapshot,plex,encoder,associations,
-            allow_stored_history=allow_stored_history,policy=policy,progress=reporter.progress)
+            allow_stored_history=allow_stored_history,policy=policy,progress=reporter.progress,log=reporter.log)
         conn.commit()
         reporter.done('training_data',rows=summary['rows'],
             label_policy_skips=summary['skips'].get('label_policy',0),
@@ -107,7 +108,8 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         install_staging(conn);stage_vectors(conn,media,watches,users);stage_training(conn,rows)
         with reporter.span('score_model'):
             count=stage_predictions(conn,score(inputs,media,watches,users,bundle,vocabulary,policy=policy,
-                progress=lambda **metrics:reporter.progress('score_model',**metrics)),config,snapshot['as_of'])
+                progress=lambda **metrics:reporter.progress('score_model',**metrics),
+                log=lambda operation,**fields:reporter.log('score_model',operation,**fields)),config,snapshot['as_of'])
         from .diagnostics import ranking_comparison
         ranking=ranking_comparison(conn);conn.commit()
         reporter.done('score_model',predictions=count,message='Duration includes SHAP generation and staged prediction persistence.')

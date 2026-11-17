@@ -85,7 +85,7 @@ def test_progress_record_extensions_are_not_lost_to_metric_allowlists(monkeypatc
     value.update(metrics=dict(completed=1,additional_diagnostic='actual retained diagnostic'),
                  generation_run_id='recorded-receipt',additional_detail=dict(kept=True))
     run=fixture(tmp_path,monkeypatch,json.dumps(value)+'\n')
-    out=logs.get_stage_logs(run,'train_model')['stdout']['text']
+    out=logs.get_stage_logs(run,'train_model',view='recorded')['stdout']['text']
     assert 'actual retained diagnostic' in out and 'recorded-receipt' in out and '"kept": true' in out
 
 
@@ -222,5 +222,6 @@ def test_stage_route_is_admin_only_bounded_and_no_global_route(monkeypatch):
     operation=paths['/admin/pipeline/runs/{run_id}/stages/{stage_key}/logs']['get']
     params={p['name']:p['schema'] for p in operation['parameters']}
     assert params['stdout_offset']['minimum']==0 and params['limit']['maximum']==131072
+    assert params['view']['enum']==['operator','recorded']
     route=next(r for r in routes.router.routes if r.path.endswith('/{stage_key}/logs'))
     assert routes.require_admin in [d.call for d in route.dependant.dependencies]

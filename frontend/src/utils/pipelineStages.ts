@@ -1,5 +1,5 @@
 export const stageLabels: Record<string, string> = {
-  source_sync: "Tautulli / library synchronization",
+  source_sync: "Library synchronization and media embeddings",
   media_text: "Media-text embedding refresh",
   watch: "Watch embedding refresh",
   users: "User-profile reconstruction",
@@ -108,7 +108,7 @@ type LogStage = {
   stage_key: string; status: string; stdout_tail?: string | null; stderr_tail?: string | null;
   duration_seconds?: number | null; timing_known?: boolean;
   timing_active?: boolean; observed_at?: string;
-  metrics?: Record<string, number | boolean>; message?: string | null;
+  metrics?: Record<string, number | boolean>; message?: string | null; label?: string;
 };
 
 export function operatorStages<T extends LogStage>(stages: T[], details?: T[]): T[] {
@@ -117,7 +117,7 @@ export function operatorStages<T extends LogStage>(stages: T[], details?: T[]): 
   if (!recorded.length) return stages;
   // Keep the earlier execution-stage view. SHAP runs within scoring; verification
   // and optional labeling belong to the publication log, not extra UI cards.
-  const groups = [["source_sync"], ["media_text"], ["watch"], ["users"], ["training_data"],
+  const groups = [["source_sync", "media_text"], ["watch"], ["users"], ["training_data"],
     ["train_model"], ["score_model", "shap"], ["publication", "verification", "semantic_labels"]];
   const grouped = groups.flatMap(keys => {
     const children = keys.map(key => recorded.find(s => s.stage_key === key)).filter((s): s is T => !!s);
@@ -130,6 +130,8 @@ export function operatorStages<T extends LogStage>(stages: T[], details?: T[]): 
     const timed = required.filter(s => s.stage_key !== "shap" || (s.timing_known !== false && s.duration_seconds != null));
     const known = timed.every(s => s.timing_known !== false && s.duration_seconds != null);
     return [{ ...primary, status,
+      ...(keys[0] === "source_sync" ? { label: stageLabels.source_sync,
+        metrics: children.find(s => s.stage_key === "media_text")?.metrics ?? primary.metrics } : {}),
       duration_seconds: known ? timed.reduce((total,s) => total + s.duration_seconds!, 0) : primary.duration_seconds,
       timing_active: active?.timing_active ?? false,
       observed_at: active?.observed_at ?? primary.observed_at,

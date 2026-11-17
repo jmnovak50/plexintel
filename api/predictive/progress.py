@@ -8,6 +8,17 @@ import time
 from .contracts import ContractError
 
 EVENT = 'plexintel.pipeline-stage/1'
+ITEM_EVENT = 'plexintel.pipeline-log/1'
+
+
+def media_log_fields(key, source):
+    """Identify the actual item without logging its synopsis, vector or sessions."""
+    metadata = source.get('metadata') or source
+    show = metadata.get('show_context') or {}
+    return {key: value for key, value in dict(rating_key=str(key),title=metadata.get('title'),
+        media_type=metadata.get('media_type'),show_title=show.get('title') or source.get('show_title'),
+        season=metadata.get('season_number'),episode=metadata.get('episode_number')).items() if value is not None}
+
 STAGES = (
     ('source_sync', 'Tautulli / library synchronization'),
     ('media_text', 'Media-text embedding refresh'),
@@ -41,8 +52,9 @@ def clean_metrics(values):
 
 class Reporter:
     """Accumulate disjoint spans (scoring/SHAP interleave) without double timing."""
-    def __init__(self, output, *, clock=time.perf_counter):
+    def __init__(self, output, *, clock=time.perf_counter, log_titles=True):
         self.output, self.clock = output, clock
+        self.log_titles = log_titles
         self.run_id = None
         self.active = None
         self.elapsed = {}
@@ -54,6 +66,17 @@ class Reporter:
 
     def bind(self, run_id):
         self.run_id = run_id
+
+    def log(self, stage_key, operation, **fields):
+        """Keep item diagnostics in stdout, separate from throttled stage state.
+
+        EventReader deliberately ignores this event type: per-item messages must
+        not replace the stage's status/progress record or create database rows.
+        """
+        if not self.log_titles:
+            fields = {key:value for key,value in fields.items() if key not in ('title','show_title')}
+        self.output(dict(event=ITEM_EVENT,stage_key=stage_key,operation=operation,
+                         at=datetime.now(timezone.utc).isoformat(),**fields))
 
     def emit(self, key, status, *, message=None, timing_known=True, **metrics):
         self.metrics.setdefault(key, {}).update(clean_metrics(metrics))

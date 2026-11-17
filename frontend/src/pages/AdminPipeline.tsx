@@ -83,15 +83,24 @@ interface LogStream {
   source: string;
   note?: string | null;
   identity: string;
+  has_item_details?: boolean;
+  has_supplement?: boolean;
 }
 interface StageLogs { stdout: LogStream; stderr: LogStream }
 
-export function PipelineLog({ stdout, stderr, loading = false }: { stdout: string | null; stderr: string | null; loading?: boolean }) {
+export function PipelineLog({ stdout, stderr, loading = false, separateCompletion = false }: { stdout: string | null; stderr: string | null; loading?: boolean; separateCompletion?: boolean }) {
+  const completion = separateCompletion ? stdout?.search(/\nRecorded (?:completion diagnostics|cache reuse details|progress details)\b/) ?? -1 : -1;
+  const output = completion >= 0 ? stdout!.slice(0, completion) : stdout;
+  const diagnostics = completion >= 0 ? stdout!.slice(completion + 1) : null;
   return <div className="space-y-3">
-    {([['stdout:', stdout], ['stderr:', stderr]] as const).map(([label, text]) => (text || label === 'stdout:') ? <section key={label} aria-label={label}>
+    {([['stdout:', output], ['stderr:', stderr]] as const).map(([label, text]) => (text || label === 'stdout:') ? <section key={label} aria-label={label}>
       <h4 className="mb-1 font-mono text-xs font-semibold text-slate-700">{label}</h4>
       {text ? <pre data-stream={label} className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900/90 p-3 font-mono text-xs leading-5 text-slate-100">{text}</pre>
-        : <p className="text-xs text-slate-500">{loading ? 'Loading retained stdout…' : 'No stdout output was retained for this stage.'}</p>}
+        : <p className="text-xs text-slate-500">{loading ? 'Loading retained stdout…' : diagnostics ? 'Recorded output is available in the details below.' : 'No stdout output was retained for this stage.'}</p>}
+      {label === 'stdout:' && diagnostics && <details className="mt-2 text-xs text-slate-600">
+        <summary className="cursor-pointer">Recorded details</summary>
+        <pre data-stream="stdout-diagnostics" className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900/90 p-3 font-mono text-xs leading-5 text-slate-100">{diagnostics}</pre>
+      </details>}
     </section> : null)}
   </div>;
 }
@@ -101,6 +110,7 @@ export function PipelineStageCard({ st, runId, activeRun = false }: { st: Pipeli
   const [logs, setLogs] = useState<StageLogs | null>(null);
   const [logError, setLogError] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
+  const [recordedView, setRecordedView] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const scrollPositions = useRef(new Map<string | undefined, { top: number; follow: boolean }>());
   const progress = stageProgress(st.metrics);
@@ -127,7 +137,7 @@ export function PipelineStageCard({ st, runId, activeRun = false }: { st: Pipeli
         let page: StageLogs;
         let resets = 0;
         while (true) {
-          const response = await fetch(`/api/admin/pipeline/runs/${runId}/stages/${encodeURIComponent(st.stage_key)}/logs?stdout_offset=${outOffset}&stderr_offset=${errOffset}`, {
+          const response = await fetch(`/api/admin/pipeline/runs/${runId}/stages/${encodeURIComponent(st.stage_key)}/logs?stdout_offset=${outOffset}&stderr_offset=${errOffset}&view=${recordedView ? 'recorded' : 'operator'}`, {
             credentials: 'include', cache: 'no-store', signal: controller.signal,
           });
           if (!response.ok) throw new Error(`Unable to load stage output (${response.status})`);
@@ -163,11 +173,11 @@ export function PipelineStageCard({ st, runId, activeRun = false }: { st: Pipeli
     void load();
     const timer = activeRun ? window.setInterval(() => void load(), 5000) : undefined;
     return () => { controller.abort(); if (timer) window.clearInterval(timer); };
-  }, [open, runId, st.stage_key, st.status, st.worker_output, activeRun]);
+  }, [open, runId, st.stage_key, st.status, st.worker_output, activeRun, recordedView]);
 
   if (st.worker_output && !logError && (!logs || (!logs.stdout.text && !logs.stderr.text))) return null;
-  const stdout = logs ? logs.stdout.text : readablePipelineLog(st.stdout_tail);
-  const stderr = logs ? logs.stderr.text : readablePipelineLog(st.stderr_tail);
+  const stdout = logs ? logs.stdout.text : runId == null ? readablePipelineLog(st.stdout_tail) : null;
+  const stderr = logs ? logs.stderr.text : runId == null ? readablePipelineLog(st.stderr_tail) : null;
   return <div className="recs-surface-muted p-3" data-stage-key={st.stage_key}>
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <h3 className="font-medium text-slate-900">{st.worker_output ? `${stageLabels[st.stage_key] || st.stage_key} — unattributed output` : st.label || stageLabels[st.stage_key] || st.stage_key}</h3>
@@ -179,10 +189,14 @@ export function PipelineStageCard({ st, runId, activeRun = false }: { st: Pipeli
     <details className="mt-2" open={open} onToggle={event => { setOpen(event.currentTarget.open); if (!event.currentTarget.open) setFetching(false); }}>
       <summary className="cursor-pointer text-xs text-slate-600">Stage output{fetching ? ' · Loading…' : ''}</summary>
       <div ref={content} className="mt-2">
+        {runId != null && <label className="mb-2 flex items-center gap-2 text-xs text-slate-500">
+          <input type="checkbox" checked={recordedView} onChange={event => {setLogs(null);setRecordedView(event.target.checked);}} />
+          Show recorded events
+        </label>}
         {logError && <p role="alert" className="recs-notice-red mb-2">{logError}</p>}
         {logs?.stdout.note && <p className="mb-2 text-xs text-slate-500">{logs.stdout.note}</p>}
         {logs?.stderr.note && logs.stderr.note !== logs.stdout.note && <p className="mb-2 text-xs text-slate-500">{logs.stderr.note}</p>}
-        <PipelineLog stdout={stdout} stderr={stderr} loading={fetching && !logs} />
+        <PipelineLog stdout={stdout} stderr={stderr} loading={runId != null && !logs && !logError} separateCompletion={!recordedView && logs?.stdout.has_supplement} />
         {logs && (stdout || stderr) && <p className="mt-2 text-xs text-slate-500">{logError ? 'Previously loaded output; refresh failed.' : fetching ? 'Refreshing output…' : 'All currently available output loaded.'}</p>}
       </div>
     </details>

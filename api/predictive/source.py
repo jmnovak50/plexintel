@@ -22,7 +22,7 @@ def serializable(value):
 
 
 def settings():
-    keys=['ollama.host','ollama.threads','ollama.timeout_s','tautulli.api_url','tautulli.api_key','plex.redirect_uri',
+    keys=['ollama.host','ollama.threads','ollama.timeout_s','tautulli.api_url','tautulli.api_key','plex.redirect_uri','embeddings.log_titles',
           'user_embeddings.engagement_threshold','training.watch_embed_min_engagement',
           'scoring.watched_engagement_threshold','training.movie_revisit_pending_days',
           'training.tv_revisit_pending_days','training.interested_sample_weight',

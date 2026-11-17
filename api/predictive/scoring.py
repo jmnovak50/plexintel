@@ -7,6 +7,7 @@ from .contracts import cosine,utc
 from .features import ProfileContext,feature_row,unseen_candidate_keys
 from .recovery import CanonicalTitles,IdentityError
 from .eligibility_quarantine import profile_exclusions
+from .progress import media_log_fields
 
 
 def shap_targets(predictions,media,policy):
@@ -49,7 +50,7 @@ def raw_shap(values,policy):
     return selected
 
 
-def score(inputs,media,watches,users,bundle,vocabulary,*,progress=lambda **metrics:None,policy=None):
+def score(inputs,media,watches,users,bundle,vocabulary,*,progress=lambda **metrics:None,policy=None,log=None):
     import xgboost as xgb
     if policy is None:
         from api.services.app_settings import resolve_settings
@@ -66,6 +67,7 @@ def score(inputs,media,watches,users,bundle,vocabulary,*,progress=lambda **metri
             context=ProfileContext(inputs,media,watches,events,owner,cutoff,excluded_keys=excluded,identity=identity)
         except IdentityError:
             raise  # Preparation already approved this user; never silently drift.
+        if log:log('scoring_user',user=owner,candidates=len(candidates))
         predictions=[]
         for start in range(0,len(candidates),128):
             rows=[feature_row(inputs,media,watches,events,owner,key,cutoff,excluded_keys=excluded,
@@ -77,6 +79,8 @@ def score(inputs,media,watches,users,bundle,vocabulary,*,progress=lambda **metri
                     for row,value in zip(rows,probability))
         predictions.sort(key=lambda pair:(-pair[1],int(pair[0])))
         targets=shap_targets(predictions,media,policy)
+        if log:log('scored_user',user=owner,predictions=len(predictions),shap_targets=len(targets),
+                   strategy=policy['scoring.shap_targeting_strategy'])
         for start in range(0,len(predictions),128):
             part=predictions[start:start+128]
             explain=[item for item in part if item[0] in targets]
@@ -84,10 +88,19 @@ def score(inputs,media,watches,users,bundle,vocabulary,*,progress=lambda **metri
                 context=context,identity=identity,dependencies=False) for key,p,c in explain]
             contributions=(bundle['model'].get_booster().predict(xgb.DMatrix(vocabulary.transform(explain_rows),
                 feature_names=vocabulary.names,nthread=2),pred_contribs=True) if explain else [])
-            by_key={item[0]:contributions[index][:1536] for index,item in enumerate(explain)}
+            by_key={item[0]:contributions[index] for index,item in enumerate(explain)}
             for offset,(key,probability,similarity) in enumerate(part):
-                values=by_key.get(key)
+                full_values=by_key.get(key)
+                values=full_values[:1536] if full_values is not None else None
+                if log and full_values is not None:
+                    # Read the already-computed explanation. No additional model
+                    # calls, SHAP targets, stored dimensions or ranking changes.
+                    top=np.argsort(-np.abs(full_values[:-1]),kind='stable')[:3]
+                    log('ranked_shap',user=owner,rank=start+offset+1,probability=probability,
+                        **media_log_fields(key,media[key]['source']),
+                        contributions=[dict(feature=vocabulary.names[i],value=float(full_values[i])) for i in top])
                 yield dict(owner=owner,key=int(key),probability=probability,rank=start+offset+1,
                     cosine=similarity,
                     shap=raw_shap(values,policy) if values is not None else [])
         progress(users=number,expected=len(users),predictions=len(predictions))
+        if log:log('scoring_complete',user=owner,predictions=len(predictions),shap_targets=len(targets))

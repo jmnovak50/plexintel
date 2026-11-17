@@ -64,3 +64,27 @@ test('missing historical output is an availability note, not a fabricated log', 
   assert.match(html,/No stdout output was retained/);
   assert.doesNotMatch(html,/<pre/);
 });
+
+test('real item lines stay visible while completion diagnostics remain in the same stdout section', () => {
+  const text='Rank 3: Fictional film\nRecorded completion diagnostics (from this execution’s retained stdout receipt):\nRecorded diagnostic 123';
+  const html=log({stdout:text,stderr:'Real stderr',separateCompletion:true});
+  assert.match(html,/Rank 3: Fictional film/);
+  assert.match(html,/<details[^>]*><summary[^>]*>Recorded details/);
+  assert.match(html,/data-stream="stdout-diagnostics"/);
+  assert.equal((html.match(/Recorded diagnostic 123/g)||[]).length,1);
+  assert.ok(html.indexOf('Recorded diagnostic 123')<html.indexOf('aria-label="stderr:"'));
+  assert.doesNotMatch(html,/<dl/);
+  // Earlier runs without item records keep their existing diagnostic rendering.
+  assert.doesNotMatch(log({stdout:text,stderr:null}),/data-stream="stdout-diagnostics"/);
+});
+
+test('cache-hit and progress detail never replace the classic main stdout', () => {
+  const text='✅ Media embeddings unchanged.\nRecorded progress details:\nProgress detail\nRecorded cache reuse details (1 items):\nCached film title';
+  const html=log({stdout:text,stderr:null,separateCompletion:true});
+  const main=html.match(/data-stream="stdout:"[^>]*>(.*?)<\/pre>/s)[1];
+  assert.match(main,/Media embeddings unchanged/);
+  assert.doesNotMatch(main,/Progress detail|Cached film title/);
+  assert.match(html,/Recorded details/);
+  assert.match(html,/Cached film title/);
+  assert.equal((html.match(/Cached film title/g)||[]).length,1);
+});

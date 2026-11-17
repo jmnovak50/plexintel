@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -26,6 +26,7 @@ def admin_pipeline_stage_logs(
     stdout_offset: int = Query(0, ge=0),
     stderr_offset: int = Query(0, ge=0),
     limit: int = Query(131072, ge=1, le=131072),
+    view: Literal['operator','recorded'] = 'operator',
     admin_user=Depends(require_admin),
 ):
     from api.services.pipeline_logs import get_stage_logs
@@ -33,7 +34,7 @@ def admin_pipeline_stage_logs(
     if run is None:raise HTTPException(status_code=404, detail="Run not found")
     try:
         payload = get_stage_logs(run, stage_key, stdout_offset=stdout_offset,
-                                 stderr_offset=stderr_offset, limit=limit)
+                                 stderr_offset=stderr_offset, limit=limit, view=view)
     except KeyError:
         raise HTTPException(status_code=404, detail="Stage not found") from None
     except OSError:

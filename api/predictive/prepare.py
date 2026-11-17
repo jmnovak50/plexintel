@@ -9,6 +9,7 @@ from .contracts import ContractError,fingerprint,specification,modality_contract
 from .recovery import CanonicalTitles,IdentityError,Resolver,POLICY
 from .features import ProfileContext,training_rows,SUPERVISION_POLICY,unseen_candidate_keys
 from .eligibility_quarantine import profile_exclusions
+from .progress import media_log_fields
 
 TABLES={'media_text':('media_embeddings','rating_key'),'watch':('watch_embeddings','watch_id'),
         'user':('user_embeddings','username')}
@@ -35,19 +36,28 @@ def record(spec,kind,key,source,values,input_hash):
         encoder_digest=spec['encoder']['digest'],vector_sha256=hashlib.sha256(np.asarray(values,dtype='<f4').tobytes()).hexdigest())
 
 
-def refresh_vector(spec,kind,key,source,text,old,encoder,stats):
+def refresh_vector(spec,kind,key,source,text,old,encoder,stats,*,log=None):
     digest=fingerprint(dict(contract=modality_contract(spec,kind),text=text))
     saved=old.pop(str(key),None);provenance=saved['provenance'] if saved else {}
     if (provenance.get('input_hash')==digest and provenance.get('modality_contract_hash')==fingerprint(modality_contract(spec,kind))
         and saved['embedding'] is not None and provenance.get('vector_sha256')==hashlib.sha256(
             np.asarray(saved['embedding'],dtype='<f4').tobytes()).hexdigest()):
         values=vector(saved['embedding'],unit=True);stats['reused']+=1
+        action='reused'
     else:
-        values=encoder.embed(text);stats['inferred']+=1
-    return record(spec,kind,key,source,values,digest)
+        if log:log('embedding',reason='No cached vector' if not saved else 'Input, contract or cached vector changed')
+        try:
+            values=encoder.embed(text);stats['inferred']+=1
+        except Exception as exc:
+            if log:log('embedding_failed',error_type=type(exc).__name__)
+            raise
+        action='embedded'
+    result=record(spec,kind,key,source,values,digest)
+    if log:log(action)
+    return result
 
 
-def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False,policy=None,progress=lambda stage,**metrics:None):
+def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False,policy=None,progress=lambda stage,**metrics:None,log=None):
     spec=specification(encoder.identity,policy=policy)
     spec.update(identity_policy='verified-canonical-unseen-title/1.0',supervision_policy=SUPERVISION_POLICY)
     inputs=dict(contract=spec,contract_hash=fingerprint(spec),feature_space_id=fingerprint(spec),snapshot=snapshot)
@@ -81,7 +91,8 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
                     approved_at=snapshot['as_of']),_revision_keys=revision_keys)
             source['_revision']=(fingerprint(dict(source=base_source,revisions=[(k,revisions[k]) for k in revision_keys]))
                                  if revision_keys and all(k in revisions for k in revision_keys) else None)
-        media[key]=refresh_vector(spec,'media_text',key,source,media_text(source['metadata']),old,encoder,stats)
+        item_log=(lambda operation,**fields:log('media_text',operation,**media_log_fields(key,source),**fields)) if log else None
+        media[key]=refresh_vector(spec,'media_text',key,source,media_text(source['metadata']),old,encoder,stats,log=item_log)
         progress('media_text',completed=len(media),expected=len(sources),**stats)
     progress('media_text',seconds=time.monotonic()-started)
     identity=CanonicalTitles(media)

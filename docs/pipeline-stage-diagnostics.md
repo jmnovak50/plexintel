@@ -1,5 +1,9 @@
 # Revealing stage logs: comparison with run 324
 
+The subsequent [item-visibility correction](pipeline-item-visibility.md) restores
+per-item producer messages for future runs and places media output under library
+synchronization. Missing messages from older runs remain unavailable.
+
 The reference is run **324**, started **November 2, 2026 at 07:03:21 CST**.
 Its eight original subprocess stages retain substantially more diagnostic content
 than the restored worker's periodic progress events. The current per-stage layout

@@ -57,18 +57,33 @@ test('active durations tick only during that stage span', () => {
 });
 
 
-test('single-worker runs use eight operator blocks and keep related work in their logs', () => {
+test('single-worker runs keep media embeddings under library synchronization', () => {
   const keys = ['source_sync','media_text','watch','users','training_data','train_model','score_model','shap','publication','verification','semantic_labels'];
   const details = keys.map(stage_key => ({stage_key,status: 'success',duration_seconds: 1,stdout_tail: stage_key+' log'}));
   details.find(s=>s.stage_key==='shap').duration_seconds=null;
   const stages = operatorStages([{stage_key: 'predictive_daily',status: 'success'}],details);
-  assert.equal(stages.filter(s=>!s.worker_output).length,8);
+  assert.equal(stages.filter(s=>!s.worker_output).length,7);
+  assert.equal(stages.some(s=>s.stage_key==='media_text'),false);
+  assert.match(stages[0].label,/Library synchronization and media embeddings/);
+  assert.equal(stages[0].duration_seconds,2);
   assert.equal(stages.filter(s=>s.worker_output).length,1);
   assert.equal(stages.find(s=>s.stage_key==='score_model').stdout_tail,'score_model log');
   assert.equal(stages.find(s=>s.stage_key==='publication').stdout_tail,'publication log');
   assert.equal(stages.find(s=>s.stage_key==='score_model').duration_seconds,1);
   const legacy = ['tautulli_incremental','library_embeddings','watch_embeddings','user_embeddings','training_data','train_model','score_model','batch_label'].map(stage_key=>({stage_key,status:'success'}));
   assert.deepEqual(operatorStages(legacy),legacy);
+});
+
+test('combined library stage retains embedding progress and errors', () => {
+  const grouped=operatorStages([{stage_key:'predictive_daily',status:'started'}],[
+    {stage_key:'source_sync',status:'success',duration_seconds:3,metrics:{quarantined:1}},
+    {stage_key:'media_text',status:'started',duration_seconds:4,timing_active:true,metrics:{completed:2,expected:5}}]);
+  assert.equal(grouped[0].status,'started');
+  assert.equal(grouped[0].timing_active,true);
+  assert.equal(grouped[0].duration_seconds,7);
+  assert.deepEqual(stageProgress(grouped[0].metrics),{completed:2,expected:5,percent:40});
+  assert.equal(operatorStages([{stage_key:'predictive_daily',status:'failed'}],[
+    {stage_key:'source_sync',status:'success'},{stage_key:'media_text',status:'failed'}])[0].status,'failed');
 });
 
 test('grouped verification failure and active scoring remain visible', () => {
