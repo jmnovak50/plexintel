@@ -33,6 +33,7 @@ def title(value):
 
 def item_line(value):
     op=value.get('operation');user=value.get('user','Unknown user')
+    if op=='labeling':return labeling_line(value.get('data') or {})
     if op=='embedding':return '   🎬 Embedding '+title(value)
     if op=='embedded':return '✅ Embedded '+title(value)
     if op=='reused':return '   🎬 '+title(value)+' — cached embedding reused'
@@ -56,6 +57,42 @@ def item_line(value):
         return result
     if op=='scoring_complete':return f'✅ Finished scoring {user}: {scalar(value.get("predictions","Unknown"))} scored items; {scalar(value.get("shap_targets","Unknown"))} raw SHAP explanations.\n'
     return json.dumps(value,ensure_ascii=False,indent=2)
+
+
+def labeling_line(value):
+    """Readable labeling evidence; never replace absent data with zeroes."""
+    lines=[]
+    policy=value.get('policy')
+    if isinstance(policy,dict):
+        lines.append('🔐 Labeling policy at execution: '+', '.join(
+            name+': '+scalar(policy[key]) for key,name in (
+                ('pipeline.labeling_enabled','enabled'),('pipeline.labeling_cloud_authorized','cloud authorized'),
+                ('pipeline.labeling_budget_usd','cumulative USD limit'),('pipeline.labeling_request_limit','cumulative request limit')) if key in policy))
+    if 'preparing_prompts' in value:lines.append(f'📋 Preparing contrastive evidence: {value["preparing_prompts"]} / {value.get("ranked_dimensions","unknown")} dimensions.')
+    if 'selected' in value:lines.append(f'📋 Dimensions selected: {value["selected"]}.')
+    if 'pending' in value:lines.append(f'📋 Eligible unfinished dimensions: {value["pending"]}.')
+    if value.get('event') in ('request_started','request_finished'):
+        lines.append(('☁️ Request reserved' if value['event']=='request_started' else '☁️ Request finished')+f' for dimension {value.get("dimension","unknown")}.')
+    if 'dimension' in value and 'outcome' in value:lines.append(f'🧩 Dimension {value["dimension"]}: '+str(value['outcome']).replace('_',' ')+'.')
+    for key,label in [('assessed','Dimensions assessed'),('successes','Accepted labels'),('reviews','Reviews assessed'),
+                      ('abstentions','Abstentions'),('failures','Failed assessments'),('skipped','Skipped dimensions'),('unprocessed','Unprocessed dimensions')]:
+        if key in value:lines.append(label+': '+scalar(value[key]))
+    usage=value.get('usage') or value.get('tokens') or {}
+    for key,label in [('requests','Cloud requests / attempts'),('input_tokens','Known input tokens'),('output_tokens','Known output tokens')]:
+        if key in usage:lines.append(label+': '+scalar(usage[key]))
+    if usage.get('missing_input_counts') or usage.get('missing_output_counts'):
+        lines.append('Token counts are incomplete; unknown consumption retains its cost reservation.')
+    if 'estimated_cost_usd' in usage:lines.append(f'Batch estimated / reserved cost: ${usage["estimated_cost_usd"]:.6f}')
+    cumulative=value.get('cumulative_usage') or {};limits=value.get('limits') or {}
+    if 'requests' in cumulative:
+        lines.append('Cumulative requests: '+scalar(cumulative['requests'])+(' / '+scalar(limits['request_limit']) if 'request_limit' in limits else ''))
+    if 'estimated_cost_usd' in cumulative:
+        lines.append(f'Cumulative estimated / reserved cost: ${cumulative["estimated_cost_usd"]:.6f}'+(f' / ${limits["budget_usd"]:.6f}' if 'budget_usd' in limits else ''))
+    if value.get('status'):lines.append('🏁 Labeling outcome: '+str(value['status']).replace('_',' ')+'.')
+    if value.get('reason') or value.get('stop_reason'):lines.append(str(value.get('reason') or value['stop_reason']))
+    error=value.get('error') or value.get('systemic_failure') or {}
+    if error.get('code'):lines.append('❌ '+error['code']+': '+error.get('message','Labeling failed.'))
+    return '\n'.join(lines) or json.dumps(value,ensure_ascii=False,indent=2)
 
 
 def stage_line(value):
@@ -110,6 +147,8 @@ def classification_report(name,metrics,threshold):
 
 def completion_summary(stage,fields):
     lines=[]
+    if stage=='semantic_labels' and isinstance(fields.get('semantic_labeling'),dict):
+        return labeling_line(fields['semantic_labeling'])
     if stage=='training_data' and isinstance(fields.get('summary'),dict):
         summary=fields['summary']
         for key,label in [('rows','🧠 Training rows created'),('positive','➕ Positive training rows'),('negative','➖ Negative training rows')]:

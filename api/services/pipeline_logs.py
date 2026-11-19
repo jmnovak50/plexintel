@@ -10,12 +10,12 @@ from threading import Lock
 
 from api.predictive.progress import EVENT, ITEM_EVENT
 from api.services.pipeline_service import get_pipeline_log_path
-from api.services.pipeline_log_format import item_line,stage_line,completion_summary,plain_line
+from api.services.pipeline_log_format import item_line,stage_line,completion_summary,plain_line,labeling_line
 
 WORKERS = {'predictive_daily', 'embeddinggemma2_generation'}
 GROUPS = {'source_sync': ('source_sync', 'media_text'),
           'score_model': ('score_model', 'shap'),
-          'publication': ('publication', 'verification', 'semantic_labels')}
+          'publication': ('publication', 'verification')}
 ALIASES = {'user': 'users', 'historical-features': 'training_data',
            'context': 'media_text', 'metadata': 'media_text', 'training': 'train_model',
            'scoring': 'score_model', 'validation': 'publication'}
@@ -45,6 +45,17 @@ def redact(text):
     return _redactor()(text)
 
 
+def labeling_record(value):
+    if not isinstance(value,dict):return False
+    return (('batch_id' in value and any(k in value for k in ('selected','final_status','status','next_dimension','consecutive_identical_failures')))
+        or all(k in value for k in ('dimension','progress','outcome'))
+        or all(k in value for k in ('preparing_prompts','ranked_dimensions'))
+        or 'forecast_refined_after_measurements' in value
+        or (value.get('status')=='skipped' and str(value.get('reason','')).startswith(
+            ('Automatic labeling disabled','Standing cloud authorization absent','Positive cumulative budget',
+             'No fresh verified predictive workload','No eligible unfinished dimensions'))))
+
+
 def readable_line(line, value=None):
     """Classic console presentation; recorded view retains the original fields."""
     if value is None:
@@ -54,6 +65,7 @@ def readable_line(line, value=None):
     try:
         if value.get('event') == ITEM_EVENT:return item_line(value)
         if value.get('event') == EVENT:return stage_line(value)
+        if labeling_record(value):return labeling_line(value)
     except (TypeError,ValueError,KeyError,AttributeError):
         pass  # Preserve malformed or future records rather than break history.
     return json.dumps(value,ensure_ascii=False,indent=2)
@@ -159,6 +171,7 @@ def _parse_stream(text, owner, stream, keys, emit, item_stages=None, view="opera
         key = owner
         if owner in WORKERS:
             original_key = (value.get('stage_key') or value.get('stage')) if isinstance(value, dict) else None
+            if original_key is None and labeling_record(value):original_key='semantic_labels'
             explicit = ALIASES.get(original_key, original_key) if isinstance(original_key,str) else None
             if isinstance(value,dict) and value.get('event') == ITEM_EVENT and explicit in keys and item_stages is not None:
                 item_stages.add(explicit)

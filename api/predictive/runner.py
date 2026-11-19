@@ -131,17 +131,18 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             feature_space_id=config['feature_space_id'],model_sha256=model_hash,source_sha256=code_sha,software_versions=config['software_versions'],counts=counts,summary=summary,
             evaluation=evaluation,ranking_comparison=ranking,predictive_seconds=time.monotonic()-started)
         # Normal outputs are aggregate-only. Owner/title training manifests remain in DB.
-        if label:
-            from api.services.pipeline_labeling import run_after_publication
-            result['semantic_labeling']=run_after_publication(result,output=output)
-        else:result['semantic_labeling']=dict(status='skipped',reason='Explicitly disabled for this execution')
+        from .progress import labeling_status,labeling_metrics
+        def labeling_output(value):
+            reporter.log('semantic_labels','labeling',data=value)
+            reporter.progress('semantic_labels',**labeling_metrics(value))
+        with reporter.span('semantic_labels'):
+            if label:
+                from api.services.pipeline_labeling import run_after_publication
+                result['semantic_labeling']=run_after_publication(result,output=labeling_output)
+            else:result['semantic_labeling']=dict(status='skipped',reason='Explicitly disabled for this execution')
         labeling=result['semantic_labeling']
-        reporter.elapsed['semantic_labels']=labeling.get('seconds',0.)
-        reporter.emit('semantic_labels',
-            'success' if labeling['status'] in ('success','completed','empty') else
-            labeling['status'] if labeling['status'] in ('skipped','failed') else 'not_recorded',
-            timing_known='seconds' in labeling,message=labeling.get('reason'),
-            **clean_metrics(labeling))
+        reporter.emit('semantic_labels',labeling_status(labeling['status']),
+            message=labeling.get('reason') or labeling.get('stop_reason'),**labeling_metrics(labeling))
         # Optional diagnostics/retention cannot reclassify a committed predictor.
         try:
             from .history import prune

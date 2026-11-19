@@ -132,3 +132,8 @@ Inspected public screenshots:
 - `.secrets/monitoring-visual/deployed-public-overview-dark.png`
 - `.secrets/monitoring-visual/deployed-public-legacy-dark.png`
 - `.secrets/monitoring-visual/deployed-public-mobile-dark.png`
+# Follow-up
+
+The later [dedicated labeling-stage correction](pipeline-semantic-label-stage.md)
+restores semantic labeling as the eighth card after publication/verification.
+The verification notes below describe the earlier presentation at that time.

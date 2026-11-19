@@ -40,7 +40,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(gpt,'label_output_limit',lambda v:1024)
     rows=[dict(dimension=i,side='media',completed=i==0,abstained=i==1,
                prompt=dict(prompt_text='fictional '+str(i))) for i in range(3)]
-    monkeypatch.setattr(batch,'candidates',lambda c,e:(rows,{}))
+    monkeypatch.setattr(batch,'candidates',lambda c,e,**kw:(rows,{}))
     monkeypatch.setattr(auto,'_eligible_attempts',lambda c,r,ctx,n:r)
     monkeypatch.setattr(UsageLedger,'observations',lambda *a:{})
     monkeypatch.setattr(batch,'workload_forecast',lambda *a:dict(selected_batch=dict(combined=dict(expected=dict(cost_usd=0.01)))))

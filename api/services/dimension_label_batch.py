@@ -68,7 +68,7 @@ def batch_lock():
         lock.release()
 
 
-def candidates(conn, evidence):
+def candidates(conn, evidence, *, output=None):
     ctx = evidence.context
     with conn.cursor() as cur:
         cur.execute('''SELECT s.dimension,SUM(ABS(s.shap_value)) AS priority
@@ -101,7 +101,7 @@ def candidates(conn, evidence):
         eligible.append(dict(dimension=dimension,side='media' if dimension<768 else 'user',prompt=prompt,
             completed=dimension in completed,abstained=abstained.get(dimension)==prompt_hash(prompt)))
         if position%128==0:
-            emit(dict(preparing_prompts=position,ranked_dimensions=len(ranked)))
+            (output or emit)(dict(preparing_prompts=position,ranked_dimensions=len(ranked)))
     return eligible,ineligible
 
 
@@ -168,8 +168,9 @@ def persist_result(conn, context, row, result, model, *, regenerate=False, sourc
     return saved,outcome
 
 
-def execute(conn, evidence, eligible, selected, pricing, args, prediction):
+def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, output=None):
     import gpt_utils as gpt
+    notify=output or emit
     ctx = evidence.context
     manual=not bool(getattr(args,'automation',None))
     if manual:
@@ -189,7 +190,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
     automation=getattr(args,'automation',None)
     assessment_source='manual-batch' if manual else 'daily-pipeline'
     ledger = UsageLedger(conn,batch_id,pricing,args.budget_usd,**({'automation':automation} if automation else {}))
-    summary = dict(batch_id=batch_id,selected=len(selected),successes=0,failures=0,abstentions=0,skipped=0)
+    summary = dict(batch_id=batch_id,selected=len(selected),assessed=0,reviews=0,successes=0,failures=0,abstentions=0,skipped=0)
     side_completed = dict(media=0,user=0)
     status = 'completed'
     refined = False
@@ -206,15 +207,19 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     continue
                 observations = ledger.observations(ctx['config_id'],args.label_model)
                 if observations and not refined:
-                    emit(dict(forecast_refined_after_measurements=workload_forecast(eligible,selected[position-1:],pricing,args,observations)))
+                    notify(dict(forecast_refined_after_measurements=workload_forecast(eligible,selected[position-1:],pricing,args,observations)))
                     refined = True
                 def before(attempt):
                     if current_context(conn)!=ctx:
                         raise ValueError('Production identity changed; no further cloud requests')
                     started.append(ledger.start(dimension,row['side'],attempt,row['prompt']['prompt_text'],gpt.SYSTEM_PROMPT,
                         args.max_output_tokens,observations.get(row['side'],{}).get('input_ratio',1.0)))
+                    notify(dict(event='request_started',batch_id=batch_id,dimension=dimension,side=row['side'],
+                        request_id=started[-1],usage=usage_report(conn,batch_id)['combined']))
                 def finish(attempt,usage,error):
                     ledger.finish(started[-1],usage,error)
+                    notify(dict(event='request_finished',batch_id=batch_id,dimension=dimension,side=row['side'],
+                        usage=usage_report(conn,batch_id)['combined']))
                 try:
                     result = gpt.call_llm_for_label_result(row['prompt']['prompt_text'],provider='ollama',model=args.label_model,
                         dimension_mode=row['side'],max_retries=args.max_attempts,max_output_tokens=args.max_output_tokens,
@@ -225,7 +230,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                 except BudgetExceeded as exc:
                     status = 'budget_stopped'
                     summary['stop_reason']=str(exc)
-                    emit(dict(event='budget_stop',batch_id=batch_id,next_dimension=dimension,consumed_estimated_usd=ledger.total_cost()))
+                    notify(dict(event='budget_stop',batch_id=batch_id,next_dimension=dimension,consumed_estimated_usd=ledger.total_cost()))
                     break
                 except Exception as exc:
                     summary['failures'] += 1
@@ -245,17 +250,22 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     record_assessment(cur,dimension,source=assessment_source,provider='ollama',model=args.label_model,
                         prompt=dict(row['prompt'],provenance=ctx),result=result,saved=False,outcome=outcome,before=None,after=None)
                     conn.commit()
-                    emit(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,error=diagnostic))
+                    summary['assessed']+=1
+                    summary['reviews']+=bool(row['completed'])
+                    notify(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,error=diagnostic,
+                        **{k:summary[k] for k in ('assessed','reviews','successes','failures','abstentions','skipped')},
+                        usage=usage_report(conn,batch_id)['combined']))
                     if consecutive_failures>=args.fail_fast_threshold:
                         status='systemic_failure_stopped'
                         summary.update(systemic_failure=diagnostic,consecutive_identical_failures=consecutive_failures,
                                        unprocessed_dimensions=[r['dimension'] for r in selected[position:]])
-                        emit(dict(event='systemic_failure_stop',batch_id=batch_id,error=diagnostic,
+                        notify(dict(event='systemic_failure_stop',batch_id=batch_id,error=diagnostic,
                                   consecutive_identical_failures=consecutive_failures,unprocessed=len(selected)-position))
                         break
                     continue
                 previous_failure=None;consecutive_failures=0
                 result.update(provenance=ctx,prompt_sha256=prompt_hash(row['prompt']),batch_id=batch_id)
+                review=bool(row['completed'])
                 if args.save_label:
                     saved,outcome = persist_result(conn,ctx,row,result,args.label_model,
                         regenerate=args.regenerate or args.selection_mode=='review',source=assessment_source)
@@ -274,9 +284,11 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
                     if saved:row['completed']=True
                 else:
                     summary['skipped'] += 1
+                summary['assessed']+=1
+                summary['reviews']+=review
                 usage = usage_report(conn,batch_id)
-                emit(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,
-                          tokens=usage['combined'],successes=summary['successes'],failures=summary['failures'],abstentions=summary['abstentions']))
+                notify(dict(progress=position,total=len(selected),dimension=dimension,outcome=outcome,
+                          tokens=usage['combined'],**{k:summary[k] for k in ('assessed','reviews','successes','failures','abstentions','skipped')}))
     except BaseException as exc:
         interruption=exc
         status = 'interrupted'
@@ -302,7 +314,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction):
             cur.execute('UPDATE embedding_label_batches SET status=%s,summary=%s,completed_at=now() WHERE batch_id=%s',(status,Json(summary),batch_id))
         conn.commit()
         if interruption is not None:interruption.labeling_summary=dict(summary)
-        emit(dict(final_status=status,**summary))
+        notify(dict(final_status=status,**summary))
     return summary
 
 

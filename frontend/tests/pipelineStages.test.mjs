@@ -7,7 +7,7 @@ const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.Modu
 const { stageLabels, stageMetrics, stageDuration, stageProgress, readablePipelineLog, operatorStages } = await import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'));
 
 test('production, optional, legacy and worker stages have human-readable labels', () => {
-  assert.match(stageLabels.semantic_labels, /semantic/);
+  assert.match(stageLabels.semantic_labels, /semantic/i);
   assert.match(stageLabels.predictive_daily, /worker/);
   assert.match(stageLabels.batch_label, /labeling/);
   assert.match(stageLabels.shap, /SHAP/);
@@ -62,16 +62,31 @@ test('single-worker runs keep media embeddings under library synchronization', (
   const details = keys.map(stage_key => ({stage_key,status: 'success',duration_seconds: 1,stdout_tail: stage_key+' log'}));
   details.find(s=>s.stage_key==='shap').duration_seconds=null;
   const stages = operatorStages([{stage_key: 'predictive_daily',status: 'success'}],details);
-  assert.equal(stages.filter(s=>!s.worker_output).length,7);
+  assert.equal(stages.filter(s=>!s.worker_output).length,8);
   assert.equal(stages.some(s=>s.stage_key==='media_text'),false);
   assert.match(stages[0].label,/Library synchronization and media embeddings/);
   assert.equal(stages[0].duration_seconds,2);
   assert.equal(stages.filter(s=>s.worker_output).length,1);
   assert.equal(stages.find(s=>s.stage_key==='score_model').stdout_tail,'score_model log');
   assert.equal(stages.find(s=>s.stage_key==='publication').stdout_tail,'publication log');
+  assert.equal(stages.filter(s=>!s.worker_output).at(-1).stage_key,'semantic_labels');
   assert.equal(stages.find(s=>s.stage_key==='score_model').duration_seconds,1);
   const legacy = ['tautulli_incremental','library_embeddings','watch_embeddings','user_embeddings','training_data','train_model','score_model','batch_label'].map(stage_key=>({stage_key,status:'success'}));
   assert.deepEqual(operatorStages(legacy),legacy);
+});
+
+test('labeling is the eighth independent stage for every operational outcome', () => {
+  const keys=['source_sync','media_text','watch','users','training_data','train_model','score_model','shap','publication','verification','semantic_labels'];
+  for (const status of ['pending','started','skipped','success','failed','cancelled','not_recorded']) {
+    const details=keys.map(stage_key=>({stage_key,status:stage_key==='semantic_labels'?status:'success',duration_seconds:stage_key==='semantic_labels'?12:1}));
+    const stages=operatorStages([{stage_key:'predictive_daily',status:'success'}],details).filter(s=>!s.worker_output);
+    assert.equal(stages.length,8);
+    assert.equal(stages[7].stage_key,'semantic_labels');
+    assert.equal(stages[7].status,status);
+    assert.equal(stages[7].duration_seconds,12);
+    assert.equal(stages[6].status,'success');
+    assert.equal(stages[6].duration_seconds,2);
+  }
 });
 
 test('combined library stage retains embedding progress and errors', () => {

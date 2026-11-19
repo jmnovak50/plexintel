@@ -2,7 +2,7 @@
 import json
 from uuid import UUID
 
-from api.predictive.progress import STAGES, STAGE_NAMES, clean_metrics, event_details
+from api.predictive.progress import STAGES, STAGE_NAMES, clean_metrics, event_details,labeling_status,labeling_metrics
 
 WORKERS = {'embeddinggemma2_generation', 'predictive_daily'}
 
@@ -56,13 +56,16 @@ def supplement(details, report):
         row['metrics'] = dict(clean_metrics(metrics.get(row['stage_key'], {})), **row.get('metrics', {}))
         if row['stage_key'] == 'score_model' and report.get('verified'):
             row['message'] = 'Duration includes SHAP generation and staged prediction persistence.'
-        if row['stage_key'] == 'semantic_labels' and row['status'] == 'not_recorded':
+        if row['stage_key'] == 'semantic_labels' and row['status'] in ('not_recorded','pending'):
             labeling = report.get('semantic_labeling') or {}
-            if labeling.get('status') in ('skipped','failed','success','completed','empty'):
-                row.update(status='success' if labeling['status'] in ('completed','empty') else labeling['status'],
-                    message=labeling.get('reason'),duration_seconds=labeling.get('seconds'),
+            if not isinstance(labeling,dict):
+                if isinstance(labeling,str):row['message']='Retained labeling note: '+labeling
+                continue
+            if labeling.get('status'):
+                row.update(status=labeling_status(labeling['status']),
+                    message=labeling.get('reason') or labeling.get('stop_reason'),duration_seconds=labeling.get('seconds'),
                     timing_known='seconds' in labeling,detail_source='retained_worker_receipt')
-                row['metrics'].update(clean_metrics(labeling))
+                row['metrics'].update(labeling_metrics(labeling))
 
 
 def receipt(stage):
@@ -149,6 +152,15 @@ def enrich_runs(cur,runs):
         if not details and report and workers[-1]['stage_key'] == 'embeddinggemma2_generation':
             details = historical_details(dict(report,status='succeeded' if run.get('status') == 'success' else run.get('status'),
                 stages=report['stages'],dataset=report.get('training_dataset')))
+        if not details:
+            run['stage_detail_note']='Historical execution log retained; migration journals are not queried. Separate stage details are unavailable in retained logs.'
+        if not any(row['stage_key']=='semantic_labels' for row in details):
+            active=run.get('status') in ('pending','started','cancel_requested')
+            details.append(dict(stage_id='retained-semantic-labels',stage_key='semantic_labels',
+                label=STAGE_NAMES['semantic_labels'],status='pending' if active else 'not_recorded',
+                duration_seconds=None,timing_known=False,metrics={},
+                message='Awaiting verified publication.' if active else 'No semantic labeling outcome was retained for this execution.',
+                detail_source='unavailable',started_at=None,completed_at=None))
         if report and details:
             supplement(details, report)
             run['publication_id'] = report.get('promotion_id')
@@ -157,5 +169,3 @@ def enrich_runs(cur,runs):
                 run['semantic_labeling'] = {k:labeling[k] for k in ('status','reason') if k in labeling}
         if details:
             run['stage_details']=sorted(details,key=lambda row:list(STAGE_NAMES).index(row['stage_key']))
-        else:
-            run['stage_detail_note']='Historical execution log retained; migration journals are not queried. Separate stage details are unavailable in retained logs.'

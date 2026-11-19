@@ -212,7 +212,11 @@ def test_historical_logs_remain_visible_without_querying_retired_journals():
 def test_uncorrelated_history_preserves_original_log_instead_of_guessing_by_time():
     run=dict(stages=[dict(stage_key='embeddinggemma2_generation',stdout_tail='no receipt')])
     conn=FakeConnection([]);enrich_runs(conn.cursor(),[run])
-    assert not conn.executed and 'stage_details' not in run and 'stage_detail_note' in run
+    assert not conn.executed and 'stage_detail_note' in run
+    assert len(run['stage_details'])==1
+    assert run['stage_details'][0]['stage_key']=='semantic_labels'
+    assert run['stage_details'][0]['status']=='not_recorded'
+    assert run['stage_details'][0]['duration_seconds'] is None
 
 
 def test_failed_historical_quality_gate_is_not_presented_as_a_success():

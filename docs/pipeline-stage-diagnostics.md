@@ -16,7 +16,7 @@ now preserves the available equivalent details from newer runs too.
 | Classification reports and confusion matrices | The final stdout receipt contains chronological and show-held-out evaluation, per-class precision/recall/support and confusion matrices, calibration, segments, feature-group diagnostics and quality gates. These are now readable plain-text reports inside model-training stdout. Cohorts are explicitly named. |
 | Seven-threshold comparison and diagnostic best thresholds | Newer evaluation records only the fixed 0.5 threshold. No seven-threshold results, per-class F1 values or threshold winners are invented or recomputed. |
 | Individual ranked recommendation SHAP contributions | New logs retain SHAP populations and per-viewer ranking comparisons rather than those old per-card lines. The recorded ranking comparison and SHAP counts now appear inside scoring stdout. No current database population is substituted for a historical run. |
-| Semantic labeling output | The retained optional-label outcome is displayed in publication stdout; genuinely skipped labeling remains skipped. |
+| Semantic labeling output | The retained outcome is displayed in its own eighth stage after publication/verification; genuinely skipped labeling remains skipped. See [the labeling-stage correction](pipeline-semantic-label-stage.md). |
 
 ## Why the preceding correction was incomplete
 

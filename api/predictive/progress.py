@@ -30,7 +30,7 @@ STAGES = (
     ('shap', 'SHAP explanation generation'),
     ('publication', 'Production publication'),
     ('verification', 'Final verification'),
-    ('semantic_labels', 'Optional semantic dimension labeling'),
+    ('semantic_labels', 'Semantic dimension labeling'),
 )
 STAGE_NAMES = dict(STAGES)
 STATUSES = {'pending', 'started', 'success', 'failed', 'cancelled', 'skipped', 'not_recorded'}
@@ -42,6 +42,32 @@ METRICS = {'expected', 'completed', 'failed', 'pending', 'succeeded', 'reused', 
            'show_balanced_accuracy', 'quality_passed', 'new_media', 'new_watch_events',
            'quarantined', 'verified_vectors', 'poster_requests', 'seconds', 'requests'}
 METRICS.update({'successes','abstentions','input_tokens','output_tokens','total_tokens','estimated_cost_usd'})
+METRICS.update({'selected','assessed','reviews','failures','skipped','unprocessed',
+                'cumulative_requests','cumulative_cost_usd','budget_usd','request_limit'})
+
+
+def labeling_status(value):
+    if value in ('success','completed','empty'):return 'success'
+    if value in ('skipped','budget_stopped'):return 'skipped'
+    if value == 'cancelled':return 'cancelled'
+    return 'failed'
+
+
+def labeling_metrics(value):
+    """Project only recorded counters; absent historical counts stay unknown."""
+    result=clean_metrics(value)
+    result.pop('seconds',None)  # Stage spans, not batch counters, own the clock.
+    usage=value.get('usage') or value.get('tokens') or {}
+    result.update(clean_metrics(usage))
+    cumulative=value.get('cumulative_usage') or {}
+    for source,target in [('requests','cumulative_requests'),('estimated_cost_usd','cumulative_cost_usd')]:
+        if source in cumulative:result[target]=cumulative[source]
+    for key in ('budget_usd','request_limit'):
+        if key in value.get('limits',{}):result[key]=value['limits'][key]
+    if 'assessed' in result:result['completed']=result['assessed']
+    if 'selected' in result:result['expected']=result['selected']
+    elif isinstance(value.get('total'),int):result['expected']=value['total']
+    return clean_metrics(result)
 
 
 def clean_metrics(values):

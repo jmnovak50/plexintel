@@ -18,13 +18,20 @@ POLICY_KEYS=('pipeline.labeling_enabled','pipeline.labeling_cloud_authorized',
              'pipeline.labeling_budget_usd','pipeline.labeling_request_limit')
 
 
-def limits(conn=None):
+def _observe(output,value):
+    try:
+        if output:output(value)
+    except Exception:pass
+
+
+def limits(conn=None, *, observe=None):
     """Resolve one strict policy snapshot, locked through reservation if supplied."""
     try:
         resolved=resolve_settings(keys=POLICY_KEYS,require_database=True,conn=conn,lock=conn is not None)
     except (SettingsUnavailableError,SettingsValidationError):
         raise BudgetExceeded('Authoritative automatic labeling policy unavailable') from None
     policy={key:resolved[key].value for key in POLICY_KEYS}
+    _observe(observe,dict(event='labeling_policy',policy=policy))
     if policy['pipeline.labeling_enabled'] is not True:raise BudgetExceeded('Automatic labeling disabled')
     if policy['pipeline.labeling_cloud_authorized'] is not True:raise BudgetExceeded('Standing cloud authorization absent')
     cost=float(policy['pipeline.labeling_budget_usd'])
@@ -43,8 +50,28 @@ def _eligible_attempts(conn,eligible,context,max_attempts):
     return [r for r in eligible if used.get((r['dimension'],batch.prompt_hash(r['prompt'])),0)<max_attempts]
 
 
-def _run(conn,result,caps):
+def _run(conn,result,caps,*,output=None):
     import gpt_utils as gpt
+    observed={}
+    def notify(value):
+        if output:
+            value=dict(value,limits=caps)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute('SAVEPOINT labeling_log_usage')
+                    try:
+                        cur.execute('''SELECT COUNT(*),COALESCE(SUM(r.estimated_cost_usd),0)
+                            FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
+                            WHERE b.forecast->>'automation_scope'=%s''',(SCOPE,))
+                        requests,cost=cur.fetchone()
+                    except Exception:
+                        cur.execute('ROLLBACK TO SAVEPOINT labeling_log_usage')
+                        raise
+                    finally:cur.execute('RELEASE SAVEPOINT labeling_log_usage')
+                value['cumulative_usage']=dict(requests=requests,estimated_cost_usd=float(cost))
+                observed['cumulative_usage']=value['cumulative_usage']
+            except Exception:pass  # Observation cannot authorize or stop a request.
+            _observe(output,value)
     if result.get('verification_only') or not result.get('verified'):
         raise ValueError('Fresh verified predictive publication required')
     from api.predictive.artifacts import current_config
@@ -58,8 +85,10 @@ def _run(conn,result,caps):
             ORDER BY created_at DESC LIMIT 1''',(SCOPE,result['run_id'],result['promotion_id']))
         previous=cur.fetchone()
     if previous:
-        return dict(previous[2],batch_id=previous[0],status=previous[1],reused=True,
-                    reason='Existing terminal batch recovered without another provider request')
+        outcome=dict(previous[2],batch_id=previous[0],status=previous[1],reused=True,
+                     reason='Existing terminal batch recovered without another provider request')
+        notify(outcome)
+        return dict(outcome,limits=caps,**observed)
     context=current_context(conn)
     if (context['publication_id']!=result['promotion_id'] or context['model_sha256']!=result['model_sha256']):
         raise ValueError('Current production differs from the verified daily publication')
@@ -81,7 +110,7 @@ def _run(conn,result,caps):
         raise LabelingError('AUTOMATIC_PRICING_UNKNOWN','configuration','Configured model has no supported default pricing; automatic requests are blocked') from None
     evidence=Evidence(conn,args.top_n)
     if evidence.context!=context:raise ValueError('Label evidence provenance changed')
-    eligible,ineligible=batch.candidates(conn,evidence)
+    eligible,ineligible=batch.candidates(conn,evidence,output=notify)
     eligible=_eligible_attempts(conn,eligible,context,args.max_attempts)
     if args.regenerate:
         with conn.cursor() as cur:
@@ -93,7 +122,10 @@ def _run(conn,result,caps):
             finished={r[0] for r in cur.fetchall()}
         eligible=[r for r in eligible if r['dimension'] not in finished]
     selected=batch.choose(eligible,args)
-    if not selected:return dict(status='empty',reason='No eligible unfinished dimensions within attempt limits',selected=0)
+    notify(dict(event='labeling_selection',selected=len(selected),
+                pending=sum(not row['completed'] and not row['abstained'] for row in eligible)))
+    if not selected:return dict(status='empty',reason='No eligible unfinished dimensions within attempt limits',selected=0,
+        assessed=0,usage=dict(requests=0,estimated_cost_usd=0.),limits=caps,**observed)
     # Existing refresh semantics remain explicit and bounded to this selection.
     if args.regenerate:args.dimensions=[row['dimension'] for row in selected]
     prompts={str(r['dimension']):batch.prompt_hash(r['prompt']) for r in selected}
@@ -104,7 +136,8 @@ def _run(conn,result,caps):
     prediction.update(automation_scope=SCOPE,automation_prompts=prompts,
                       automation_publication_id=context['publication_id'],automation_run_id=result['run_id'])
     conn.rollback();conn.set_session(readonly=False,isolation_level='READ COMMITTED')
-    return batch.execute(conn,evidence,eligible,selected,pricing,args,prediction)
+    outcome=batch.execute(conn,evidence,eligible,selected,pricing,args,prediction,output=notify)
+    return dict(outcome,limits=caps,**observed)
 
 
 def run_after_publication(result,*,output=lambda value:None):
@@ -117,11 +150,13 @@ def run_after_publication(result,*,output=lambda value:None):
         return dict(status='skipped',reason='No fresh verified predictive workload')
     started=time.perf_counter()
     try:
-        try:caps=limits()
-        except BudgetExceeded as exc:return dict(status='skipped',reason=str(exc))
-        with closing(connect_db()) as conn:
-            conn.set_session(readonly=False,isolation_level='READ COMMITTED')
-            outcome=_run(conn,result,caps)
+        try:caps=limits(observe=output)
+        except BudgetExceeded as exc:outcome=dict(status='skipped',reason=str(exc),assessed=0,
+            usage=dict(requests=0,estimated_cost_usd=0.))
+        else:
+            with closing(connect_db()) as conn:
+                conn.set_session(readonly=False,isolation_level='READ COMMITTED')
+                outcome=_run(conn,result,caps,output=output)
     except BaseException as exc:
         diagnostic=failure_diagnostic(exc)
         outcome=dict(status='interrupted' if isinstance(exc,(KeyboardInterrupt,SystemExit)) else 'failed',

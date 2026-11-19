@@ -23,7 +23,8 @@ actual events in emission order.
   Long panes scroll. Opening a run loads all currently available stage output,
   using bounded pages internally rather than cutting output to a tail or summary.
 - The existing chronological operator grouping is preserved. SHAP events remain
-  in scoring; verification and optional-label events remain in publication.
+  in scoring; verification remains in publication. Semantic labeling has its own
+  eighth stage, as described in [the labeling-stage correction](pipeline-semantic-label-stage.md).
   Their output preserves the worker file's emission order, including interleaved
   events. Original legacy subprocess stages retain their own stream ownership.
 - Structured progress records remain separate readable log entries; plain script

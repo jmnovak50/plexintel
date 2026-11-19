@@ -9,7 +9,7 @@ export const stageLabels: Record<string, string> = {
   shap: "SHAP explanation generation",
   publication: "Production publication",
   verification: "Final verification",
-  semantic_labels: "Optional semantic dimension labeling",
+  semantic_labels: "Semantic dimension labeling",
   predictive_daily: "Predictive pipeline worker",
   embeddinggemma2_generation: "Archived pipeline worker",
   tautulli_incremental: "Tautulli / library synchronization",
@@ -115,15 +115,15 @@ export function operatorStages<T extends LogStage>(stages: T[], details?: T[]): 
   if (!stages.some(s => ["predictive_daily", "embeddinggemma2_generation"].includes(s.stage_key))) return stages;
   const recorded = details || stages.filter(s => !["predictive_daily", "embeddinggemma2_generation"].includes(s.stage_key));
   if (!recorded.length) return stages;
-  // Keep the earlier execution-stage view. SHAP runs within scoring; verification
-  // and optional labeling belong to the publication log, not extra UI cards.
+  // SHAP runs within scoring and verification completes publication. Optional
+  // labeling has its own outcome and must never change publication's status.
   const groups = [["source_sync", "media_text"], ["watch"], ["users"], ["training_data"],
-    ["train_model"], ["score_model", "shap"], ["publication", "verification", "semantic_labels"]];
+    ["train_model"], ["score_model", "shap"], ["publication", "verification"], ["semantic_labels"]];
   const grouped = groups.flatMap(keys => {
     const children = keys.map(key => recorded.find(s => s.stage_key === key)).filter((s): s is T => !!s);
     if (!children.length) return [];
     const primary = children[0];
-    const required = children.filter(s => s.stage_key !== "semantic_labels");
+    const required = children;
     const status = required.find(s => s.status === "failed" || s.status === "cancelled")?.status
       || (required.some(s => s.status === "started") ? "started" : primary.status);
     const active = required.find(s => s.status === "started");

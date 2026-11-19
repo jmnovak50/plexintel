@@ -62,7 +62,9 @@ def test_archived_final_stdout_receipt_recovers_available_stages_without_journal
     run=dict(status='success',stages=[dict(stage_key='embeddinggemma2_generation',stdout_tail=json.dumps(report))])
     conn=FakeConnection([]);enrich_runs(conn.cursor(),[run])
     details={s['stage_key']:s for s in run['stage_details']}
-    assert len(details)==10
+    assert len(details)==11
+    assert details['semantic_labels']['status']=='not_recorded'
+    assert details['semantic_labels']['duration_seconds'] is None
     assert details['source_sync']['duration_seconds']==10
     assert details['score_model']['metrics']['predictions']==100
     assert details['shap']['duration_seconds'] is None
