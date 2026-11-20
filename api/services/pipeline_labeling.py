@@ -123,7 +123,7 @@ def _run(conn,result,caps,*,output=None):
         eligible=[r for r in eligible if r['dimension'] not in finished]
     selected=batch.choose(eligible,args)
     notify(dict(event='labeling_selection',selected=len(selected),
-                pending=sum(not row['completed'] and not row['abstained'] for row in eligible)))
+                pending=sum(bool(row.get('review_due')) or (not row['completed'] and not row['abstained']) for row in eligible)))
     if not selected:return dict(status='empty',reason='No eligible unfinished dimensions within attempt limits',selected=0,
         assessed=0,usage=dict(requests=0,estimated_cost_usd=0.),limits=caps,**observed)
     # Existing refresh semantics remain explicit and bounded to this selection.

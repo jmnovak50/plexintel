@@ -99,7 +99,7 @@ def test_batch_progress_observes_actual_attempts_acceptances_reviews_and_abstent
     from api.services import dimension_label_batch as batch
     from api.services.labeling_costs import Pricing
     ctx=dict(config_id='fictional-config',feature_space_id='fictional-space')
-    requests=[];events=[]
+    requests=[];events=[];review_calls=[]
     class Ledger:
         def __init__(self,*a,**kw):pass
         def observations(self,*a):return {}
@@ -118,17 +118,21 @@ def test_batch_progress_observes_actual_attempts_acceptances_reviews_and_abstent
     monkeypatch.setattr(batch,'current_context',lambda c:ctx)
     monkeypatch.setattr(batch,'dimension_review_guard',lambda *a:nullcontext(True))
     monkeypatch.setattr(batch,'validate_sample_counts',lambda value,prompt:value)
-    monkeypatch.setattr(batch,'persist_result',lambda c,ctx,row,*a,**kw:(row['dimension']==12,'updated_review_label' if row['dimension']==12 else 'abstained'))
+    def persist(c,ctx,row,*a,**kw):
+        review_calls.append(kw['regenerate'])
+        return row['dimension']==12,'updated_review_label' if row['dimension']==12 else 'abstained'
+    monkeypatch.setattr(batch,'persist_result',persist)
     monkeypatch.setattr(batch,'workload_forecast',lambda *a:dict(all_remaining={}))
     monkeypatch.setattr(gpt,'call_llm_for_label_result',label)
     args=batch.parser().parse_args(['--label','--save-label']);args.automation={'scope':'fictional'}
     args.label_model='fictional';args.max_output_tokens=1024
-    rows=[dict(dimension=12,side='media',completed=True,prompt=dict(prompt_text='review')),
+    rows=[dict(dimension=12,side='media',completed=True,review_due=True,prompt=dict(prompt_text='review')),
           dict(dimension=24,side='media',completed=False,prompt=dict(prompt_text='abstain'))]
     evidence=MagicMock(context=ctx)
     result=batch.execute(MagicMock(),evidence,rows,rows,Pricing(),args,
         dict(selected_batch=dict(combined=dict(expected=dict(cost_usd=.02)))),output=events.append)
     assert requests==[12,24]
+    assert review_calls==[True,False]
     assert result['assessed']==2 and result['reviews']==1 and result['successes']==1 and result['abstentions']==1
     started=[e for e in events if e.get('event')=='request_started']
     assert [e['usage']['requests'] for e in started]==[1,2]

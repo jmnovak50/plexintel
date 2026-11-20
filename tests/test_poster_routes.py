@@ -22,6 +22,10 @@ def _response(status_code: int, content_type: str):
 class PosterRouteTests(unittest.TestCase):
     def setUp(self):
         poster_service.fetch_tautulli_server_identifier.cache_clear()
+        persistence=patch.object(poster_service,'persist_plex_server_identifier')
+        self.persist_identifier=persistence.start()
+        self.addCleanup(persistence.stop)
+        self.addCleanup(poster_service.fetch_tautulli_server_identifier.cache_clear)
 
     def test_is_image_response_requires_image_content_type(self):
         self.assertTrue(poster_service._is_image_response(_response(200, "image/png")))

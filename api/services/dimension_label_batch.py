@@ -78,14 +78,18 @@ def candidates(conn, evidence, *, output=None):
                 AND r.scored_at=context.scored_at
             WHERE context.config_id=%s AND context.model_version=%s
                 AND s.dimension BETWEEN 0 AND 1535 AND s.shap_value::text NOT IN ('NaN','Infinity','-Infinity')
-            GROUP BY s.dimension HAVING COUNT(*) FILTER(WHERE s.shap_value>0)>0
+            GROUP BY s.dimension
             ORDER BY priority DESC,s.dimension''',(ctx['config_id'],ctx['model_sha256']))
         ranked = [r[0] for r in cur.fetchall()]
         cur.execute('''SELECT dimension FROM embedding_dimension_admin WHERE config_id=%s AND paused''',(ctx['config_id'],))
         paused = {r[0] for r in cur.fetchall()}
-        cur.execute('''SELECT saved.dimension FROM embedding_labels saved JOIN embedding_feature_config c ON c.active
+        cur.execute('''SELECT saved.dimension,COALESCE(saved.needs_review,false)
+                AND (saved.next_review_at IS NULL OR saved.next_review_at<=now()) AS review_due
+            FROM embedding_labels saved JOIN embedding_feature_config c ON c.active
             WHERE NULLIF(BTRIM(saved.label),'') IS NOT NULL AND '''+compatible_label_sql())
-        completed = {r[0] for r in cur.fetchall()}
+        saved_rows=cur.fetchall()
+        completed = {r[0] for r in saved_rows}
+        review_due = {r[0] for r in saved_rows if r[1]}
         cur.execute('''SELECT DISTINCT ON (dimension) dimension,result->>'prompt_sha256' FROM embedding_dimension_assessments
             WHERE config_id=%s AND outcome='abstained' AND result->'provenance'->>'feature_space_id'=%s
             ORDER BY dimension,assessment_id DESC''',(ctx['config_id'],ctx['feature_space_id']))
@@ -99,7 +103,8 @@ def candidates(conn, evidence, *, output=None):
             ineligible['insufficient_contrast'] += 1
             continue
         eligible.append(dict(dimension=dimension,side='media' if dimension<768 else 'user',prompt=prompt,
-            completed=dimension in completed,abstained=abstained.get(dimension)==prompt_hash(prompt)))
+            completed=dimension in completed,review_due=dimension in review_due,
+            abstained=abstained.get(dimension)==prompt_hash(prompt)))
         if position%128==0:
             (output or emit)(dict(preparing_prompts=position,ranked_dimensions=len(ranked)))
     return eligible,ineligible
@@ -118,7 +123,9 @@ def choose(eligible, args):
     else:
         rows = [r for r in eligible if scope(r)]
     if not args.regenerate and args.selection_mode!='review':
-        rows = [r for r in rows if not r['completed'] and not r['abstained']]
+        rows = [r for r in rows if (args.selection_mode=='eligible' and r.get('review_due'))
+                or (not r['completed'] and not r['abstained'])]
+        if args.selection_mode=='eligible':rows.sort(key=lambda r:bool(r.get('review_due')))
     if args.selection_mode=='review' and not dimensions:
         rows = [r for r in rows if r['completed']]
     return rows if args.all_remaining else rows[:args.limit]
@@ -127,14 +134,16 @@ def choose(eligible, args):
 def workload_forecast(eligible, selected, pricing, args, observations):
     import gpt_utils as gpt
     args.max_output_tokens=gpt.label_output_limit(args.max_output_tokens)
-    remaining = [r for r in eligible if not r['completed'] and not r['abstained']]
+    unfinished=lambda r:r.get('review_due') or (not r['completed'] and not r['abstained'])
+    remaining = [r for r in eligible if unfinished(r)]
     common = dict(system=gpt.SYSTEM_PROMPT,output_limit=args.max_output_tokens,attempts=args.max_attempts,observations=observations)
     counts = {}
     for side in ('media','user'):
         rows = [r for r in eligible if r['side']==side]
-        counts[side] = dict(inventory=768,eligible=len(rows),already_labeled=sum(r['completed'] for r in rows),
+        counts[side] = dict(inventory=768,eligible=len(rows),already_labeled=sum(r['completed'] and not r.get('review_due',False) for r in rows),
+            review_due=sum(bool(r.get('review_due')) for r in rows),
             completed_abstentions=sum(r['abstained'] and not r['completed'] for r in rows),
-            remaining=sum(not r['completed'] and not r['abstained'] for r in rows))
+            remaining=sum(bool(unfinished(r)) for r in rows))
     return dict(interpretation_model=args.label_model,label_provider=args.label_provider,
                 model_source=getattr(args,'model_source','explicit invocation'),
                 counts=counts,selected_batch=forecast(selected,pricing,**common),
@@ -268,7 +277,7 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, ou
                 review=bool(row['completed'])
                 if args.save_label:
                     saved,outcome = persist_result(conn,ctx,row,result,args.label_model,
-                        regenerate=args.regenerate or args.selection_mode=='review',source=assessment_source)
+                        regenerate=args.regenerate or args.selection_mode=='review' or bool(row.get('review_due')),source=assessment_source)
                 else:
                     saved,outcome = False,'candidate_not_saved'
                     record_assessment(cur,dimension,source=assessment_source,provider='ollama',model=args.label_model,
@@ -277,11 +286,11 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, ou
                 if result.get('label')==gpt.UNCLEAR_LABEL:
                     summary['abstentions'] += 1
                     side_completed[row['side']] += 1
-                    if args.save_label:row['abstained']=True
+                    if args.save_label:row.update(abstained=True,review_due=False)
                 elif saved or not args.save_label:
                     summary['successes'] += 1
                     side_completed[row['side']] += 1
-                    if saved:row['completed']=True
+                    if saved:row.update(completed=True,review_due=False)
                 else:
                     summary['skipped'] += 1
                 summary['assessed']+=1
