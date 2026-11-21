@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +17,8 @@ from psycopg2.extras import RealDictCursor
 from psycopg2 import sql
 
 from api.db.connection import connect_db
+from api.predictive.contracts import (ContractError,ENGAGEMENT_SETTING_KEYS,
+    configured_engagement_thresholds)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -506,15 +509,29 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
     _setting(
         "training.engagement_threshold",
         "training_scoring",
-        "Training Engagement Threshold",
+        "Positive Engagement Minimum",
         "float",
-        default=0.7,
+        default=0.60,
         minimum=0.0,
         maximum=1.0,
         description=(
-            "Completion ratio required for a watch to count as engaged during training. Raise this if the model is "
-            "treating casual sampling as a positive signal. Lower it if users often stop early but still liked the "
-            "item, or if you need more positive training examples."
+            "Minimum cumulative watched ratio for a positive passive training label (0.60 = 60%). "
+            "Must be greater than Negative Engagement Maximum. Ratios between the two remain unclassified; "
+            "explicit-feedback rules are unchanged. Applied by the next ordinary training execution."
+        ),
+    ),
+    _setting(
+        "training.negative_engagement_threshold",
+        "training_scoring",
+        "Negative Engagement Maximum",
+        "float",
+        default=0.35,
+        minimum=0.0,
+        maximum=1.0,
+        description=(
+            "Maximum cumulative watched ratio for a negative passive training label (0.35 = 35%). "
+            "Must be less than Positive Engagement Minimum. Existing meaningful-viewing minimums and "
+            "movie/TV revisit windows still apply. Applied by the next ordinary training execution."
         ),
     ),
     _setting(
@@ -1407,6 +1424,8 @@ def parse_value(definition: SettingDefinition, value: Any) -> Any:
     else:
         raise SettingsValidationError(f"unsupported setting type: {definition.value_type}")
 
+    if definition.key in ENGAGEMENT_SETTING_KEYS and parsed_value is not None and not math.isfinite(parsed_value):
+        raise SettingsValidationError(f'{definition.label} must be a finite proportion between 0 and 1')
     if parsed_value is not None and definition.choices and str(parsed_value) not in definition.choices:
         choices = ", ".join(definition.choices)
         raise SettingsValidationError(f"must be one of: {choices}")
@@ -1754,6 +1773,18 @@ def save_settings(*, updates: dict[str, Any], clear_keys: Iterable[str], updated
     conn = connect_db()
     try:
         ensure_settings_schema(conn)
+        if set(ENGAGEMENT_SETTING_KEYS).intersection(set(normalized_updates) | set(normalized_clears)):
+            # Serialize pair validation and writes, including an absent new setting.
+            # This uses the existing settings table and short transaction only.
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL('LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE').format(
+                    sql.Identifier(*SETTINGS_TABLE.split('.'))))
+            proposed={key:get_setting_definition(key).default for key in normalized_clears}
+            proposed.update({key:definition.default if value is None else value
+                             for key,(definition,value) in normalized_updates.items()})
+            effective=resolve_settings(keys=ENGAGEMENT_SETTING_KEYS,overrides=proposed,require_database=True,conn=conn)
+            try:configured_engagement_thresholds({key:value.value for key,value in effective.items()})
+            except ContractError as exc:raise SettingsValidationError(str(exc)) from None
         with conn.cursor() as cur:
             for key in normalized_clears:
                 cur.execute(

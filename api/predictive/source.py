@@ -7,7 +7,7 @@ from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.app_settings import resolve_settings
-from .contracts import ContractError, fingerprint
+from .contracts import ContractError, fingerprint, configured_engagement_thresholds
 from .io import Plex, SourceError, call
 
 
@@ -27,7 +27,7 @@ def settings():
           'scoring.watched_engagement_threshold','training.movie_revisit_pending_days',
           'training.tv_revisit_pending_days','training.interested_sample_weight',
           'training.watched_like_sample_weight','training.negative_sample_weight','training.feedback_bonus',
-          'training.engagement_threshold','training.enable_feedback','training.use_sample_weight',
+          'training.engagement_threshold','training.negative_engagement_threshold','training.enable_feedback','training.use_sample_weight',
           'scoring.shap_targeting_strategy','scoring.shap_max_items','scoring.shap_max_items_overall',
           'scoring.shap_max_items_movie','scoring.shap_max_items_tv','scoring.shap_raw_min_dims',
           'scoring.shap_raw_max_dims','scoring.shap_raw_cumabs_target','scoring.shap_prune_days',
@@ -41,8 +41,7 @@ def settings():
                          ('training.negative_sample_weight',5.),('training.feedback_bonus',.1)]:
         if float(values[key])!=expected:
             raise ContractError('Changed label weights require a separately versioned label contract')
-    if float(values['training.engagement_threshold'])!=.6:
-        raise ContractError('Configured training engagement threshold differs from the approved 0.60 label contract')
+    configured_engagement_thresholds(values)
     if values['training.enable_feedback'] is not True or values['training.use_sample_weight'] is not True:
         raise ContractError('The approved supervised policy requires feedback and sample weights; conflicting configuration requires explicit review')
     return values

@@ -4,7 +4,7 @@ from datetime import timedelta
 import hashlib
 import numpy as np
 from .profiles import qualifying_profiles, runtime_seconds
-from .contracts import ContractError, FEATURE_VERSION, LABEL_VERSION, cosine, fingerprint, utc, vector, modality_contract
+from .contracts import ContractError, FEATURE_VERSION, LABEL_VERSION, cosine, fingerprint, utc, vector, modality_contract, engagement_thresholds
 from .recovery import CanonicalTitles, IdentityError, IDENTITY_POLICY
 SUPERVISION_POLICY = 'canonical-retrospective-feedback/1.0'
 FOUR_STATE_SOURCE_AT = '2026-03-07T18:13:11+00:00'
@@ -116,8 +116,10 @@ def feature_row(inputs, media, watches, events, owner, target, cutoff, *, exclud
             details.update(identity_policy=IDENTITY_POLICY, canonical_target=identity.identity(target), target_aliases=sorted(target_aliases), identity_index_hash=identity.signature)
     return dict(owner=owner, media_key=target, embedding=fused, genres=description['genres'] or (description.get('show_context') or {}).get('genres', []), directors=description['directors'], year=description['year'], watch_sim=watch_sim, history_titles=len(keys), media_type=description['media_type'], dependencies=details, show_key=identity.group(target) if identity else str(parent['source'].get('show_rating_key') or target), **dict(canonical_identity=identity.identity(target), identity_policy=IDENTITY_POLICY) if identity else {})
 
-def label_for(events, feedback, runtime, kind, as_of, *, movie_days=21, tv_days=14):
-    """Port of active legacy label rules, intentionally retaining 0.60, not 0.70."""
+def label_for(events, feedback, runtime, kind, as_of, *, movie_days=21, tv_days=14,
+              positive_minimum=0.60, negative_maximum=0.35):
+    """Existing supervision rules with configurable passive engagement boundaries."""
+    thresholds=engagement_thresholds(positive_minimum,negative_maximum)
     explicit = {'interested': (1, 0.75, 'explicit_interest'), 'never_watch': (0, 5.0, 'explicit_reject'), 'watched_like': (1, 3.0, 'explicit_watched_like'), 'watched_dislike': (0, 5.0, 'explicit_watched_dislike')}
     if events and (not runtime or runtime <= 0):
         return None
@@ -131,9 +133,9 @@ def label_for(events, feedback, runtime, kind, as_of, *, movie_days=21, tv_days=
     ratio = sum(played) / runtime
     maximum = max(played)
     weight = min(1.0 + 0.5 * len(played), 5.0)
-    if ratio >= 0.6:
+    if ratio >= thresholds['positive_minimum']:
         return (1, weight, 'watch_history')
-    meaningful = maximum >= 120 and ratio <= 0.35 and (maximum >= 600 or maximum / runtime >= 0.05)
+    meaningful = maximum >= 120 and ratio <= thresholds['negative_maximum'] and (maximum >= 600 or maximum / runtime >= 0.05)
     if meaningful:
         last = max((utc(e['watched_at']) for e in events))
         days = tv_days if kind == 'episode' else movie_days
@@ -254,6 +256,7 @@ def training_plan(inputs, media, identity=None, *, progress=lambda value: None):
     """
     identity = identity or CanonicalTitles(media)
     snapshot = inputs['snapshot']
+    thresholds=engagement_thresholds(**inputs.get('label_thresholds',{}))
     candidates, initial = unseen_training_candidates(snapshot, media, identity)
     skips = defaultdict(int, initial)
     by_owner, feedback = (defaultdict(list), defaultdict(list))
@@ -270,7 +273,7 @@ def training_plan(inputs, media, identity=None, *, progress=lambda value: None):
             progress(dict(stage='historical-features', expected=len(candidates), completed=index, failed=0, phase='canonical eligibility, labels and historical support'))
         parent = media[key]
         kind = parent['source']['metadata']['media_type']
-        label = label_for(events, f, runtime_seconds(parent), kind, snapshot['as_of'], movie_days=inputs['contract'].get('movie_revisit_days', 21), tv_days=inputs['contract'].get('tv_revisit_days', 14))
+        label = label_for(events, f, runtime_seconds(parent), kind, snapshot['as_of'], movie_days=inputs['contract'].get('movie_revisit_days', 21), tv_days=inputs['contract'].get('tv_revisit_days', 14), **thresholds)
         if label is None:
             skips['label_policy'] += 1
             continue
@@ -299,10 +302,10 @@ def training_plan(inputs, media, identity=None, *, progress=lambda value: None):
             skips['future_label'] += 1
             continue
         auxiliary = [row for row in feedback[owner, identity.identity(key)] if row is not f]
-        watch_label = label_for(events, None, runtime_seconds(parent), kind, snapshot['as_of'], movie_days=inputs['contract'].get('movie_revisit_days', 21), tv_days=inputs['contract'].get('tv_revisit_days', 14))
+        watch_label = label_for(events, None, runtime_seconds(parent), kind, snapshot['as_of'], movie_days=inputs['contract'].get('movie_revisit_days', 21), tv_days=inputs['contract'].get('tv_revisit_days', 14), **thresholds)
         conflicts = sum((row['feedback'] in ('watched_like', 'watched_dislike') and watch_label is not None and (watch_label[0] != int(row['feedback'] == 'watched_like')) for row in auxiliary))
         observation = 'retrospective_explicit_feedback' if f and f['feedback'] in ('watched_like', 'watched_dislike') else 'pre_viewing_intent' if f else 'first_recorded_watch'
-        rows.append(dict(owner=owner, media_key=key, canonical_identity=identity.identity(key), identity_policy=IDENTITY_POLICY, supervision_policy=SUPERVISION_POLICY, show_key=identity.group(key), label=label[0], sample_weight=label[1], label_source=label[2], prediction_at=cutoff.isoformat(), label_available_at=label_available.isoformat(), label_version=LABEL_VERSION, feedback_value=f['feedback'] if f else None, observation_kind=observation, feedback_provenance=feedback_provenance(f), auxiliary_feedback_count=len(auxiliary), auxiliary_feedback_conflicts=conflicts, played_duration=int(sum((e['played_seconds'] or 0 for e in events))), media_duration=int(runtime_seconds(parent) or 0), engagement_ratio=sum((e['played_seconds'] or 0 for e in events)) / (runtime_seconds(parent) or 1) if events else 0.1 if label[0] else 0.0, season_number=parent['source']['metadata']['season_number'], episode_number=parent['source']['metadata']['episode_number']))
+        rows.append(dict(owner=owner, media_key=key, canonical_identity=identity.identity(key), identity_policy=IDENTITY_POLICY, supervision_policy=SUPERVISION_POLICY, show_key=identity.group(key), label=label[0], sample_weight=label[1], label_source=label[2], prediction_at=cutoff.isoformat(), label_available_at=label_available.isoformat(), label_version=LABEL_VERSION, label_thresholds=dict(thresholds), feedback_value=f['feedback'] if f else None, observation_kind=observation, feedback_provenance=feedback_provenance(f), auxiliary_feedback_count=len(auxiliary), auxiliary_feedback_conflicts=conflicts, played_duration=int(sum((e['played_seconds'] or 0 for e in events))), media_duration=int(runtime_seconds(parent) or 0), engagement_ratio=sum((e['played_seconds'] or 0 for e in events)) / (runtime_seconds(parent) or 1) if events else 0.1 if label[0] else 0.0, season_number=parent['source']['metadata']['season_number'], episode_number=parent['source']['metadata']['episode_number']))
     return (rows, dict(skips))
 
 def planned_text_rows(inputs, media, watches, plan, identity, *, progress=lambda value: None):
@@ -318,6 +321,7 @@ def planned_text_rows(inputs, media, watches, plan, identity, *, progress=lambda
             raise ContractError('Historical feature support differs from training plan')
         row.update(fields)
         row['dependencies']['supervision_policy'] = SUPERVISION_POLICY
+        row['dependencies']['label_thresholds'] = row['label_thresholds']
         yield row
     progress(dict(stage='historical-features', expected=len(plan), completed=len(plan), failed=0))
 

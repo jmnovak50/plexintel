@@ -8,11 +8,33 @@ WATCH_SCOPE_VERSION='library-linked-unembedded-quarantine/1.0'
 PROFILE_VERSION='canonical-text-mean/1.0'
 FEATURE_VERSION=TEXT_FEATURE_VERSION='canonical-text-user/1.0'
 LABEL_VERSION='legacy-engagement-060/1.0'
+# These are supervised-fit parameters, not encoder/coordinate-space parameters.
+# Missing metadata on an incumbent means the historically fixed 0.60/0.35 pair.
+POSITIVE_ENGAGEMENT_DEFAULT=0.60
+NEGATIVE_ENGAGEMENT_DEFAULT=0.35
+ENGAGEMENT_SETTING_KEYS=('training.engagement_threshold','training.negative_engagement_threshold')
 DIMENSIONS=768
 CAST_LIMIT=20
 POSTER_HIERARCHY='unused-text-only'
 class ContractError(ValueError):
     pass
+
+def engagement_thresholds(positive_minimum=POSITIVE_ENGAGEMENT_DEFAULT, negative_maximum=NEGATIVE_ENGAGEMENT_DEFAULT):
+    positive,negative=positive_minimum,negative_maximum
+    try:
+        if isinstance(positive,bool) or isinstance(negative,bool):raise ValueError
+        positive,negative=float(positive),float(negative)
+        if not all(math.isfinite(v) and 0<=v<=1 for v in (positive,negative)):raise ValueError
+    except (TypeError,ValueError,OverflowError):
+        raise ContractError('Positive Engagement Minimum and Negative Engagement Maximum must be finite proportions between 0 and 1') from None
+    if negative>=positive:
+        raise ContractError(f'Negative Engagement Maximum ({negative:g}) must be strictly below Positive Engagement Minimum ({positive:g})')
+    return dict(positive_minimum=positive,negative_maximum=negative)
+
+def configured_engagement_thresholds(policy=None):
+    policy=policy or {}
+    return engagement_thresholds(policy.get(ENGAGEMENT_SETTING_KEYS[0],POSITIVE_ENGAGEMENT_DEFAULT),
+                                 policy.get(ENGAGEMENT_SETTING_KEYS[1],NEGATIVE_ENGAGEMENT_DEFAULT))
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)

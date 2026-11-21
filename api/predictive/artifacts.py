@@ -1,7 +1,7 @@
 """Ordinary checksum-addressed model files; public feature config is the pointer."""
 import hashlib,io,json,os,tempfile
 from pathlib import Path
-from .contracts import ContractError,fingerprint
+from .contracts import ContractError,fingerprint,engagement_thresholds
 from .recovery import IDENTITY_POLICY
 
 
@@ -33,6 +33,18 @@ def load_model(config):
         or bundle['contract_hash']!=config['contract_hash'] or fingerprint(config['contract'])!=config['contract_hash']
         or bundle['identity_policy']!=IDENTITY_POLICY or bundle['supervision_policy']!=SUPERVISION_POLICY):
         raise ContractError('Model/configuration/policy mismatch')
+    # Historical artifacts genuinely used the fixed default pair. Never compare
+    # an incumbent with today's mutable settings or rewrite its provenance.
+    if ('label_thresholds' in bundle)!=('label_thresholds' in config):
+        raise ContractError('Model/configuration engagement threshold metadata mismatch')
+    if 'label_thresholds' in bundle:
+        for item in (bundle,config):
+            values=item['label_thresholds']
+            if not isinstance(values,dict) or set(values)!={'positive_minimum','negative_maximum'}:
+                raise ContractError('Invalid model engagement threshold metadata')
+            engagement_thresholds(**values)
+        if bundle['label_thresholds']!=config['label_thresholds']:
+            raise ContractError('Model/configuration engagement threshold metadata mismatch')
     vocabulary=Vocabulary(**bundle['vocabulary'])
     if vocabulary.names!=bundle['feature_names']:raise ContractError('Feature map mismatch')
     return bundle,vocabulary
@@ -56,4 +68,5 @@ def model_config(inputs,bundle,path,digest,evaluation):
         feature_groups=groups,feature_names=bundle['feature_names'],embedding_features=bundle['feature_names'][:1536],
         model_path=path,model_sha256=digest,dataset_hash=bundle['dataset_hash'],evaluation=evaluation,
         identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
-        shap_output='raw margin (log-odds)',poster_inference='disabled/1.0')
+        shap_output='raw margin (log-odds)',poster_inference='disabled/1.0',
+        **({'label_thresholds':bundle['label_thresholds']} if 'label_thresholds' in bundle else {}))

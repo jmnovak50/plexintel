@@ -5,7 +5,7 @@ import hashlib,json,time
 from uuid import uuid4
 import numpy as np
 from psycopg2 import sql
-from .contracts import ContractError,fingerprint,specification,modality_contract,media_text,watch_text,vector
+from .contracts import ContractError,fingerprint,specification,modality_contract,media_text,watch_text,vector,configured_engagement_thresholds
 from .recovery import CanonicalTitles,IdentityError,Resolver,POLICY
 from .features import ProfileContext,training_rows,SUPERVISION_POLICY,unseen_candidate_keys
 from .eligibility_quarantine import profile_exclusions
@@ -60,7 +60,8 @@ def refresh_vector(spec,kind,key,source,text,old,encoder,stats,*,log=None):
 def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False,policy=None,progress=lambda stage,**metrics:None,log=None):
     spec=specification(encoder.identity,policy=policy)
     spec.update(identity_policy='verified-canonical-unseen-title/1.0',supervision_policy=SUPERVISION_POLICY)
-    inputs=dict(contract=spec,contract_hash=fingerprint(spec),feature_space_id=fingerprint(spec),snapshot=snapshot)
+    inputs=dict(contract=spec,contract_hash=fingerprint(spec),feature_space_id=fingerprint(spec),snapshot=snapshot,
+        label_thresholds=configured_engagement_thresholds(policy))
     sources={str(row['rating_key']):row for row in snapshot['media']}
     resolver=Resolver(plex,sources,associations)
     resolver.catalog=[];revisions={}
@@ -128,7 +129,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
     if not rows:raise ContractError('No leakage-safe training observations')
     identities=[(r['owner'],r['canonical_identity']) for r in rows]
     if len(identities)!=len(set(identities)):raise ContractError('Duplicate canonical training outcome')
-    summary=dict(rows=len(rows),positive=sum(r['label'] for r in rows),negative=sum(1-r['label'] for r in rows),skips=skips,
+    summary=dict(label_thresholds=inputs['label_thresholds'],rows=len(rows),positive=sum(r['label'] for r in rows),negative=sum(1-r['label'] for r in rows),skips=skips,
         sources=dict(Counter(r['label_source'] for r in rows)),observations=dict(Counter(r['observation_kind'] for r in rows)),
         provenance=dict(Counter(r['feedback_provenance'] for r in rows)),blocked_users=blocked,
         historical_metadata='Current descriptive snapshot, not a point-in-time metadata replay',

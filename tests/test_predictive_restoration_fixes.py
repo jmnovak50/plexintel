@@ -111,7 +111,7 @@ def test_configured_explanation_allocations_and_cumulative_dimensions():
     assert raw_shap(np.array([1.,2.]),policy)==[]
 
 
-def test_policy_database_read_is_strict_and_incompatible_labels_fail_explicitly(monkeypatch):
+def test_policy_database_read_is_strict_and_configurable_boundaries_are_validated(monkeypatch):
     from api.services.app_settings import get_setting_definition
     resolver=Mock(side_effect=lambda **kw:{k:SimpleNamespace(value=(.6 if k=='training.engagement_threshold' else get_setting_definition(k).default)) for k in kw['keys']})
     monkeypatch.setattr(source,'resolve_settings',resolver)
@@ -120,7 +120,9 @@ def test_policy_database_read_is_strict_and_incompatible_labels_fail_explicitly(
     assert values['training.engagement_threshold']==.6
     values['training.engagement_threshold']=.7
     resolver.side_effect=lambda **kw:{k:SimpleNamespace(value=values[k]) for k in kw['keys']}
-    with pytest.raises(ContractError,match='0.60 label contract'):source.settings()
+    assert source.settings()['training.engagement_threshold']==.7
+    values['training.negative_engagement_threshold']=.7
+    with pytest.raises(ContractError,match='strictly below'):source.settings()
 
 
 def test_explanation_settings_preserve_all_prediction_values_and_ranks(example):

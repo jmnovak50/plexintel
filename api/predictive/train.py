@@ -1,12 +1,15 @@
 """Chronological and show-held-out validation, then a distinct all-data fit."""
 from collections import Counter
-from .contracts import ContractError,fingerprint
+from .contracts import ContractError,fingerprint,engagement_thresholds
 from .features import Vocabulary,chronological_split,feature_row,show_heldout_plan,SUPERVISION_POLICY,compact_row
 from .recovery import CanonicalTitles,IDENTITY_POLICY
 from .model import fit,fit_compare
 
 
 def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda **metrics:None):
+    thresholds=engagement_thresholds(**inputs.get('label_thresholds',{}))
+    if any(engagement_thresholds(**r.get('label_thresholds',{}))!=thresholds for r in rows):
+        raise ContractError('Training rows and configured engagement thresholds differ')
     fit_rows,validation,boundary=chronological_split(rows)
     chronological=fit_compare(fit_rows,validation,include_poster=False,progress=lambda metrics:progress(**metrics))
     identity=CanonicalTitles(media)
@@ -30,7 +33,7 @@ def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda 
     gates=dict(chronological_balanced_accuracy=chronological['balanced_accuracy'] is not None and chronological['balanced_accuracy']>=.5,
         show_balanced_accuracy=show['balanced_accuracy'] is not None and show['balanced_accuracy']>=.5,
         average_precision=incumbent_ap is None or chronological['average_precision']>=incumbent_ap-.05)
-    evaluation=dict(chronological=chronological,show_heldout=show,boundary=boundary.isoformat(),show_support_skips=skips,
+    evaluation=dict(label_thresholds=thresholds,chronological=chronological,show_heldout=show,boundary=boundary.isoformat(),show_support_skips=skips,
         gates=gates,incumbent_average_precision=incumbent_ap,
         threshold=.5,final_model_evaluation='No independent held-out score: final classifier is fitted on all eligible rows.',
         limitation='Repeated release validation, selected labeled candidates, current descriptive metadata; not an untouched prospective test.')
@@ -38,7 +41,7 @@ def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda 
         error=ContractError('Existing model quality gate failed; nothing published');error.evaluation=evaluation;raise error
     vocabulary=Vocabulary.fit(rows,include_poster=False)
     classifier=fit(rows,vocabulary,progress=lambda metrics:progress(**metrics))
-    bundle=dict(feature_space_id=inputs['feature_space_id'],contract_hash=inputs['contract_hash'],
+    bundle=dict(label_thresholds=thresholds,feature_space_id=inputs['feature_space_id'],contract_hash=inputs['contract_hash'],
         identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
         feature_names=vocabulary.names,vocabulary=vocabulary.specification(),model=classifier,dataset_hash=summary['dataset_hash'])
     return bundle,vocabulary,evaluation
