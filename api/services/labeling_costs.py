@@ -149,6 +149,30 @@ def failure_signature(diagnostic):
     return (diagnostic['code'],tuple(details.get('missing_fields',[])),tuple(details.get('invalid_fields',[])))
 
 
+def cumulative_usage(conn,scope):
+    """Known tokens and charged reservations; unknown provider counts stay explicit."""
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute('''SELECT COUNT(*) AS requests,
+            COALESCE(SUM(r.estimated_cost_usd),0) AS estimated_cost_usd,
+            COALESCE(SUM(r.input_tokens),0) AS input_tokens,
+            COALESCE(SUM(r.cached_input_tokens),0) AS cached_input_tokens,
+            COALESCE(SUM(r.output_tokens),0) AS output_tokens,
+            COUNT(*) FILTER(WHERE r.input_tokens IS NULL) AS missing_input_counts,
+            COUNT(*) FILTER(WHERE r.output_tokens IS NULL) AS missing_output_counts,
+            COUNT(*) FILTER(WHERE r.cached_input_tokens IS NULL) AS missing_cached_input_counts,
+            COUNT(*) FILTER(WHERE r.status='pending') AS pending,
+            COUNT(*) FILTER(WHERE r.status='failed') AS failed,
+            COUNT(*) FILTER(WHERE r.attempt>1) AS retries
+            FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
+            WHERE b.forecast->>'automation_scope'=%s''',(scope,))
+        result=dict(cur.fetchone())
+    result['estimated_cost_usd']=float(result['estimated_cost_usd'])
+    for key in set(result)-{'estimated_cost_usd'}:result[key]=int(result[key])
+    result['total_tokens']=result['input_tokens']+result['output_tokens']
+    result['token_totals_are_complete']=not(result['missing_input_counts'] or result['missing_output_counts'])
+    return result
+
+
 class UsageLedger:
     def __init__(self, conn, batch_id, pricing, budget=None, *, automation=None):
         self.conn,self.batch_id,self.pricing,self.budget = conn,batch_id,pricing,budget
@@ -175,8 +199,8 @@ class UsageLedger:
                     JOIN embedding_label_batches b USING(batch_id) WHERE b.forecast->>'automation_scope'=%s''',
                     (self.automation['scope'],))
                 cost,requests=cur.fetchone()
-                if Decimal(str(cost))+Decimal(str(reserved))>Decimal(str(caps['budget_usd'])) or requests>=caps['request_limit']:
-                    raise BudgetExceeded('Cumulative automatic labeling budget/request limit reached')
+                if Decimal(str(cost))+Decimal(str(reserved))>Decimal(str(caps['budget_usd'])):
+                    raise BudgetExceeded('Cumulative labeling financial allowance would be exceeded')
                 cur.execute('''SELECT COUNT(*) FROM embedding_label_requests r JOIN embedding_label_batches b USING(batch_id)
                     WHERE b.forecast->>'automation_scope'=%s AND b.feature_space_id=%s AND r.dimension=%s
                     AND b.forecast->'automation_prompts'->>%s=%s''',

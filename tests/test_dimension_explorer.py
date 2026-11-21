@@ -40,7 +40,7 @@ def test_admin_routes_guard_every_read_and_action():
     app.include_router(dimension_admin_routes.router)
     app.dependency_overrides[admin_routes.get_current_user] = lambda: {'username':'ordinary','is_admin':False}
     client = TestClient(app)
-    for url in ['/admin/dimensions','/admin/dimensions/1','/admin/dimensions/prediction?username=a&rating_key=1&scored_at=x']:
+    for url in ['/admin/dimensions','/admin/dimensions/labeling-runs','/admin/dimensions/1','/admin/dimensions/prediction?username=a&rating_key=1&scored_at=x']:
         assert client.get(url).status_code == 403
     assert client.post('/admin/dimensions/1/actions',json=dict(config_id='x',version=0,action='pause',reason='fixture')).status_code == 403
     def anonymous():

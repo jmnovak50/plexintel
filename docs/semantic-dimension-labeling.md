@@ -7,8 +7,9 @@ Ollama integration. Both batch labeling and Dimension Explorer review use this
 setting. An explicit CLI `--label-model` overrides it for that invocation only.
 The resolved model and configuration source are shown in the forecast and stored
 with results. Manual batches and Dimension Explorer reviews remain available.
-The local integration adds an optional post-publication daily stage using this
-same implementation; it is not deployed or enabled by this document.
+The optional post-publication daily stage uses this same implementation. The
+November 20, 2026 correction below describes the deployed controls for both
+daily execution and the standalone CLI.
 
 Labels are approximate semantic interpretations of coordinates. They are not
 proven causal explanations of XGBoost predictions. Prediction probabilities,
@@ -38,7 +39,6 @@ run's labeling record. Core and complete worker durations are reported separatel
 | `pipeline.labeling_enabled` | Existing enablement switch; **insufficient by itself**, including its historical `true` value |
 | `pipeline.labeling_cloud_authorized` | New standing authorization, default **false**. Explicitly permits transmission of the existing prompt evidence to the configured cloud interpreter; viewer names are aliased, but titles and engagement evidence remain potentially sensitive |
 | `pipeline.labeling_budget_usd` | New cumulative automatic reserved/estimated USD ceiling, default **0** |
-| `pipeline.labeling_request_limit` | New cumulative automatic provider-attempt limit, default **0**; includes retries, pending and interrupted requests |
 | `labeling.provider`, `labeling.ollama_model` | Existing Setup provider/model. Current-generation batches require `ollama`; normal Gemma 4 choice is `gemma4:31b-cloud`. Unknown model pricing blocks requests |
 | `labeling.ollama_host`, `ollama.host`, `ollama.api_key` / key file | Existing label endpoint, fallback host and credentials; never the embedding model setting |
 | `pipeline.label_batch_limit`, `pipeline.label_dim_type` | Existing per-publication selection limit (default 25) and media/user/all scope |
@@ -47,11 +47,10 @@ run's labeling record. Core and complete worker durations are reported separatel
 | `labeling.max_output_tokens`, advanced labeling settings | Existing output cap, evidence counts, HIGH coverage, LOW overlap, and governance rules |
 | Existing batch parser/provider retry controls | Three attempts and fail-fast threshold three by default; transient retries use the existing backoff, permanent errors stop retrying. Automatic attempts for the same generation/dimension/prompt are counted across batches, so restarting cannot reset the three-attempt allowance |
 
-The three new settings appear through the existing generic Pipeline settings UI;
-no new screen or configuration subsystem is required. Their environment aliases
-are `PIPELINE_LABELING_CLOUD_AUTHORIZED`, `PIPELINE_LABELING_BUDGET_USD` and
-`PIPELINE_LABELING_REQUEST_LIMIT`. Enablement, authorization and positive limits
-must all hold before requests. The four controls resolve in one strict database
+These settings appear through the existing generic Pipeline settings UI. Standing
+authorization and the financial ceiling use `PIPELINE_LABELING_CLOUD_AUTHORIZED`
+and `PIPELINE_LABELING_BUDGET_USD`. Enablement, authorization and a positive finite
+financial allowance must all hold before requests. The three controls resolve in one strict database
 read; environment defaults apply only after a successful read establishes that
 no stored override exists. An unavailable database or malformed policy blocks
 requests rather than falling back to stale environment authorization or limits.
@@ -63,8 +62,9 @@ every batch UUID, model/publication change and restart before inserting a new
 reservation. Old pending attempts stay charged. Automatic successes retain at
 least their original conservative reservation; larger metered estimates are
 charged. Budgets are **not daily allowances**: an operator must explicitly raise
-the cumulative ceilings to authorize more work. Manual CLI budgets remain their
-existing separate per-batch scope. Do not delete usage history to reset a limit.
+the cumulative ceilings to authorize more work. Manual CLI execution uses the same standing policy and cumulative financial
+ceiling. An explicit `--budget-usd` can add a tighter per-batch ceiling; it cannot
+bypass standing authorization or the cumulative ceiling. Do not delete usage history to reset a limit.
 The existing read-only `--usage` report adds an `automatic` total, separate from
 manual batches, so cumulative pending/retry consumption can be reconciled.
 
@@ -79,7 +79,7 @@ the authorization boundary: later policy changes govern subsequent reservations
 and cannot cancel a request already admitted. Unrelated generic settings retain
 their existing fallback behavior; no settings schema or admin screen changed.
 
-These controls enforce request counts and a conservative estimated ledger ceiling,
+These controls enforce a conservative estimated ledger ceiling,
 not an exact provider invoice: token estimation, prices and provider billing can
 differ, and one response can report consumption above its reservation. No further
 request starts once the cap is exhausted. Use provider-side spending/credit controls
@@ -201,19 +201,20 @@ Forecast the first 25 eligible dimensions in existing SHAP priority order,
 without inference or label writes:
 
 ```bash
-plexenv/bin/python batch_label_embeddings.py --dry-run --dim-type all --limit 25
+plexenv/bin/python batch_label_embeddings.py --dry-run --selection-mode eligible --dim-type all --limit 25
 ```
 
-Label and save that batch, with an optional $1 batch budget:
+After standing authorization and a positive cumulative allowance are configured,
+label and save that batch, with an optional tighter $1 batch budget:
 
 ```bash
-plexenv/bin/python batch_label_embeddings.py --label --save-label --dim-type all --limit 25 --budget-usd 1.00
+plexenv/bin/python batch_label_embeddings.py --label --save-label --selection-mode eligible --dim-type all --limit 25 --budget-usd 1.00
 ```
 
 Continue with another batch, or resume after interruption, using the same command:
 
 ```bash
-plexenv/bin/python batch_label_embeddings.py --label --save-label --dim-type all --limit 25 --budget-usd 1.00
+plexenv/bin/python batch_label_embeddings.py --label --save-label --selection-mode eligible --dim-type all --limit 25 --budget-usd 1.00
 ```
 
 Each invocation skips successfully saved current-generation labels by default.

@@ -1188,15 +1188,12 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "pipeline jobs."
         ),
     ),
-    _setting('pipeline.labeling_cloud_authorized','pipeline','Authorize unattended cloud labeling','boolean',default=False,
+    _setting('pipeline.labeling_cloud_authorized','pipeline','Standing cloud labeling authorization','boolean',default=False,
              env_aliases=('PIPELINE_LABELING_CLOUD_AUTHORIZED',),
-             description='Standing authorization to send the existing anonymized semantic-label evidence to the configured Ollama cloud label model after verified publication. Enable Batch Labeling alone is insufficient.'),
-    _setting('pipeline.labeling_budget_usd','pipeline','Cumulative automatic labeling budget (USD)','float',default=0.,minimum=0.,
+             description='Standing authorization for daily and manual semantic-label batches to send the existing anonymized evidence to the configured Ollama cloud label model. Enable Batch Labeling alone is insufficient.'),
+    _setting('pipeline.labeling_budget_usd','pipeline','Cumulative labeling budget (USD)','float',default=0.,minimum=0.,
              env_aliases=('PIPELINE_LABELING_BUDGET_USD',),
              description='Cumulative estimated/reserved USD ceiling for all automatic batches, including interrupted attempts. Does not reset per batch, publication or restart. Increase explicitly to authorize more consumption; provider invoices can differ from estimates.'),
-    _setting('pipeline.labeling_request_limit','pipeline','Cumulative automatic labeling request limit','integer',default=0,minimum=0,
-             env_aliases=('PIPELINE_LABELING_REQUEST_LIMIT',),
-             description='Maximum total automatic provider attempts, including retries and pending/interrupted requests, across all batches and restarts. Zero blocks automatic requests.'),
     _setting(
         "pipeline.label_batch_limit",
         "pipeline",

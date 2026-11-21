@@ -14,7 +14,6 @@ from psycopg2.extras import Json
 
 from api.services import pipeline_labeling as auto,dimension_label_batch as batch
 from api.services.labeling_costs import UsageLedger,Pricing,BudgetExceeded,usage_report
-from tests.test_embedding_generation_database import store
 from tests.test_semantic_labeling import response
 
 
@@ -22,7 +21,7 @@ from tests.test_semantic_labeling import response
 def setup(monkeypatch):
     import gpt_utils as gpt
     settings={'pipeline.labeling_enabled':True,'pipeline.labeling_cloud_authorized':True,
-              'pipeline.labeling_budget_usd':1.,'pipeline.labeling_request_limit':10}
+              'pipeline.labeling_budget_usd':1.}
     monkeypatch.setattr(auto,'get_setting_value',lambda key,default=None:settings.get(key,default))
     monkeypatch.setattr(auto,'resolve_settings',lambda **kw:{key:SimpleNamespace(value=settings[key]) for key in kw['keys']})
     ctx=dict(feature_space_id='generation',publication_id='publication',model_sha256='model',config_id='config')
@@ -40,7 +39,9 @@ def setup(monkeypatch):
     monkeypatch.setattr(gpt,'label_output_limit',lambda v:1024)
     rows=[dict(dimension=i,side='media',completed=i==0,abstained=i==1,
                prompt=dict(prompt_text='fictional '+str(i))) for i in range(3)]
-    monkeypatch.setattr(batch,'candidates',lambda c,e,**kw:(rows,{}))
+    monkeypatch.setattr(batch,'candidates',lambda c,e,**kw:([r for r in rows if r['dimension'] not in kw.get('exclude_dimensions',())],{}))
+    monkeypatch.setattr(auto,'_attempt_counts',lambda *a:{})
+    monkeypatch.setattr(auto,'cumulative_usage',lambda *a:dict(requests=1000,estimated_cost_usd=0.,input_tokens=200,output_tokens=100,total_tokens=300))
     monkeypatch.setattr(auto,'_eligible_attempts',lambda c,r,ctx,n:r)
     monkeypatch.setattr(UsageLedger,'observations',lambda *a:{})
     monkeypatch.setattr(batch,'workload_forecast',lambda *a:dict(selected_batch=dict(combined=dict(expected=dict(cost_usd=0.01)))))
@@ -53,7 +54,7 @@ def setup(monkeypatch):
 
 
 @pytest.mark.parametrize('key,value',[('pipeline.labeling_enabled',False),('pipeline.labeling_cloud_authorized',False),
-    ('pipeline.labeling_budget_usd',0.),('pipeline.labeling_request_limit',0),('pipeline.labeling_budget_usd',float('nan'))])
+    ('pipeline.labeling_budget_usd',0.),('pipeline.labeling_budget_usd',float('nan'))])
 def test_disabled_unauthorized_or_unbudgeted_never_opens_label_connection(setup,key,value):
     settings,result,summary,conn,cur,connect,evidence,execute,store,events,run=setup
     settings[key]=value
@@ -114,7 +115,7 @@ def test_terminal_label_work_is_not_repeated_after_restart(setup):
 
 def test_budget_and_authorization_can_be_revoked_between_attempts(setup):
     settings,*_=setup
-    assert auto.limits()['request_limit']==10
+    assert auto.limits()==dict(budget_usd=1.)
     settings['pipeline.labeling_cloud_authorized']=False
     with pytest.raises(BudgetExceeded):auto.limits()
 
@@ -136,22 +137,32 @@ def test_unsupported_legacy_selection_is_not_silently_reinterpreted(setup):
 
 
 @pytest.fixture
-def ledger_db(store):
+def ledger_db():
+    import os
+    from api.db.connection import connect_db
+    from psycopg2.extras import RealDictCursor
+    if os.getenv('PLEXINTEL_TEST_TEMP_DB')!='1':pytest.skip('Opt-in connection-private labeling SQL fixture')
+    conn=connect_db()
+    def query(statement,args=(),*,many=False):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(statement,args)
+            if cur.description:return cur.fetchall() if many else cur.fetchone()
     text=Path('api/db/migrations/005_semantic_dimension_labeling.sql').read_text()
     for match in re.finditer(r'CREATE TABLE IF NOT EXISTS public.embedding_label_(?:batches|requests) \([\s\S]*?\n\);',text):
-        store.query(match[0].replace('public.','pg_temp.').replace('generation_id text NOT NULL,','generation_id text,feature_space_id text,'))
-    store.conn.commit()
-    return store
+        query(match[0].replace('public.','pg_temp.').replace('generation_id text NOT NULL,','generation_id text,feature_space_id text,'))
+    conn.commit()
+    try:yield SimpleNamespace(conn=conn,query=query)
+    finally:conn.close()
 
 
-def new_auto_ledger(db,*,cap=1.,request_limit=100,prompt='same-prompt',max_attempts=3):
+def new_auto_ledger(db,*,cap=1.,prompt='same-prompt',max_attempts=3):
     batch_id=str(uuid4());pricing=Pricing()
     forecast=dict(automation_scope=auto.SCOPE,automation_prompts={'0':prompt})
     db.query('''INSERT INTO pg_temp.embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing)
         VALUES(%s,'config','generation','gemma4:31b-cloud','[0]',%s,%s)''',(batch_id,Json(forecast),Json(vars(pricing))))
     db.conn.commit()
     limits=dict(scope=auto.SCOPE,feature_space_id='generation',prompts={'0':prompt},max_attempts=max_attempts,
-                limits=lambda conn:dict(budget_usd=cap,request_limit=request_limit))
+                limits=lambda conn:dict(budget_usd=cap))
     return UsageLedger(db.conn,batch_id,pricing,automation=limits)
 
 
@@ -166,7 +177,7 @@ def test_sql_budget_survives_new_uuid_pending_requests_and_ledger_restart(ledger
     assert usage_report(ledger_db.conn)['automatic']['pending']==1
 
 
-def test_sql_attempt_and_request_limits_survive_restarts_and_record_true_retry_number(ledger_db):
+def test_sql_attempt_limits_survive_restarts_without_a_cumulative_request_cap(ledger_db):
     for attempt in range(1,4):
         ledger=new_auto_ledger(ledger_db)
         request=ledger.start(0,'media',1,'fictional','system',1024)
@@ -174,8 +185,9 @@ def test_sql_attempt_and_request_limits_survive_restarts_and_record_true_retry_n
     restarted=new_auto_ledger(ledger_db)
     with pytest.raises(BudgetExceeded,match='per-prompt'):restarted.start(0,'media',1,'fictional','system',1024)
     ledger_db.conn.rollback()
-    other_prompt=new_auto_ledger(ledger_db,request_limit=3,prompt='new-prompt')
-    with pytest.raises(BudgetExceeded,match='Cumulative'):other_prompt.start(0,'media',1,'fictional','system',1024)
+    other_prompt=new_auto_ledger(ledger_db,prompt='new-prompt')
+    other_prompt.start(0,'media',1,'fictional','system',1024)
+    assert usage_report(ledger_db.conn)['automatic']['requests']==4
 
 
 def test_sql_metered_success_cannot_release_automatic_reservation(ledger_db):
@@ -183,6 +195,50 @@ def test_sql_metered_success_cannot_release_automatic_reservation(ledger_db):
     reserved=ledger.total_cost()
     ledger.finish(request,dict(prompt_eval_count=1,eval_count=1),None)
     assert ledger.total_cost()>=reserved
+
+
+def test_sql_more_than_one_hundred_requests_are_monitoring_only(ledger_db):
+    from api.services.labeling_costs import cumulative_usage
+    ledger=new_auto_ledger(ledger_db)
+    ledger_db.query('''INSERT INTO pg_temp.embedding_label_requests
+        (batch_id,dimension,side,attempt,estimated_input_tokens,reserved_input_tokens,reserved_output_tokens,estimated_cost_usd)
+        SELECT %s,0,'media',1,100,100,100,.001 FROM generate_series(1,100)''',(ledger.batch_id,))
+    ledger_db.conn.commit()
+    next_batch=new_auto_ledger(ledger_db,prompt='different-evidence')
+    request=next_batch.start(0,'media',1,'fictional','system',1024)
+    totals=cumulative_usage(ledger_db.conn,auto.SCOPE)
+    assert totals['requests']==101 and totals['pending']==101
+    assert not totals['token_totals_are_complete'] and totals['missing_input_counts']==101
+    next_batch.finish(request,dict(prompt_eval_count=100,eval_count=50),None)
+    totals=cumulative_usage(ledger_db.conn,auto.SCOPE)
+    assert totals['input_tokens']==100 and totals['output_tokens']==50
+    assert totals['requests']==101 and totals['estimated_cost_usd']>=.1
+
+
+def test_sql_real_policy_ignores_retired_setting_but_rechecks_finances_and_authorization(ledger_db,monkeypatch):
+    from api.services import app_settings
+    ledger_db.query('''CREATE TEMP TABLE app_settings(key text PRIMARY KEY,raw_value text,source text,
+        updated_at timestamptz,updated_by text,description text)''')
+    for key,value in [('pipeline.labeling_enabled','true'),('pipeline.labeling_cloud_authorized','true'),
+            ('pipeline.labeling_budget_usd','1'),('pipeline.labeling_request_limit','not-a-valid-limit')]:
+        ledger_db.query('INSERT INTO pg_temp.app_settings(key,raw_value,source) VALUES(%s,%s,\'fixture\')',(key,value))
+    ledger_db.conn.commit()
+    monkeypatch.setattr(app_settings,'SETTINGS_TABLE','pg_temp.app_settings')
+    ledger=new_auto_ledger(ledger_db)
+    ledger.automation['limits']=auto.limits
+    assert auto.limits(ledger_db.conn)==dict(budget_usd=1.)
+    ledger.start(0,'media',1,'fictional','system',1024)
+    spent=ledger.total_cost()
+    ledger_db.query("UPDATE pg_temp.app_settings SET raw_value=%s WHERE key='pipeline.labeling_budget_usd'",(str(spent),))
+    ledger_db.conn.commit()
+    with pytest.raises(BudgetExceeded,match='financial allowance'):ledger.start(0,'media',1,'fictional','system',1024)
+    ledger_db.conn.rollback()
+    ledger_db.query("UPDATE pg_temp.app_settings SET raw_value='1' WHERE key='pipeline.labeling_budget_usd'")
+    ledger_db.query("UPDATE pg_temp.app_settings SET raw_value='false' WHERE key='pipeline.labeling_cloud_authorized'")
+    ledger_db.conn.commit()
+    with pytest.raises(BudgetExceeded,match='authorization'):ledger.start(0,'media',1,'fictional','system',1024)
+    ledger_db.conn.rollback()
+    assert usage_report(ledger_db.conn)['automatic']['requests']==1
 
 
 def test_sql_revoked_authorization_never_reserves_or_requests(ledger_db):
@@ -213,7 +269,7 @@ def test_existing_batch_engine_with_mock_cloud_keeps_publication_independent(led
     args=batch.parser().parse_args([]);args.label_model='gemma4:31b-cloud';args.label_provider='ollama'
     args.max_output_tokens=1024;args.save_label=True;args.budget_usd=1.
     args.automation=dict(scope=auto.SCOPE,feature_space_id='generation',prompts={'1':batch.prompt_hash(row['prompt'])},
-                         max_attempts=3,limits=lambda conn:dict(budget_usd=1.,request_limit=10))
+                         max_attempts=3,limits=lambda conn:dict(budget_usd=1.))
     prediction=dict(automation_scope=auto.SCOPE,automation_prompts=args.automation['prompts'],
                     selected_batch=dict(combined=dict(expected=dict(cost_usd=.001))))
     monkeypatch.setattr(batch,'current_context',lambda c:context)

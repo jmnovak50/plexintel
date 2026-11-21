@@ -44,6 +44,7 @@ METRICS = {'expected', 'completed', 'failed', 'pending', 'succeeded', 'reused', 
 METRICS.update({'successes','abstentions','input_tokens','output_tokens','total_tokens','estimated_cost_usd'})
 METRICS.update({'selected','assessed','reviews','failures','skipped','unprocessed',
                 'cumulative_requests','cumulative_cost_usd','budget_usd','request_limit'})
+METRICS.update({'cached_input_tokens','cumulative_input_tokens','cumulative_output_tokens','cumulative_total_tokens'})
 
 
 def labeling_status(value):
@@ -60,7 +61,8 @@ def labeling_metrics(value):
     usage=value.get('usage') or value.get('tokens') or {}
     result.update(clean_metrics(usage))
     cumulative=value.get('cumulative_usage') or {}
-    for source,target in [('requests','cumulative_requests'),('estimated_cost_usd','cumulative_cost_usd')]:
+    for source,target in [('requests','cumulative_requests'),('estimated_cost_usd','cumulative_cost_usd'),
+            ('input_tokens','cumulative_input_tokens'),('output_tokens','cumulative_output_tokens'),('total_tokens','cumulative_total_tokens')]:
         if source in cumulative:result[target]=cumulative[source]
     for key in ('budget_usd','request_limit'):
         if key in value.get('limits',{}):result[key]=value['limits'][key]
@@ -112,6 +114,10 @@ class Reporter:
                      timing_active=key in self.running, timing_known=timing_known, metrics=dict(self.metrics[key]))
         if self.run_id:event['generation_run_id'] = self.run_id
         if message:event['message'] = message[:240]
+        # The labeling stream owns live operator messages and the final summary.
+        # Subsequent stage-state snapshots update cards without re-announcing
+        # the stage or copying those messages into stdout a second time.
+        if key=='semantic_labels' and key in self.details:event['log_output']=False
         self.details[key] = dict(event)
         self.output(event)
 

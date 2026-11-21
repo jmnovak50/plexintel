@@ -68,7 +68,7 @@ def batch_lock():
         lock.release()
 
 
-def candidates(conn, evidence, *, output=None):
+def candidates(conn, evidence, *, output=None, args=None, attempt_counts=None, exclude_dimensions=()):
     ctx = evidence.context
     with conn.cursor() as cur:
         cur.execute('''SELECT s.dimension,SUM(ABS(s.shap_value)) AS priority
@@ -95,18 +95,36 @@ def candidates(conn, evidence, *, output=None):
             ORDER BY dimension,assessment_id DESC''',(ctx['config_id'],ctx['feature_space_id']))
         abstained = dict(cur.fetchall())
     eligible,ineligible = [],dict(paused=len(paused),insufficient_contrast=0)
-    for position,dimension in enumerate(ranked,1):
-        if dimension in paused:
-            continue
+    rows=[dict(dimension=dimension,side='media' if dimension<768 else 'user',
+        completed=dimension in completed,review_due=dimension in review_due,abstained=False)
+        for dimension in ranked if dimension not in paused and dimension not in exclude_dimensions]
+    # Explicit forecasts retain full coverage. Real batches only construct the
+    # exact same prompts until enough admissible dimensions have been found.
+    bounded=args is not None and args.dimension is None and not args.dimensions
+    if bounded:
+        args.evidence_scope='selected_batch'
+        scan_args=argparse.Namespace(**dict(vars(args),all_remaining=True))
+        rows=choose(rows,scan_args)
+    prepared=0
+    for row in rows:
+        dimension=row['dimension'];prepared+=1
         prompt = evidence.prompt(dimension)
+        if bounded and prepared%16==0:
+            (output or emit)(dict(preparing_prompts=prepared,ranked_dimensions=len(ranked),
+                eligible_selected=len(eligible),batch_limit=args.limit))
         if prompt['skipped_reason']:
             ineligible['insufficient_contrast'] += 1
             continue
-        eligible.append(dict(dimension=dimension,side='media' if dimension<768 else 'user',prompt=prompt,
-            completed=dimension in completed,review_due=dimension in review_due,
-            abstained=abstained.get(dimension)==prompt_hash(prompt)))
-        if position%128==0:
-            (output or emit)(dict(preparing_prompts=position,ranked_dimensions=len(ranked)))
+        row.update(prompt=prompt,abstained=abstained.get(dimension)==prompt_hash(prompt))
+        if bounded and not choose([row],scan_args):continue
+        if attempt_counts is not None and attempt_counts.get((dimension,prompt_hash(prompt)),0)>=args.max_attempts:
+            continue
+        eligible.append(row)
+        if bounded and prepared%16!=0 or not bounded and prepared%128==0:
+            (output or emit)(dict(preparing_prompts=prepared,ranked_dimensions=len(ranked),
+                eligible_selected=len(eligible),**(dict(batch_limit=args.limit) if bounded else {})))
+        if bounded and not args.all_remaining and len(eligible)>=args.limit:break
+    if bounded:ineligible.update(prepared_prompts=prepared,ranked_dimensions=len(ranked),evidence_scope='selected_batch')
     return eligible,ineligible
 
 
@@ -144,10 +162,12 @@ def workload_forecast(eligible, selected, pricing, args, observations):
             review_due=sum(bool(r.get('review_due')) for r in rows),
             completed_abstentions=sum(r['abstained'] and not r['completed'] for r in rows),
             remaining=sum(bool(unfinished(r)) for r in rows))
+    scoped=getattr(args,'evidence_scope',None)=='selected_batch'
     return dict(interpretation_model=args.label_model,label_provider=args.label_provider,
+                evidence_scope='selected_batch' if scoped else 'full_inventory',
                 model_source=getattr(args,'model_source','explicit invocation'),
                 counts=counts,selected_batch=forecast(selected,pricing,**common),
-                all_remaining=forecast(remaining,pricing,**common))
+                all_remaining=None if scoped else forecast(remaining,pricing,**common))
 
 
 def persist_result(conn, context, row, result, model, *, regenerate=False, source='manual-batch'):
@@ -183,13 +203,24 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, ou
     ctx = evidence.context
     manual=not bool(getattr(args,'automation',None))
     if manual:
-        from api.services.pipeline_labeling import limits,SCOPE
+        from api.services.pipeline_labeling import limits,SCOPE,check_allowance
+        from api.services.labeling_costs import cumulative_usage
         caps=limits(conn)
+        check_allowance(conn,caps)
         args.budget_usd=min(args.budget_usd,caps['budget_usd']) if args.budget_usd is not None else caps['budget_usd']
         prompts={str(r['dimension']):prompt_hash(r['prompt']) for r in selected}
         args.automation=dict(scope=SCOPE,feature_space_id=ctx['feature_space_id'],
             prompts=prompts,max_attempts=args.max_attempts,limits=limits)
         prediction=dict(prediction,automation_scope=SCOPE,automation_prompts=prompts)
+        sink=notify
+        def notify(value):
+            value=dict(value,limits=caps)
+            with conn.cursor() as cur:
+                cur.execute('SAVEPOINT labeling_cli_usage')
+                try:value['cumulative_usage']=cumulative_usage(conn,SCOPE)
+                except Exception:cur.execute('ROLLBACK TO SAVEPOINT labeling_cli_usage')
+                finally:cur.execute('RELEASE SAVEPOINT labeling_cli_usage')
+            sink(value)
     batch_id = str(uuid4())
     with conn.cursor() as cur:
         cur.execute('''INSERT INTO embedding_label_batches(batch_id,config_id,feature_space_id,model,dimensions,forecast,pricing,budget_usd)
@@ -399,9 +430,19 @@ def main(argv=None):
         except ValueError as exc:
             p.error(str(exc))
         with batch_lock():
+            attempts=None
+            if args.label and not args.dry_run:
+                from api.services.pipeline_labeling import limits,check_allowance,_attempt_counts
+                caps=limits()
+                check_allowance(conn,caps)
+                if args.budget_usd is not None and args.budget_usd<=0:
+                    raise BudgetExceeded('Positive batch financial allowance required')
+                attempts=_attempt_counts(conn,current_context(conn))
+                conn.rollback()
             conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
             evidence = Evidence(conn,args.top_n)
-            eligible,ineligible = candidates(conn,evidence)
+            eligible,ineligible = candidates(conn,evidence,
+                args=args if args.label and not args.dry_run else None,attempt_counts=attempts)
             selected = choose(eligible,args)
             ledger = UsageLedger(conn,'forecast-only',pricing)
             observations = ledger.observations(evidence.context['config_id'],args.label_model)

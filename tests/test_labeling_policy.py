@@ -19,7 +19,7 @@ from tests.test_semantic_labeling import sql_db
 @pytest.fixture
 def authorized_env(monkeypatch):
     for key, value in dict(PIPELINE_LABELING_ENABLED='true', PIPELINE_LABELING_CLOUD_AUTHORIZED='true',
-                           PIPELINE_LABELING_BUDGET_USD='100', PIPELINE_LABELING_REQUEST_LIMIT='100').items():
+                           PIPELINE_LABELING_BUDGET_USD='100').items():
         monkeypatch.setenv(key, value)
 
 
@@ -44,7 +44,7 @@ def test_generic_unrelated_settings_keep_environment_fallback(monkeypatch):
 
 @pytest.mark.parametrize('key,value', [
     ('pipeline.labeling_cloud_authorized', 'false'), ('pipeline.labeling_enabled', 'false'),
-    ('pipeline.labeling_budget_usd', '0'), ('pipeline.labeling_request_limit', '0'),
+    ('pipeline.labeling_budget_usd', '0'),
     ('pipeline.labeling_cloud_authorized', 'invalid'), ('pipeline.labeling_budget_usd', 'invalid'),
 ])
 def test_stored_denial_or_invalid_policy_wins_over_conflicting_environment(setup, authorized_env, monkeypatch, key, value):
@@ -62,7 +62,7 @@ def test_authorized_environment_requires_successful_single_policy_read(authorize
     db = MagicMock(); cur = db.cursor.return_value.__enter__.return_value
     cur.fetchall.return_value = []
     monkeypatch.setattr(app_settings, 'connect_db', Mock(return_value=db))
-    assert auto.limits() == dict(budget_usd=100., request_limit=100)
+    assert auto.limits() == dict(budget_usd=100.)
     assert cur.execute.call_count == 1
     assert cur.execute.call_args.args[1] == (list(auto.POLICY_KEYS),)
     db.close.assert_called_once()
@@ -76,7 +76,7 @@ def policy_db(sql_db, monkeypatch):
     conn.set_session(isolation_level='READ COMMITTED')
     app_settings.ensure_settings_schema(conn)
     conn.commit()
-    app_settings.save_settings(updates=dict(zip(auto.POLICY_KEYS, (True, True, 1., 100))), clear_keys=[], updated_by='fixture')
+    app_settings.save_settings(updates=dict(zip(auto.POLICY_KEYS, (True, True, 1.))), clear_keys=[], updated_by='fixture')
     return conn, schema
 
 
@@ -110,7 +110,7 @@ def request_count(conn):
 
 @pytest.mark.parametrize('updates', [
     {'pipeline.labeling_cloud_authorized': False}, {'pipeline.labeling_enabled': False},
-    {'pipeline.labeling_budget_usd': .000001}, {'pipeline.labeling_request_limit': 0},
+    {'pipeline.labeling_budget_usd': .000001},
 ])
 def test_sql_committed_reduction_overrides_earlier_authorized_snapshot(policy_db, authorized_env, monkeypatch, updates):
     conn, _ = policy_db
@@ -126,7 +126,7 @@ def test_sql_committed_reduction_overrides_earlier_authorized_snapshot(policy_db
 
 def test_sql_failure_before_provider_cannot_use_earlier_snapshot(policy_db, monkeypatch):
     conn, schema = policy_db
-    assert auto.limits()['request_limit'] == 100
+    assert auto.limits()['budget_usd'] == 1.
     ledger = ledger_for(conn)
     monkeypatch.setattr(app_settings, 'SETTINGS_TABLE', schema + '.missing_settings')
     cloud, invoke = call_provider(ledger, monkeypatch)
@@ -260,15 +260,14 @@ def test_sql_connection_loss_before_provider_never_sends(policy_db, monkeypatch)
     assert request_count(conn) == 0
 
 
-@pytest.mark.parametrize('ceiling', ['budget', 'requests'])
-def test_sql_policy_and_cumulative_pending_accounting_survive_new_ledger(policy_db, monkeypatch, ceiling):
+def test_sql_policy_and_cumulative_pending_accounting_survive_new_ledger(policy_db, monkeypatch):
     conn, _ = policy_db
     first = ledger_for(conn)
     cloud, invoke = call_provider(first, monkeypatch)
     invoke(); cloud.assert_called_once()
     spent = first.total_cost()
     conn.rollback()
-    updates = {'pipeline.labeling_budget_usd': spent} if ceiling == 'budget' else {'pipeline.labeling_request_limit': 1}
+    updates = {'pipeline.labeling_budget_usd': spent}
     app_settings.save_settings(updates=updates, clear_keys=[], updated_by='fixture')
     restarted = ledger_for(conn, prompt='changed-prompt')
     cloud, invoke = call_provider(restarted, monkeypatch)

@@ -68,7 +68,10 @@ def labeling_line(value):
             name+': '+scalar(policy[key]) for key,name in (
                 ('pipeline.labeling_enabled','enabled'),('pipeline.labeling_cloud_authorized','cloud authorized'),
                 ('pipeline.labeling_budget_usd','cumulative USD limit'),('pipeline.labeling_request_limit','cumulative request limit')) if key in policy))
-    if 'preparing_prompts' in value:lines.append(f'📋 Preparing contrastive evidence: {value["preparing_prompts"]} / {value.get("ranked_dimensions","unknown")} dimensions.')
+    if 'preparing_prompts' in value:
+        lines.append(f'📋 Preparing contrastive evidence: {value["preparing_prompts"]} candidate dimensions checked'+
+            (f' (batch target: {value["batch_limit"]}).' if 'batch_limit' in value else f' / {value.get("ranked_dimensions","unknown")} dimensions.'))
+    if 'eligible_selected' in value:lines.append(f'Eligible batch dimensions found: {value["eligible_selected"]}'+(f' / {value["batch_limit"]}' if 'batch_limit' in value else ''))
     if 'selected' in value:lines.append(f'📋 Dimensions selected: {value["selected"]}.')
     if 'pending' in value:lines.append(f'📋 Eligible unfinished dimensions: {value["pending"]}.')
     if value.get('event') in ('request_started','request_finished'):
@@ -78,7 +81,8 @@ def labeling_line(value):
                       ('abstentions','Abstentions'),('failures','Failed assessments'),('skipped','Skipped dimensions'),('unprocessed','Unprocessed dimensions')]:
         if key in value:lines.append(label+': '+scalar(value[key]))
     usage=value.get('usage') or value.get('tokens') or {}
-    for key,label in [('requests','Cloud requests / attempts'),('input_tokens','Known input tokens'),('output_tokens','Known output tokens')]:
+    for key,label in [('requests','Cloud requests / attempts'),('input_tokens','Known input tokens'),
+            ('cached_input_tokens','Known cached input tokens'),('output_tokens','Known output tokens'),('total_tokens','Known total tokens')]:
         if key in usage:lines.append(label+': '+scalar(usage[key]))
     if usage.get('missing_input_counts') or usage.get('missing_output_counts'):
         lines.append('Token counts are incomplete; unknown consumption retains its cost reservation.')
@@ -86,6 +90,11 @@ def labeling_line(value):
     cumulative=value.get('cumulative_usage') or {};limits=value.get('limits') or {}
     if 'requests' in cumulative:
         lines.append('Cumulative requests: '+scalar(cumulative['requests'])+(' / '+scalar(limits['request_limit']) if 'request_limit' in limits else ''))
+    for key,label in [('input_tokens','Cumulative known input tokens'),('cached_input_tokens','Cumulative known cached input tokens'),
+            ('output_tokens','Cumulative known output tokens'),('total_tokens','Cumulative known total tokens')]:
+        if key in cumulative:lines.append(label+': '+scalar(cumulative[key]))
+    if cumulative.get('missing_input_counts') or cumulative.get('missing_output_counts'):
+        lines.append('Cumulative token counts are incomplete; unknown consumption retains its cost reservation.')
     if 'estimated_cost_usd' in cumulative:
         lines.append(f'Cumulative estimated / reserved cost: ${cumulative["estimated_cost_usd"]:.6f}'+(f' / ${limits["budget_usd"]:.6f}' if 'budget_usd' in limits else ''))
     if value.get('status'):lines.append('🏁 Labeling outcome: '+str(value['status']).replace('_',' ')+'.')
@@ -96,6 +105,7 @@ def labeling_line(value):
 
 
 def stage_line(value):
+    if value.get('log_output') is False:return None
     key=value.get('stage_key','');status=value.get('status','');message=value.get('message')
     metrics=value.get('metrics') or {};name=STAGE_NAMES.get(key,key)
     if status=='started' and value.get('timing_active') is False and not message:return None
@@ -148,7 +158,8 @@ def classification_report(name,metrics,threshold):
 def completion_summary(stage,fields):
     lines=[]
     if stage=='semantic_labels' and isinstance(fields.get('semantic_labeling'),dict):
-        return labeling_line(fields['semantic_labeling'])
+        result=fields['semantic_labeling']
+        return '' if result.get('summary_emitted') else labeling_line(result)
     if stage=='training_data' and isinstance(fields.get('summary'),dict):
         summary=fields['summary']
         for key,label in [('rows','🧠 Training rows created'),('positive','➕ Positive training rows'),('negative','➖ Negative training rows')]:

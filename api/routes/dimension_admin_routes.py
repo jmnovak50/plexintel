@@ -3,7 +3,7 @@ from psycopg2 import errors
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from api.routes.admin_routes import require_admin
-from api.services.dimension_explorer import get_register, get_dimension, get_prediction, STATUS_FILTERS, SORTS
+from api.services.dimension_explorer import get_register, get_dimension, get_prediction, get_labeling_runs, STATUS_FILTERS, SORTS
 from api.services.dimension_governance import apply_action
 
 router = APIRouter(prefix='/admin/dimensions', dependencies=[Depends(require_admin)])
@@ -33,6 +33,11 @@ def register(search: str = Query('',max_length=200), side: Literal['','media','m
     if (status and status not in STATUS_FILTERS) or sort not in SORTS:
         raise HTTPException(422,'Unknown filter or sort')
     return configuration_error(get_register,active_scope,search,side,status,sort,offset,limit)
+
+
+@router.get('/labeling-runs')
+def labeling_runs():
+    return configuration_error(get_labeling_runs)
 
 
 @router.get('/prediction')

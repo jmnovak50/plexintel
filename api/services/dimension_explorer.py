@@ -1,5 +1,6 @@
 """Server-side register, scoped retained-contribution statistics and traceability."""
 import os
+import json
 from contextlib import contextmanager, nullcontext
 from psycopg2.extras import RealDictCursor
 from api.db.connection import connect_db
@@ -130,6 +131,9 @@ def register_cte(scope, config):
             COALESCE(ss.selected_count,0) AS selected_count,
             COALESCE(ss.semantic_selected_count,0) AS semantic_selected_count,
             recent.result->>'validation_status' AS validation_status,recent.outcome,
+            recent.assessment_id,recent.created_at AS assessed_at,recent.source AS assessment_source,
+            COALESCE(recent.assessment_count,0) AS assessment_count,
+            recent.result->>'error_code' AS assessment_error_code,
             (recent.outcome IN ('invalid_review_replacement_not_saved','non_semantic_repair_not_saved')
                 OR (recent.outcome='repair_cooldown_scheduled' AND jsonb_typeof(recent.before_state)='object'
                     AND recent.result->>'label' NOT IN ('','UNCLEAR / MIXED SIGNAL')
@@ -142,7 +146,9 @@ def register_cte(scope, config):
         LEFT JOIN embedding_dimension_admin a ON a.dimension=i.dimension AND a.config_id=%s
         LEFT JOIN contribution_stats cs ON cs.dimension=i.dimension
         LEFT JOIN selection_stats ss ON ss.dimension=i.dimension
-        LEFT JOIN LATERAL (SELECT result,outcome,before_state FROM embedding_dimension_assessments h
+        LEFT JOIN LATERAL (SELECT assessment_id,created_at,source,result,outcome,before_state,
+            COUNT(*) FILTER(WHERE source!='provenance-reconciliation') OVER() AS assessment_count
+            FROM embedding_dimension_assessments h
             WHERE h.config_id=%s AND h.dimension=i.dimension ORDER BY assessment_id DESC LIMIT 1) recent ON true
         LEFT JOIN LATERAL (SELECT status,error FROM embedding_dimension_reviews q
             WHERE q.config_id=%s AND q.dimension=i.dimension ORDER BY review_id DESC LIMIT 1) job ON true
@@ -169,6 +175,66 @@ SORTS = {'dimension':'dimension ASC','usage':'observed_count DESC,dimension',
          'attempts':'review_attempt_count DESC,dimension','next_review':'next_review_at ASC NULLS LAST,dimension'}
 
 
+def recent_labeling_runs(cur, config, limit=5):
+    """Read the shared CLI/daily ledger; link pipeline stages only by workload ID."""
+    cur.execute("""SELECT to_regclass('public.embedding_label_batches') AS batches,
+        to_regclass('public.embedding_label_requests') AS requests,
+        to_regclass('public.pipeline_run_stages') AS stages""")
+    tables=cur.fetchone();runs=[]
+    if tables['batches'] and tables['requests']:
+        cur.execute('''SELECT b.batch_id,b.status,b.summary,b.created_at AS started_at,b.completed_at,
+            b.forecast->>'automation_run_id' AS workload_id,jsonb_array_length(b.dimensions) AS selected,
+            a.assessed,a.saved,a.abstentions,a.failures,
+            u.requests,u.input_tokens,u.output_tokens,u.cached_input_tokens,u.estimated_cost_usd,
+            u.missing_input_counts,u.missing_output_counts
+            FROM (SELECT * FROM embedding_label_batches WHERE config_id=%s
+                AND feature_space_id IS NOT DISTINCT FROM %s ORDER BY created_at DESC LIMIT %s) b
+            LEFT JOIN LATERAL (SELECT COUNT(*) AS assessed,COUNT(*) FILTER(WHERE saved) AS saved,
+                COUNT(*) FILTER(WHERE outcome='abstained') AS abstentions,
+                COUNT(*) FILTER(WHERE result->>'processing_error'='true') AS failures
+                FROM embedding_dimension_assessments a WHERE a.config_id=b.config_id
+                AND a.result->>'batch_id'=b.batch_id AND a.source!='provenance-reconciliation') a ON true
+            LEFT JOIN LATERAL (SELECT COUNT(*) AS requests,COALESCE(SUM(input_tokens),0) AS input_tokens,
+                COALESCE(SUM(output_tokens),0) AS output_tokens,COALESCE(SUM(cached_input_tokens),0) AS cached_input_tokens,
+                COALESCE(SUM(estimated_cost_usd),0) AS estimated_cost_usd,
+                COUNT(*) FILTER(WHERE input_tokens IS NULL) AS missing_input_counts,
+                COUNT(*) FILTER(WHERE output_tokens IS NULL) AS missing_output_counts
+                FROM embedding_label_requests r WHERE r.batch_id=b.batch_id) u ON true''',
+            (config['config_id'],config.get('feature_space_id'),limit))
+        for record in cur.fetchall():
+            row=dict(record);summary=row.pop('summary') or {}
+            row.update(source='daily' if row['workload_id'] else 'cli',run_id=None,exit_code=None,
+                successes=summary.get('successes'),reviews=summary.get('reviews'),skipped=summary.get('skipped'),
+                assessed=summary.get('assessed',row['assessed']),
+                abstentions=summary.get('abstentions',row['abstentions']),failures=summary.get('failures',row['failures']))
+            for key in ('requests','input_tokens','output_tokens','cached_input_tokens','missing_input_counts','missing_output_counts'):
+                row[key]=int(row[key])
+            row['estimated_cost_usd']=float(row['estimated_cost_usd'])
+            runs.append(row)
+    if tables['stages']:
+        cur.execute('''SELECT run_id,stage_key,status,exit_code,started_at,completed_at,stdout_tail
+            FROM pipeline_run_stages WHERE stage_key IN ('semantic_labels','batch_label')
+            ORDER BY started_at DESC LIMIT %s''',(limit*2,))
+        for record in cur.fetchall():
+            row=dict(record)
+            try:event=json.loads(row.pop('stdout_tail') or '{}')
+            except (ValueError,TypeError):event={}
+            workload=event.get('generation_run_id') if isinstance(event,dict) else None
+            batch=next((r for r in runs if workload and r.get('workload_id')==workload),None)
+            if batch:
+                if batch['run_id'] is None:batch.update(run_id=row['run_id'],exit_code=row['exit_code'])
+            else:runs.append(dict(row,source='pipeline_stage',batch_id=None))
+    runs.sort(key=lambda r:r['started_at'].isoformat() if r.get('started_at') else '',reverse=True)
+    for row in runs:row.pop('workload_id',None)
+    return runs[:limit]
+
+
+def get_labeling_runs():
+    """Cheap refresh signal; full SHAP statistics need not be polled repeatedly."""
+    with reader() as cur:
+        return dict(recent_labeling_runs=recent_labeling_runs(cur,get_active_config(cur)))
+
+
 def get_register(scope, search='', side='', status='', sort='dimension', offset=0, limit=50, dimension=None, _cursor=None):
     with (nullcontext(_cursor) if _cursor is not None else reader()) as cur:
         config = get_active_config(cur)
@@ -181,6 +247,9 @@ def get_register(scope, search='', side='', status='', sort='dimension', offset=
             COUNT(*) FILTER(WHERE cooldown) AS cooldown,
             COUNT(*) FILTER(WHERE paused) AS paused,
             COUNT(*) FILTER(WHERE needs_review IS TRUE AND review_attempt_count >= %s) AS repeated,
+            COUNT(*) FILTER(WHERE assessment_count>0) AS assessed_dimensions,
+            COUNT(*) FILTER(WHERE outcome='abstained') AS abstained_dimensions,
+            COUNT(*) FILTER(WHERE processing_error IS NOT NULL) AS failed_assessment_dimensions,
             (SELECT COUNT(*) FROM scoped) AS scoped_predictions,
             (SELECT COUNT(DISTINCT (user_id,rating_key)) FROM observations) AS observed_predictions,
             (SELECT COUNT(*) FROM selected WHERE group_name!='semantic_themes') AS selected_wordings,
@@ -210,13 +279,7 @@ def get_register(scope, search='', side='', status='', sort='dimension', offset=
         overview, total, rows = result['overview'], result['total'], result['rows']
         cur.execute('SELECT DISTINCT username FROM recommendations ORDER BY username')
         users = [r['username'] for r in cur.fetchall()]
-        cur.execute("SELECT to_regclass('public.pipeline_run_stages') AS tracked")
-        recent_runs = []
-        if cur.fetchone()['tracked']:
-            cur.execute("""SELECT s.run_id,s.status,s.exit_code,s.started_at,s.completed_at
-                FROM pipeline_run_stages s WHERE s.stage_key='batch_label'
-                ORDER BY s.started_at DESC LIMIT 5""")
-            recent_runs = [dict(r) for r in cur.fetchall()]
+        recent_runs=recent_labeling_runs(cur,config)
         return dict(config=config,scope=scope,overview=overview,rows=rows,total=total,offset=offset,limit=limit,
                     users=users,recent_labeling_runs=recent_runs,model_versions=versions,limitations=LIMITATIONS,thresholds=dict(repeated_attempts=REPEATED_ATTEMPTS,frequent_selections=FREQUENT_SELECTIONS))
 

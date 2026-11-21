@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import { ErrorBanner, SuccessBanner } from '../components/StatusBanner';
@@ -13,6 +13,8 @@ interface Dimension {
   mean_abs_shap: number | null; positive_count: number | null; negative_count: number | null;
   zero_count: number | null; unknown_count: number | null; selected_count: number; semantic_selected_count: number;
   job_status: string | null; outcome: string | null;
+  assessment_id: number | null; assessed_at: string | null; assessment_source: string | null;
+  assessment_count: number; assessment_error_code: string | null;
 }
 interface Prediction {
   username: string; rating_key: number; title: string; rank: number | null; predicted_probability: number;
@@ -20,7 +22,11 @@ interface Prediction {
 }
 interface Payload {
   scope: { model_version: string };
-  recent_labeling_runs?: { run_id: number; status: string; exit_code: number | null; started_at: string; completed_at: string | null }[];
+  recent_labeling_runs?: { run_id: number | null; batch_id: string | null; source: string; status: string;
+    exit_code: number | null; started_at: string; completed_at: string | null; selected?: number;
+    assessed?: number; saved?: number; successes?: number | null; reviews?: number | null; abstentions?: number;
+    failures?: number; skipped?: number | null; requests?: number; input_tokens?: number; output_tokens?: number;
+    estimated_cost_usd?: number; missing_input_counts?: number; missing_output_counts?: number }[];
   model_versions: { model_version: string; generated_at: string }[];
   config: { ordering?: string; feature_groups?: { name: string; start: number; width: number }[]; config_id: string; media_dimensions: number; user_dimensions: number; model_sha256: string; embedding_model: string; feature_names: string[] };
   rows: Dimension[]; total: number; users: string[]; limitations: string[]; overview: Record<string, number | string | null>;
@@ -68,8 +74,9 @@ function Governance({ row }: { row: Dimension }) {
   return <div className="space-y-1 text-xs">
     {(row.label_row_count || 0) > 1 && <p className="text-orange-700">Multiple saved rows: latest timestamped wording shown. Investigate before review.</p>}
     <p>{row.label_type || 'Unclassified'} · {row.eligible ? 'Explanation eligible' : 'Explanation ineligible'}</p>
-    <p>{row.needs_review ? 'Unresolved review' : row.label ? 'No unresolved review' : 'Not assessed'} · Candidate validation: {row.validation_status || 'Not retained'}</p>
-    <p>{row.paused ? 'Review paused' : row.cooldown ? 'Cooldown' : row.due ? 'Review due' : 'No scheduled review'} · {row.review_attempt_count} attempts</p>
+    <p>{row.needs_review ? 'Unresolved review' : row.label ? 'No unresolved review' : row.assessment_id ? 'No compatible saved label' : 'Not assessed'} · Candidate validation: {row.validation_status || 'Not retained'}</p>
+    {row.assessment_id && <p>Latest record: {row.assessment_source === 'provenance-reconciliation' ? 'Provenance reconciled (no inference)' : row.outcome?.replace(/_/g, ' ') || 'Assessment recorded'}{row.assessment_error_code ? ` · ${row.assessment_error_code}` : ''}</p>}
+    <p>{row.paused ? 'Review paused' : row.cooldown ? 'Cooldown' : row.due ? 'Review due' : 'No scheduled review'} · {row.review_attempt_count} review attempts · {row.assessment_count || 0} assessment records</p>
     {row.suppressed && <p>Administrator display suppression</p>}
     {row.investigation_status === 'open' && <p>Investigation open</p>}
     {row.in_flight && <p className="text-orange-700">Assessment in flight (may finish while paused)</p>}
@@ -82,11 +89,11 @@ function Evidence({ assessment }: { assessment: RecordData }) {
   const result = assessment.result as RecordData;
   return <details className="recs-surface-muted p-3">
     <summary className="cursor-pointer">{date(assessment.created_at)} · {String(assessment.outcome)} · validation {String(result.validation_status || 'unknown')}</summary>
-    <p className="mt-2 text-sm">Actual retained assessment · {String(assessment.source)} · {String(assessment.provider)}:{String(assessment.model)}</p>
+    <p className="mt-2 text-sm">Actual retained record · {String(assessment.source)} · {assessment.source === 'provenance-reconciliation' ? 'No provider request; original provenance preserved' : `${String(assessment.provider || 'Not retained')}:${String(assessment.model || 'Not retained')}`}</p>
     <p className="text-sm">Candidate: {String(result.label || 'None')} · Saved: {assessment.saved ? 'yes' : 'no'}. A saved valid candidate can remain unresolved.</p>
     <p className="my-2 text-sm">{String(result.explanation || '')} {String(prompt.skipped_reason || '')}</p>
     <ul className="list-inside list-disc text-sm">{((result.validation_notes || []) as string[]).map((note, i) => <li key={i}>{note}</li>)}</ul>
-    <p className="mt-2 text-sm">HIGH eligible: {String(prompt.valid_positive_count)} · LOW eligible: {String(prompt.valid_negative_count)} · flagged: {String(prompt.flagged_item_count)}</p>
+    <p className="mt-2 text-sm">HIGH eligible: {String(prompt.valid_positive_count ?? 'Not retained')} · LOW eligible: {String(prompt.valid_negative_count ?? 'Not retained')} · flagged: {String(prompt.flagged_item_count ?? 'Not retained')}</p>
     {(['positive_items', 'negative_items'] as const).map(key => <div className="mt-3" key={key}>
       <h4 className="font-semibold">{key === 'positive_items' ? 'Supporting HIGH evidence used' : 'Contrasting LOW evidence used'}</h4>
       <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr><th>Title / user</th><th>Watch seconds</th><th>Engagement</th><th>Training label</th></tr></thead>
@@ -104,6 +111,10 @@ export default function AdminDimensions() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
+  const loadingRef = useRef(loading);
+  const dataRef = useRef<Payload | null>(null);
+  useEffect(() => { loadingRef.current = loading; }, [loading]);
+  useEffect(() => { dataRef.current = data; }, [data]);
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [reason, setReason] = useState('');
@@ -148,12 +159,32 @@ export default function AdminDimensions() {
   }, [query, dimension, prediction, refresh]);
   const reviewSupported = Boolean(data && (!data.config.feature_groups || data.config.ordering === 'media_text,user'));
   useEffect(() => { setReason(''); setAction(reviewSupported ? 'review' : 'investigate'); setMessage(''); }, [dimension, reviewSupported]);
-  const pending = data?.rows?.some(row => row.in_flight || ['queued', 'running'].includes(row.job_status || ''));
+  const pending = data?.rows?.some(row => row.in_flight || ['queued', 'running'].includes(row.job_status || ''))
+    || data?.recent_labeling_runs?.some(run => ['running', 'started', 'cancel_requested'].includes(run.status));
   useEffect(() => {
-    if (!pending) return;
-    const timer = window.setInterval(() => setRefresh(n => n + 1), 10000);
-    return () => window.clearInterval(timer);
-  }, [pending]);
+    if (prediction) return;
+    const controller = new AbortController();
+    let checking = false;
+    const update = async () => {
+      if (document.hidden || loadingRef.current || checking) return;
+      if (dataRef.current?.rows?.some(row => row.in_flight || ['queued', 'running'].includes(row.job_status || ''))) {
+        setRefresh(n => n + 1); return;
+      }
+      checking = true;
+      try {
+        const response = await fetch('/api/admin/dimensions/labeling-runs', { credentials: 'include', signal: controller.signal });
+        if (!response.ok) return;
+        const body = await response.json();
+        if (!controller.signal.aborted && JSON.stringify(body.recent_labeling_runs) !== JSON.stringify(dataRef.current?.recent_labeling_runs)) setRefresh(n => n + 1);
+      } catch { /* Keep the last fetched data; manual refresh retains full errors. */ }
+      finally { checking = false; }
+    };
+    const focus = () => { if (!document.hidden && !loadingRef.current) setRefresh(n => n + 1); };
+    const timer = window.setInterval(update, pending ? 10000 : 30000);
+    window.addEventListener('focus', focus);
+    document.addEventListener('visibilitychange', focus);
+    return () => { controller.abort(); window.clearInterval(timer); window.removeEventListener('focus', focus); document.removeEventListener('visibilitychange', focus); };
+  }, [pending, prediction]);
   async function intervene() {
     if (!data || !data.rows[0]) return;
     setBusy(true); setError(''); setMessage('');
@@ -195,8 +226,8 @@ export default function AdminDimensions() {
         </div>
         <p className="mt-3 text-xs text-slate-500">Active scope: {params.get('username') || 'all users'} · {params.get('media_type') || 'all media types'} · {params.get('top_n') === '0' ? 'all ranks' : `top ${params.get('top_n') || 100}`} · {data?.scope?.model_version === 'legacy' ? 'unversioned legacy observations' : (data?.scope?.model_version || '').slice(0, 12)} · current snapshot only.</p>
       </section>}
-      {loading && <p role="status" className={panel}>Loading scoped evidence…</p>}
-      {!loading && !error && data && <>
+      {loading && <p role="status" className={panel}>{data ? 'Refreshing scoped evidence…' : 'Loading scoped evidence…'}</p>}
+      {!error && data && <>
         <section className={`${panel} text-sm`}>
           <p>Configuration <code>{data.config.config_id}</code> · {data.config.media_dimensions} media + {data.config.user_dimensions} user dimensions · {data.config.embedding_model}</p>
           <details className="mt-2"><summary className="cursor-pointer font-medium">Coverage, units, and historical limitations</summary><ul className="mt-2 list-disc space-y-1 pl-5 text-xs">{data.limitations.map(item => <li key={item}>{item}</li>)}</ul><p className="mt-2 text-xs">Registered model artifact: {data.config.model_sha256}. This is metadata observed at registration, not a historical scoring-run association. {data.config.feature_names.length - data.config.media_dimensions - data.config.user_dimensions} non-embedding model features are outside this register.</p></details>
@@ -205,17 +236,25 @@ export default function AdminDimensions() {
           <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6" aria-label="Inventory overview">
             {['inventory_count', 'unlabeled', 'unresolved', 'due', 'cooldown', 'repeated'].map(key => <div className={panel} key={key}><p className="text-2xl font-semibold">{data.overview[key]}</p><p className="text-xs capitalize">{key.replace('_', ' ')}</p></div>)}
           </section>
+          <p className="text-xs text-slate-500">Current feature-space assessment records: {data.overview.assessed_dimensions} dimensions assessed · {data.overview.abstained_dimensions} latest abstentions · {data.overview.failed_assessment_dimensions} latest failures. Unlabeled means no compatible saved label; an abstention or failed assessment can remain unlabeled.</p>
           <p className="text-xs text-slate-500">Scope denominator: {data.overview.scoped_predictions} current scored user/title instances; {data.overview.observed_predictions} have retained SHAP. Selected wordings: {data.overview.selected_wordings} across API groups; {data.overview.semantic_selected_wordings} legacy semantic themes (deduplicated before dimension attribution). Scores updated {date(data.overview.scored_at)}; SHAP updated {date(data.overview.shap_timestamp)}. Repeated = ≥{data.thresholds.repeated_attempts} attempts on a currently unresolved label (not a consecutive-failure count); frequent = ≥{data.thresholds.frequent_selections} current selections. These filters do not change automatic review policy. Unresolved labels are normally ineligible, so the frequent-under-review filter can be empty.</p>
         </>}
-        {!prediction && dimension === null && <details className={panel}>
+        {!prediction && dimension === null && <details className={panel} open>
           <summary className="cursor-pointer font-medium">Recent labeling executions</summary>
-          <p className="my-2 text-xs">Global pipeline stage records, outside the selected SHAP scope. Execution success does not establish review progress; resolution counts were not tracked.</p>
-          {data.recent_labeling_runs?.length ? <ul className="space-y-1 text-sm">{data.recent_labeling_runs.map(run => <li key={run.run_id}>Run {run.run_id} · {run.status} · exit {run.exit_code ?? 'pending'} · {date(run.started_at)}</li>)}</ul> : <p className="text-sm">No retained pipeline labeling run records.</p>}
+          <p className="my-2 text-xs">Current feature-space batches from daily execution and the manual CLI, outside the selected SHAP scope. Pipeline-only history is shown where no batch can be linked. Counts reflect retained assessments and requests; accepted assessments and saved labels are separate.</p>
+          {data.recent_labeling_runs?.length ? <ul className="space-y-3 text-sm">{data.recent_labeling_runs.map(run => <li key={run.batch_id || `stage-${run.run_id}`} data-label-batch={run.batch_id || undefined}>
+            <p>{run.batch_id ? `${run.source === 'daily' ? 'Daily' : 'Manual / CLI'} batch ${run.batch_id}` : `Pipeline stage · run ${run.run_id}`} · {run.status} · {date(run.started_at)}</p>
+            {run.batch_id && <>
+              <p>Selected: {run.selected} · Assessed: {run.assessed} · Saved: {run.saved}{run.successes != null ? ` · Accepted: ${run.successes}` : ''}{run.reviews != null ? ` · Reviews: ${run.reviews}` : ''} · Abstentions: {run.abstentions} · Failures: {run.failures}{run.skipped != null ? ` · Skipped: ${run.skipped}` : ''}</p>
+              <p>Requests: {run.requests} · Known input / output tokens: {run.input_tokens} / {run.output_tokens} · Estimated / reserved cost: ${run.estimated_cost_usd?.toFixed(6)}{run.missing_input_counts || run.missing_output_counts ? ' · Token counts incomplete' : ''}</p>
+            </>}
+            {run.run_id != null && <Link className={linkStyle} to="/admin/pipeline">Pipeline run {run.run_id}</Link>}
+          </li>)}</ul> : <p className="text-sm">No retained labeling batches or pipeline labeling stages.</p>}
           <Link className={linkStyle} to="/admin/pipeline">Open pipeline runs</Link>
         </details>}
         {!prediction && dimension === null && <section className={panel}>
           <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="text-xs text-slate-500"><tr><th className={td}>Feature / local index</th><th className={td}>Current wording</th><th className={td}>Governance</th><th className={td}>Retained SHAP usage</th><th className={td}>Selected by current explanation rules</th><th className={td}>Review dates</th></tr></thead>
-            <tbody className="divide-y divide-slate-100">{data.rows.map(item => <tr key={item.dimension}><td className={td}><Link className={linkStyle} to={href({ dimension: String(item.dimension) })}>{item.feature_name || `emb_${item.dimension}`}</Link><p className="text-xs">{item.side}:{item.local_index}</p></td><td className={td}>{item.display_label || item.label || <em>Unlabeled</em>}</td><td className={td}><Governance row={item} /></td><td className={td}><p>{item.observed_count} observed predictions</p><p className="text-xs">Mean |SHAP|: {magnitude(item.mean_abs_shap)}</p><p className="text-xs">+ {item.positive_count ?? '—'} / − {item.negative_count ?? '—'} / zero {item.zero_count ?? '—'} / unknown {item.unknown_count ?? '—'}</p></td><td className={td}>{item.selected_count} API group selections<p className="text-xs">{item.semantic_selected_count} legacy themes</p></td><td className={`${td} text-xs`}>Last: {date(item.last_reviewed_at)}<br />Next: {date(item.next_review_at)}</td></tr>)}</tbody>
+            <tbody className="divide-y divide-slate-100">{data.rows.map(item => <tr key={item.dimension}><td className={td}><Link className={linkStyle} to={href({ dimension: String(item.dimension) })}>{item.feature_name || `emb_${item.dimension}`}</Link><p className="text-xs">{item.side}:{item.local_index}</p></td><td className={td}>{item.display_label || item.label || <em>Unlabeled</em>}</td><td className={td}><Governance row={item} /></td><td className={td}><p>{item.observed_count} observed predictions</p><p className="text-xs">Mean |SHAP|: {magnitude(item.mean_abs_shap)}</p><p className="text-xs">+ {item.positive_count ?? '—'} / − {item.negative_count ?? '—'} / zero {item.zero_count ?? '—'} / unknown {item.unknown_count ?? '—'}</p></td><td className={td}>{item.selected_count} API group selections<p className="text-xs">{item.semantic_selected_count} legacy themes</p></td><td className={`${td} text-xs`}>Latest record: {date(item.assessed_at)}<br />Review: {date(item.last_reviewed_at)}<br />Next review: {date(item.next_review_at)}</td></tr>)}</tbody>
           </table></div><Pager offset={pageOffset} total={data.total} size={50} onChange={n => change('offset', String(n))} />
         </section>}
         {!prediction && dimension !== null && row && <>
