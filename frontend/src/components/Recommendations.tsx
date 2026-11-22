@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from 'react';
+import { useEffect, useState, useRef, type KeyboardEvent } from 'react';
 import {
   AlertCircle,
   ArrowDown,
@@ -30,6 +30,7 @@ type SortState = { column: keyof Recommendation; direction: 'asc' | 'desc' };
 type ScopedSelection = { key: number; title: string };
 
 interface Recommendation {
+  viewing_history_connection?: { display_text: string } | null;
   friendly_name: string;
   media_type: string;
   rating_key: number;
@@ -573,6 +574,20 @@ function RecommendationChipGroup({
   );
 }
 
+function invalidateViewingConnection(rec: Recommendation): Recommendation {
+  return 'viewing_history_connection' in rec ? { ...rec, viewing_history_connection: null } : rec;
+}
+
+function ViewingHistoryConnection({ connection }: { connection: Recommendation['viewing_history_connection'] }) {
+  if (!connection) return null;
+  return (
+    <section className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 text-sm text-slate-700 dark:border-indigo-800 dark:bg-indigo-950/30 dark:text-slate-200">
+      <h4 className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">Connections to Your Viewing History</h4>
+      <p className="mt-1">{connection.display_text}</p>
+    </section>
+  );
+}
+
 function RecommendationExplanation({
   titleTraits,
   tasteMatch,
@@ -910,6 +925,7 @@ function DesktopRecommendationsTable({
                   </td>
                   <td className="px-4 py-3">
                     <RecommendationTitleCell rec={rec} />
+                    <ViewingHistoryConnection connection={rec.viewing_history_connection} />
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-700">{rec.show_title || '—'}</td>
                   <td className="px-4 py-3 text-sm text-slate-700">{rec.season_number ?? '—'}</td>
@@ -1009,6 +1025,7 @@ function MobileRecommendationsList({
 
             <div className="mt-3">
               <RecommendationTitleCell rec={rec} layout="mobile" />
+              <ViewingHistoryConnection connection={rec.viewing_history_connection} />
             </div>
 
             {hasExplanation && (
@@ -1097,6 +1114,9 @@ export default function Recommendations() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [recs, setRecs] = useState<Recommendation[]>([]);
+  const connectionRowsRef = useRef(recs);
+  const connectionRequestVersion = useRef(0);
+  useEffect(() => { connectionRowsRef.current = recs; }, [recs]);
   const { darkMode, toggleDarkMode } = useTheme();
   const [viewMode, setViewMode] = useState<ViewMode>('all');
   const [selectedShow, setSelectedShow] = useState<ScopedSelection | null>(null);
@@ -1192,6 +1212,22 @@ export default function Recommendations() {
     };
   }, [viewMode, selectedShow, selectedSeason, debouncedSearch, minScore, maxScore, sortOrder]);
 
+  const refreshViewingConnections = async (signal: AbortSignal) => {
+    const current = connectionRowsRef.current;
+    if (!current.some((rec) => 'viewing_history_connection' in rec)) return;
+    const version = connectionRequestVersion.current;
+    const keys = current.slice(-250).map((rec) => rec.rating_key);
+    const params = new URLSearchParams();
+    keys.forEach((key) => params.append('rating_key', String(key)));
+    let connections: Record<string, Recommendation['viewing_history_connection']> = {};
+    try {
+      const res = await fetch(`/api/recommendations/viewing-history-connections?${params}`, { credentials: 'include', signal });
+      if (res.ok) connections = ((await res.json()).connections ?? {});
+    } catch { /* Optional context must not interrupt recommendations. */ }
+    if (signal.aborted || version !== connectionRequestVersion.current) return;
+    setRecs((prev) => prev.map((rec) => ({ ...rec, viewing_history_connection: connections[String(rec.rating_key)] ?? null })));
+  };
+
   useEffect(() => {
     let mounted = true;
     let requestInFlight = false;
@@ -1206,6 +1242,7 @@ export default function Recommendations() {
         .then((nextIsRefreshing) => {
           if (!mounted) return;
           setIsRefreshing(nextIsRefreshing);
+          return refreshViewingConnections(controller.signal);
         })
         .catch((error) => {
           if (!mounted || controller.signal.aborted) return;
@@ -1333,8 +1370,9 @@ export default function Recommendations() {
         plex_watchlist_status: returnedFeedback?.plex_watchlist_status ?? 'not_applicable',
       };
 
+      connectionRequestVersion.current += 1;
       setRecs((prev) => prev.map((item) => (
-        item.rating_key === rec.rating_key ? { ...item, ...savedRec } : item
+        item.rating_key === rec.rating_key ? invalidateViewingConnection({ ...item, ...savedRec }) : invalidateViewingConnection(item)
       )));
       setUndoState({
         recommendation: savedRec,
@@ -1371,7 +1409,9 @@ export default function Recommendations() {
         throw new Error(await extractErrorMessage(res, `Failed to remove feedback (${res.status})`));
       }
 
-      setRecs((prev) => {
+      connectionRequestVersion.current += 1;
+      setRecs((previous) => {
+        const prev = previous.map(invalidateViewingConnection);
         const exists = prev.some((item) => item.rating_key === rec.rating_key);
         if (exists) {
           return prev.map((item) => (
@@ -1389,7 +1429,7 @@ export default function Recommendations() {
         return [
           ...prev,
           {
-            ...rec,
+            ...invalidateViewingConnection(rec),
             feedback_state: null,
             feedback_suppress: false,
             feedback_reason_code: null,
@@ -1439,6 +1479,8 @@ export default function Recommendations() {
       }
 
       const result = await res.json() as BulkFeedbackApiResponse;
+      connectionRequestVersion.current += 1;
+      setRecs((prev) => prev.map(invalidateViewingConnection));
       await refreshRecommendations();
       setPageMessage(buildBulkResultMessage(result));
     } catch (error) {

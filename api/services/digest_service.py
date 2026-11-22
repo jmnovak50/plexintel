@@ -1,4 +1,5 @@
 from __future__ import annotations
+from api.services.viewing_connections import attach as attach_viewing_connections
 
 import secrets
 import smtplib
@@ -550,7 +551,9 @@ def fetch_top_movie_recommendations(
             """,
             (username, username, display_threshold, limit),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+        attach_viewing_connections(rows, username)
+        return rows
 
 
 def fetch_top_show_recommendations(
@@ -580,7 +583,9 @@ def fetch_top_show_recommendations(
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, (username, username, display_threshold, username, limit))
-        return cur.fetchall()
+        rows = cur.fetchall()
+        attach_viewing_connections(rows, username)
+        return rows
 
 
 def _build_item_subtitle(item: dict[str, Any]) -> str:
@@ -588,6 +593,7 @@ def _build_item_subtitle(item: dict[str, Any]) -> str:
         str(item["year"]) if item.get("year") is not None else None,
         item.get("genres"),
         item.get("semantic_themes"),
+        ("Connections to Your Viewing History: " + item["viewing_history_connection"]["display_text"] if item.get("viewing_history_connection") else None),
     ]
     return " | ".join(part for part in subtitle_parts if part)
 
