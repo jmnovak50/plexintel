@@ -22,8 +22,10 @@ def fetch_tautulli_metadata(rating_key: int) -> Optional[dict]:
     )
     response.raise_for_status()
 
-    payload = response.json()
-    return payload.get("response", {}).get("data")
+    payload = response.json().get("response", {})
+    if payload.get("result") != "success":
+        return None
+    return payload.get("data")
 
 
 def load_library_item(cur, rating_key: int) -> Optional[dict]:
@@ -42,7 +44,8 @@ def load_library_item(cur, rating_key: int) -> Optional[dict]:
         """,
         (rating_key,),
     )
-    return cur.fetchone()
+    from api.services.metadata_ingestion import row_dict
+    return row_dict(cur, cur.fetchone())
 
 
 def ensure_library_guid(cur, rating_key: int) -> Optional[dict]:
@@ -53,24 +56,21 @@ def ensure_library_guid(cur, rating_key: int) -> Optional[dict]:
     if item.get("plex_guid"):
         return item
 
+    from api.services.metadata_ingestion import guid_plan, apply_plan
+    # Fetch before acquiring metadata write locks. The caller owns commit.
     try:
-        metadata = fetch_tautulli_metadata(rating_key)
+        raw = fetch_tautulli_metadata(rating_key)
     except Exception:
         return item
-    if not metadata:
-        return item
-
-    plex_guid = metadata.get("guid")
-    if not plex_guid:
-        return item
-
-    cur.execute(
-        """
-        UPDATE public.library
-        SET plex_guid = %s
-        WHERE rating_key = %s
-        """,
-        (plex_guid, rating_key),
-    )
-    item["plex_guid"] = plex_guid
+    cur.execute('SAVEPOINT metadata_guid_completion')
+    try:
+        plan = guid_plan(cur, rating_key, raw, operator='feedback')
+        if plan:
+            apply_plan(cur, plan)
+        item = load_library_item(cur, rating_key)
+        cur.execute('RELEASE SAVEPOINT metadata_guid_completion')
+    except Exception:
+        cur.execute('ROLLBACK TO SAVEPOINT metadata_guid_completion')
+        cur.execute('RELEASE SAVEPOINT metadata_guid_completion')
+        print('Metadata GUID completion deferred; feedback remains available')
     return item

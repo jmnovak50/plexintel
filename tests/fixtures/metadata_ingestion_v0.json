@@ -1,0 +1,269 @@
+{
+  "baseline_commit": "b8633c8ba7d106a3a689d0fc778828935b1250e4",
+  "timezone": "UTC",
+  "provenance": "Synthetic replay through original get_metadata and original library/relationship writers; no network or production inputs. Includes repeated cast name, inherited TV facts and all four media kinds.",
+  "raws": {
+    "1": {
+      "rating_key": "1",
+      "title": "Fixture 1",
+      "media_type": "movie",
+      "guid": "plex://movie/fixture-1",
+      "duration": "5400000",
+      "summary": "Original synopsis",
+      "year": "2020",
+      "added_at": "1700000000",
+      "actors": [
+        "Alice",
+        "Bob",
+        "Alice"
+      ],
+      "genres": [
+        "Drama"
+      ],
+      "directors": [
+        "Director"
+      ]
+    },
+    "10": {
+      "rating_key": "10",
+      "title": "Fixture 10",
+      "media_type": "show",
+      "guid": "plex://show/fixture-10",
+      "duration": null,
+      "summary": "Original synopsis",
+      "year": "2020",
+      "added_at": "1700000000",
+      "actors": [
+        "Alice",
+        "Bob"
+      ],
+      "genres": [
+        "Drama"
+      ],
+      "directors": [
+        "Director"
+      ]
+    },
+    "20": {
+      "rating_key": "20",
+      "title": "Fixture 20",
+      "media_type": "season",
+      "guid": "plex://season/fixture-20",
+      "duration": null,
+      "summary": "Original synopsis",
+      "year": "2020",
+      "added_at": "1700000000",
+      "actors": [],
+      "genres": [],
+      "directors": [
+        "Director"
+      ],
+      "parent_rating_key": 10,
+      "media_index": 1,
+      "parent_title": "Fixture 10"
+    },
+    "30": {
+      "rating_key": "30",
+      "title": "Fixture 30",
+      "media_type": "episode",
+      "guid": "plex://episode/fixture-30",
+      "duration": "5400000",
+      "summary": "Original synopsis",
+      "year": "2020",
+      "added_at": "1700000000",
+      "actors": [],
+      "genres": [],
+      "directors": [
+        "Director"
+      ],
+      "parent_rating_key": 20,
+      "grandparent_rating_key": 10,
+      "parent_media_index": 1,
+      "media_index": 2,
+      "grandparent_title": "Fixture 10"
+    }
+  },
+  "expected_snapshots": {
+    "1": {
+      "rating_key": 1,
+      "title": "Fixture 1",
+      "year": 2020,
+      "duration": 5400000,
+      "added_at": "2023-11-14T22:13:20",
+      "media_type": "movie",
+      "rating": null,
+      "summary": "Original synopsis",
+      "season_number": null,
+      "episode_number": null,
+      "parent_rating_key": null,
+      "show_title": null,
+      "episode_title": null,
+      "episode_summary": null,
+      "show_rating_key": null,
+      "thumb_path": null,
+      "parent_thumb_path": null,
+      "grandparent_thumb_path": null,
+      "plex_guid": "plex://movie/fixture-1",
+      "actors": [
+        {
+          "id": 1,
+          "name": "Alice",
+          "cast_order": 2
+        },
+        {
+          "id": 2,
+          "name": "Bob",
+          "cast_order": 1
+        }
+      ],
+      "directors": [
+        {
+          "id": 1,
+          "name": "Director"
+        }
+      ],
+      "genres": [
+        {
+          "id": 1,
+          "name": "Drama"
+        }
+      ]
+    },
+    "10": {
+      "rating_key": 10,
+      "title": "Fixture 10",
+      "year": 2020,
+      "duration": null,
+      "added_at": "2023-11-14T22:13:20",
+      "media_type": "show",
+      "rating": null,
+      "summary": "Original synopsis",
+      "season_number": null,
+      "episode_number": null,
+      "parent_rating_key": null,
+      "show_title": "Fixture 10",
+      "episode_title": null,
+      "episode_summary": null,
+      "show_rating_key": 10,
+      "thumb_path": null,
+      "parent_thumb_path": null,
+      "grandparent_thumb_path": null,
+      "plex_guid": "plex://show/fixture-10",
+      "actors": [
+        {
+          "id": 1,
+          "name": "Alice",
+          "cast_order": 0
+        },
+        {
+          "id": 2,
+          "name": "Bob",
+          "cast_order": 1
+        }
+      ],
+      "directors": [
+        {
+          "id": 1,
+          "name": "Director"
+        }
+      ],
+      "genres": [
+        {
+          "id": 1,
+          "name": "Drama"
+        }
+      ]
+    },
+    "20": {
+      "rating_key": 20,
+      "title": "Fixture 20",
+      "year": 2020,
+      "duration": null,
+      "added_at": "2023-11-14T22:13:20",
+      "media_type": "season",
+      "rating": null,
+      "summary": "Original synopsis",
+      "season_number": 1,
+      "episode_number": null,
+      "parent_rating_key": 10,
+      "show_title": "Fixture 10",
+      "episode_title": null,
+      "episode_summary": null,
+      "show_rating_key": 10,
+      "thumb_path": null,
+      "parent_thumb_path": null,
+      "grandparent_thumb_path": null,
+      "plex_guid": "plex://season/fixture-20",
+      "actors": [
+        {
+          "id": 1,
+          "name": "Alice",
+          "cast_order": 0
+        },
+        {
+          "id": 2,
+          "name": "Bob",
+          "cast_order": 1
+        }
+      ],
+      "directors": [
+        {
+          "id": 1,
+          "name": "Director"
+        }
+      ],
+      "genres": [
+        {
+          "id": 1,
+          "name": "Drama"
+        }
+      ]
+    },
+    "30": {
+      "rating_key": 30,
+      "title": "Fixture 30",
+      "year": 2020,
+      "duration": 5400000,
+      "added_at": "2023-11-14T22:13:20",
+      "media_type": "episode",
+      "rating": null,
+      "summary": "Original synopsis",
+      "season_number": 1,
+      "episode_number": 2,
+      "parent_rating_key": 20,
+      "show_title": "Fixture 10",
+      "episode_title": "Fixture 30",
+      "episode_summary": "Original synopsis",
+      "show_rating_key": 10,
+      "thumb_path": null,
+      "parent_thumb_path": null,
+      "grandparent_thumb_path": null,
+      "plex_guid": "plex://episode/fixture-30",
+      "actors": [
+        {
+          "id": 1,
+          "name": "Alice",
+          "cast_order": 0
+        },
+        {
+          "id": 2,
+          "name": "Bob",
+          "cast_order": 1
+        }
+      ],
+      "directors": [
+        {
+          "id": 1,
+          "name": "Director"
+        }
+      ],
+      "genres": [
+        {
+          "id": 1,
+          "name": "Drama"
+        }
+      ]
+    }
+  },
+  "expected_source_signature": "d442d9ddaeb479c6cfc612e354507dd753bfde742038a4197ea1051dbc2c1205"
+}

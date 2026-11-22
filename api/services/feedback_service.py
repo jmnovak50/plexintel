@@ -231,11 +231,11 @@ def record_feedback(
     plex_token: Optional[str] = None,
 ) -> dict:
     normalized_action = normalize_feedback_action(action)
-    seed_feedback_reasons(cur)
-
     item = ensure_library_guid(cur, rating_key)
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
+
+    seed_feedback_reasons(cur)
 
     defaults = action_defaults(normalized_action)
     watchlist_status = defaults["plex_watchlist_status"]

@@ -29,14 +29,20 @@ class ActorCastOrderTests(unittest.TestCase):
             sql,
         )
 
-    def test_ingestion_enumerates_and_upserts_cast_order(self):
-        source = read_repo_file("fetch_tautulli_data.py")
-
-        self.assertIn("INSERT INTO media_actors (media_id, actor_id, cast_order)", source)
-        self.assertIn("ON CONFLICT (media_id, actor_id) DO UPDATE SET", source)
-        self.assertIn("cast_order = EXCLUDED.cast_order", source)
-        self.assertIn("for cast_order, actor in enumerate(actors):", source)
-        self.assertIn('"backfill_cast_order"', source)
+    def test_cast_order_completion_preserves_membership_and_known_orders(self):
+        from unittest.mock import patch
+        from api.services import metadata_ingestion as metadata
+        before = dict(rating_key=1, title='Fixture', media_type='movie',
+                      plex_guid='plex://movie/fixture', actors=[
+                          dict(id=7, name='Alice', cast_order=None),
+                          dict(id=9, name='Bob', cast_order=5)])
+        raw = dict(rating_key=1, media_type='movie', guid='plex://movie/fixture',
+                   actors=['Alice', 'Not a member', 'Bob'])
+        with patch.object(metadata, 'snapshot', return_value=before), patch.object(metadata, 'ingestion_status', return_value={'accepted': False}):
+            plan = metadata.cast_order_plan(None, 1, raw, operator='fixture', reason='Missing order')
+        self.assertEqual(plan['mode'], 'complete')
+        self.assertEqual(plan['relationships'], {'actors': {'action': 'orders', 'values': [dict(id=7, cast_order=0)]}})
+        self.assertEqual(plan['fields'], {})
 
     def test_actor_aggregations_are_ordered_in_runtime_queries(self):
         expected_actor_order = "ORDER BY ma.cast_order NULLS LAST, a.name"

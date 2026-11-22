@@ -4,6 +4,7 @@ import time
 import requests
 import json
 import argparse
+import sys
 import pandas as pd
 from datetime import datetime
 from pgvector.psycopg2 import register_vector
@@ -11,7 +12,6 @@ from pgvector import Vector
 # Ollama embedding client (NAS-hosted EmbeddingGemma)
 from ollama_embeddings import embed_texts
 from api.db.connection import connect_db
-from api.db.schema import ensure_app_schema
 from api.services.app_settings import get_setting_value
 from api.services.tautulli_api import (
     TautulliApiError,
@@ -92,6 +92,7 @@ def sync_users_from_tautulli(conn, cursor):
 
 # ✅ Connect to PostgreSQL Database
 def connect_to_db():
+    conn = None
     try:
         conn = connect_db()
         # ✅ Tell psycopg2 how to handle pgvector's `vector` type
@@ -101,7 +102,9 @@ def connect_to_db():
         print("✅ Connected to PostgreSQL database")
         return conn, cursor
     except Exception as e:
-        print(f"❌ ERROR: Could not connect to PostgreSQL: {e}")
+        if conn is not None:
+            conn.close()
+        print(f"Database connection unavailable: {type(e).__name__}")
         return None, None
 
     
@@ -147,89 +150,17 @@ def fetch_paginated_data(endpoint):
 
 import requests
 
+def _metadata_pages(endpoint, params, collection, page_size):
+    from api.services.metadata_collection import pages
+    return pages(fetch_tautulli_data, endpoint, params, collection, page_size)
+
+
 def get_library_media_info(section_id, limit=None):
-    """
-    Fetches basic metadata for movies and TV shows from the Plex library.
-
-    Args:
-        section_id (int): The library section ID (1 for Movies, 2 for TV Shows)
-
-    Returns:
-        list: A list of media items with basic details (rating_key, title, year, added_at)
-    """
-    all_results = []
-    start = 0
-    page_size = 100  # Adjust as needed for performance
-
-    while True:
-        print(f"🔄 DEBUG: Fetching media info (section_id={section_id}, start={start})")
-        params = {
-            "section_id": section_id,
-            "start": start,
-            "length": page_size
-        }
-        data = fetch_tautulli_data("get_library_media_info", params)
-
-        if not data or "data" not in data:
-            print(f"⚠️ WARNING: No data returned for section_id={section_id}, start={start}")
-            break
-
-        media_items = data["data"]
-        print(f"🔍 DEBUG: Retrieved {len(media_items)} items")
-
-        if not media_items:
-            print(f"⚠️ DEBUG: Empty media_items for section_id={section_id}, stopping.")
-            break
-        all_results.extend(media_items)
-
-        # Pagination check: If results are less than page size, we are at the last page
-        if limit and len(all_results) >= limit:
-            all_results = all_results[:limit]
-            break
-
-        if len(media_items) < page_size:
-            break
-
-        start += page_size  # Move to next page
-
-    print(f"✅ DEBUG: Fetched total {len(all_results)} items for section_id={section_id}")
-    return all_results
+    rows = _metadata_pages("get_library_media_info", {"section_id": section_id}, "data", 100)
+    return rows[:limit] if limit is not None else rows
 
 def get_children_metadata(parent_rating_key):
-    all_children = []
-    start = 0
-    page_size = 50  
-
-    while True:
-        print(f"🔄 Fetching children metadata for parent_rating_key={parent_rating_key}, start={start}")
-        params = {
-            "rating_key": parent_rating_key,
-            "start": start,
-            "length": page_size
-        }
-        data = fetch_tautulli_data("get_children_metadata", params)  
-
-        # ✅ Ensure we're extracting from the correct key
-        if not data or "children_list" not in data:
-            print(f"⚠️ WARNING: No children found for parent_rating_key={parent_rating_key}")
-            break
-
-        children_list = data["children_list"]  # Extracting directly from children_list
-        if not children_list:
-            print(f"⚠️ No valid children data for parent_rating_key={parent_rating_key}")
-            break
-
-        print(f"📦 Batch received: {len(children_list)} items for parent_rating_key={parent_rating_key}")  # <-- Add this
-
-        all_children.extend(children_list)
-
-        if len(children_list) < page_size:
-            break
-
-        start += page_size  
-
-    print(f"✅ Retrieved {len(all_children)} children for parent_rating_key={parent_rating_key}")
-    return all_children
+    return _metadata_pages("get_children_metadata", {"rating_key": parent_rating_key}, "children_list", 50)
 
 
 
@@ -265,113 +196,41 @@ def get_children_metadata(parent_rating_key):
 
 
 _METADATA_CACHE = {}
+_METADATA_DRY_RUN = False
+_METADATA_CACHE_LIMIT = 128
 
-def get_metadata(rating_key):
-    cache_key = safe_int(rating_key)
-    if cache_key is not None and cache_key in _METADATA_CACHE:
-        return _METADATA_CACHE[cache_key]
-
-    print(f"🔄 Fetching detailed metadata for rating_key={rating_key}...")
-    params = {"rating_key": rating_key}
-    metadata = fetch_tautulli_data("get_metadata", params)
-
-    if not metadata:
-        print(f"⚠️ WARNING: No metadata found for rating_key={rating_key}. Trying cache clear...")
-        clear_tautulli_cache()
-        time.sleep(1)
-        metadata = fetch_tautulli_data("get_metadata", params)
-        if not metadata:
-            print(f"❌ ERROR: Still no metadata found for rating_key={rating_key} after cache clear.")
-            return None
-
-    # -------------------------------------------------------------------------
-    # 🧬 3-Tier Metadata Cascade (Episode -> Season -> Show)
-    # -------------------------------------------------------------------------
-    media_type = metadata.get("media_type")
-    
-    # Start with what the item itself has (often empty for episodes)
-    final_genres = metadata.get("genres") or []
-    final_actors = metadata.get("actors") or []
-    final_directors = metadata.get("directors") or []
-    
-    if media_type == 'episode':
-        grandparent_key = metadata.get('grandparent_rating_key')
-        
-        # 1. Level 1: Fetch Show (Grandparent) Metadata
-        # We prioritize Show metadata for Genres and Actors because episodes usually lack them.
-        if grandparent_key and (not final_genres or not final_actors):
-            show_meta = get_metadata(grandparent_key)
-            if show_meta:
-                # Inherit Genres if missing (Crucial for "Comedy", "Sci-Fi" tags)
-                if not final_genres:
-                    final_genres = show_meta.get("genres", [])
-
-                # Inherit Actors if missing (Crucial for "Steve Carell")
-                if not final_actors:
-                    final_actors = show_meta.get("actors", [])
-
-    elif media_type == 'season':
-        parent_key = metadata.get('parent_rating_key')
-        
-        # Level 1: Fetch Show (Parent of Season) Metadata
-        if parent_key and (not final_genres or not final_actors):
-            show_meta = get_metadata(parent_key)
-            if show_meta:
-                if not final_genres:
-                    final_genres = show_meta.get("genres", [])
-                if not final_actors:
-                    final_actors = show_meta.get("actors", [])
-
-
-    # -------------------------------------------------------------------------
-
-    # ✅ Ensure correct extraction of season_number & episode_number
-    if media_type == "episode":
-        season_number = int(metadata["parent_media_index"]) if metadata.get("parent_media_index") else None
-        episode_number = int(metadata["media_index"]) if metadata.get("media_index") else None
-        show_rating_key = safe_int(metadata.get("grandparent_rating_key"))
-    elif media_type == "season":
-        season_number = int(metadata["media_index"]) if metadata.get("media_index") else None
-        episode_number = None
-        show_rating_key = safe_int(metadata.get("parent_rating_key"))
-    elif media_type in ("show", "series"):
-        season_number = None
-        episode_number = None
-        show_rating_key = safe_int(metadata.get("rating_key"))
-    else:
-        season_number = None
-        episode_number = None
-        show_rating_key = None
-
-    out = {
-        "rating_key": metadata.get("rating_key"),
-        "title": metadata.get("title"),
-        "summary": metadata.get("summary"),
-        "rating": metadata.get("rating"),
-        "added_at": metadata.get("added_at"),
-        "year": int(metadata["year"]) if metadata.get("year") else None,
-        "duration": int(metadata["duration"]) if metadata.get("duration") else None,
-        "media_type": media_type,
-        "parent_rating_key": metadata.get("parent_rating_key"),
-        "show_rating_key": show_rating_key,
-        "grandparent_title": metadata.get("grandparent_title"),  # TV Show name
-        "parent_title": metadata.get("parent_title"),  # Season name
-        "thumb_path": metadata.get("thumb"),
-        "parent_thumb_path": metadata.get("parent_thumb"),
-        "grandparent_thumb_path": metadata.get("grandparent_thumb"),
-        "plex_guid": metadata.get("guid"),
-        "season_number": season_number,
-        "episode_number": episode_number,
-        "genres": final_genres,    # ✅ Uses cascaded values
-        "actors": final_actors,    # ✅ Uses cascaded values
-        "directors": final_directors
-    }
-
-    out_key = safe_int(out.get("rating_key")) or cache_key
-    if out_key is not None:
-        _METADATA_CACHE[out_key] = out
-
-    return out
+def get_metadata(rating_key, *, parent_lookup=None, expected_type=None):
+    from api.services.metadata_ingestion import normalize_metadata, integer, MetadataError
+    key = integer(rating_key, required=True)
+    if key in _METADATA_CACHE:
+        if expected_type and _METADATA_CACHE[key]['media_type'] != expected_type:
+            raise MetadataError('discovered_kind_mismatch')
+        return _METADATA_CACHE[key]
+    raw = fetch_tautulli_data("get_metadata", {"rating_key": key})
+    if not raw:
+        if not _METADATA_DRY_RUN:
+            clear_tautulli_cache()
+        raw = fetch_tautulli_data("get_metadata", {"rating_key": key})
+    if not isinstance(raw, dict) or not raw:
+        raise MetadataError("metadata_fetch_failed")
+    if integer(raw.get('rating_key'), required=True) != key:
+        raise MetadataError('requested_key_mismatch')
+    if expected_type and raw.get('media_type') != expected_type:
+        raise MetadataError('discovered_kind_mismatch')
+    show = None
+    show_key = raw.get("grandparent_rating_key") if raw.get("media_type") == "episode" else raw.get("parent_rating_key") if raw.get("media_type") == "season" else None
+    if show_key is not None:
+        show_key = integer(show_key, required=True)
+        if show_key == key:
+            raise MetadataError("cyclic_parent")
+        show = parent_lookup(show_key) if parent_lookup else None
+        if show is None:
+            show = get_metadata(show_key, parent_lookup=parent_lookup, expected_type='show')
+    result = normalize_metadata(key, raw, show=show)
+    _METADATA_CACHE[key] = result
+    if len(_METADATA_CACHE) > _METADATA_CACHE_LIMIT:
+        _METADATA_CACHE.pop(next(iter(_METADATA_CACHE)))
+    return result
 
 # ✅ Fetch library metadata
 def get_library_data(movies_limit=None, tv_limit=None):
@@ -432,224 +291,28 @@ def get_watch_history():
     return result["rows"]
 
 # ✅ Store library metadata in PostgreSQL
-def store_library_data(conn, cursor, library_data):
-    print("📌 Full library_data before inserting:", library_data)
-
-    if not library_data:
-        print("⚠️ No library data found. Skipping library insert.")
-        return
-
-    insert_library = """
-        INSERT INTO library (
-            rating_key, title, year, duration, media_type, summary, rating, added_at, 
-            season_number, episode_number, parent_rating_key, show_rating_key, show_title, episode_title, episode_summary,
-            thumb_path, parent_thumb_path, grandparent_thumb_path, plex_guid
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-        )
-        ON CONFLICT (rating_key) DO UPDATE SET
-            title = EXCLUDED.title,
-            year = EXCLUDED.year,
-            duration = EXCLUDED.duration,
-            media_type = EXCLUDED.media_type,
-            summary = EXCLUDED.summary,
-            rating = EXCLUDED.rating,
-            added_at = EXCLUDED.added_at,
-            season_number = EXCLUDED.season_number,
-            episode_number = EXCLUDED.episode_number,
-            parent_rating_key = EXCLUDED.parent_rating_key,
-            show_rating_key = EXCLUDED.show_rating_key,
-            show_title = EXCLUDED.show_title,
-            episode_title = EXCLUDED.episode_title,
-            episode_summary = EXCLUDED.episode_summary,
-            thumb_path = EXCLUDED.thumb_path,
-            parent_thumb_path = EXCLUDED.parent_thumb_path,
-            grandparent_thumb_path = EXCLUDED.grandparent_thumb_path,
-            plex_guid = EXCLUDED.plex_guid;
-    """
-
-    successful_inserts = 0
-
-    for item in library_data:
-        # ✅ Ensure `rating_key` is assigned at the very beginning of the loop
-        rating_key = item.get("rating_key")
-        if not rating_key:
-            print(f"⚠️ Skipped item missing rating_key: {item}")
-            continue  # Prevents using `rating_key` before it's assigned
-
-        # ✅ Extract values safely
-        title = item.get("title")
-        year = safe_int(item.get("year"))
-        duration = safe_int(item.get("duration"))
-        media_type = item.get("media_type")
-        summary = item.get("summary")
-        rating = item.get("rating")
-        added_at = safe_int(item.get("added_at"))
-        season_number = safe_int(item.get("season_number"))
-        episode_number = safe_int(item.get("episode_number"))
-        parent_rating_key = safe_int(item.get("parent_rating_key"))
-        if media_type == 'episode':
-            show_title = item.get("grandparent_title")
-        elif media_type == 'season':
-            show_title = item.get("parent_title") or item.get("grandparent_title")
-        elif media_type in ('show', 'series'):
-            show_title = item.get("title")
-        else:
-            show_title = None
-        episode_title = item.get("title") if media_type == 'episode' else None
-        episode_summary = summary if media_type == 'episode' else None
-        show_rating_key = safe_int(item.get("show_rating_key"))
-        thumb_path = item.get("thumb_path")
-        parent_thumb_path = item.get("parent_thumb_path")
-        grandparent_thumb_path = item.get("grandparent_thumb_path")
-        plex_guid = item.get("plex_guid")
-
-        # ✅ Print debug info AFTER values are assigned
-        print(f"🔎 DEBUG: Checking extracted values for rating_key={rating_key}")
-        print(f"   - season_number: {season_number}")
-        print(f"   - episode_number: {episode_number}")
-
-        # Extract lists for relationships
-        genres = item.get("genres", [])
-        actors = item.get("actors", [])
-        directors = item.get("directors", [])
-
-        # ✅ Now safe to print debug info (all variables exist)
-        print("🚨 About to INSERT explicitly:", {
-            "rating_key": rating_key,
-            "title": title,
-            "year": year,
-            "duration": duration,
-            "media_type": media_type,
-            "summary": summary[:30] if summary else None,
-            "rating": rating,
-            "added_at": added_at,
-            "season_number": season_number,
-            "episode_number": episode_number,
-            "parent_rating_key": parent_rating_key,
-            "show_rating_key": show_rating_key,
-            "show_title": show_title,
-            "episode_title": episode_title,
-            "episode_summary": episode_summary[:30] if episode_summary else None,
-            "thumb_path": thumb_path,
-            "parent_thumb_path": parent_thumb_path,
-            "grandparent_thumb_path": grandparent_thumb_path,
-            "plex_guid": plex_guid,
-            "genres": genres,
-            "actors": actors,
-            "directors": directors
-        })
-
-        try:
-            cursor.execute(insert_library, (
-                rating_key, title, year, duration, media_type, summary, rating,
-                added_at, season_number, episode_number, parent_rating_key,
-                show_rating_key, show_title, episode_title, episode_summary,
-                thumb_path, parent_thumb_path, grandparent_thumb_path, plex_guid
-            ))
-
-            # ✅ Store associated genres, actors, and directors (only if they exist)
-            if genres:
-                store_genres(conn, cursor, rating_key, genres)
-            if actors:
-                store_actors(conn, cursor, rating_key, actors)
-            if directors:
-                store_directors(conn, cursor, rating_key, directors)
-
-            print(f"✅ Successfully inserted: {rating_key}")
-            successful_inserts += 1
-        except Exception as e:
-            print(f"⚠️ EXCEPTION inserting rating_key={rating_key}: {e}")
-            conn.rollback()
-            
-    print("🔎 Checking database commit…")
-    conn.commit()
-    print(f"✅ Stored {successful_inserts}/{len(library_data)} library items into database.")
+def store_library_data(conn, cursor, library_data, *, dry_run=False, operation_id=None):
+    from api.services.metadata_collection import store_candidates
+    return store_candidates(conn, library_data, dry_run=dry_run, operation_id=operation_id)
 
 
 
 def store_genres(conn, cursor, rating_key, genres):
-    if not genres:
-        return
-
-    insert_genre = """
-        INSERT INTO genres (name) 
-        VALUES (%s) 
-        ON CONFLICT (name) DO NOTHING;
-    """
-    insert_media_genre = """
-        INSERT INTO media_genres (media_id, genre_id) 
-        SELECT %s, id FROM genres WHERE name = %s
-        ON CONFLICT DO NOTHING;
-    """
-
-    for genre in genres:
-        try:
-            cursor.execute(insert_genre, (genre,))  # Ensure genre exists
-            cursor.execute(insert_media_genre, (rating_key, genre))  # Link to media
-        except Exception as e:
-            print(f"⚠️ ERROR inserting genre '{genre}' for rating_key={rating_key}: {e}")
-            conn.rollback()
-
-    conn.commit()
+    # Compatibility helper: transaction ownership belongs to acceptance/correction.
+    from api.services.metadata_ingestion import _write_relationships
+    _write_relationships(cursor, rating_key, "genres", genres)
 
 
 
 def store_actors(conn, cursor, rating_key, actors):
-    if not actors:
-        return
-
-    insert_actor = """
-        INSERT INTO actors (name) 
-        VALUES (%s) 
-        ON CONFLICT (name) DO NOTHING;
-    """
-    insert_media_actor = """
-        INSERT INTO media_actors (media_id, actor_id, cast_order)
-        SELECT %s, id, %s FROM actors WHERE name = %s
-        ON CONFLICT (media_id, actor_id) DO UPDATE SET
-            cast_order = EXCLUDED.cast_order;
-    """
-
-    for cast_order, actor in enumerate(actors):
-        actor_name = str(actor).strip()
-        if not actor_name:
-            continue
-        try:
-            cursor.execute(insert_actor, (actor_name,))  # Ensure actor exists
-            cursor.execute(insert_media_actor, (rating_key, cast_order, actor_name))  # Link to media
-        except Exception as e:
-            print(f"⚠️ ERROR inserting actor '{actor_name}' for rating_key={rating_key}: {e}")
-            conn.rollback()
-
-    conn.commit()
+    from api.services.metadata_ingestion import _write_relationships
+    _write_relationships(cursor, rating_key, "actors", actors)
 
 
 
 def store_directors(conn, cursor, rating_key, directors):
-    if not directors:
-        return
-
-    insert_director = """
-        INSERT INTO directors (name) 
-        VALUES (%s) 
-        ON CONFLICT (name) DO NOTHING;
-    """
-    insert_media_director = """
-        INSERT INTO media_directors (media_id, director_id) 
-        SELECT %s, id FROM directors WHERE name = %s
-        ON CONFLICT DO NOTHING;
-    """
-
-    for director in directors:
-        try:
-            cursor.execute(insert_director, (director,))  # Ensure director exists
-            cursor.execute(insert_media_director, (rating_key, director))  # Link to media
-        except Exception as e:
-            print(f"⚠️ ERROR inserting director '{director}' for rating_key={rating_key}: {e}")
-            conn.rollback()
-
-    conn.commit()
+    from api.services.metadata_ingestion import _write_relationships
+    _write_relationships(cursor, rating_key, "directors", directors)
 
 
 
@@ -698,313 +361,33 @@ def store_watch_history(conn, cursor, watch_history, *, source_grouping, raise_o
 #    print(f"✅ Found {len(to_process)} new or updated media items.")
 #    return to_process
 
-def run_incremental_load(*, embed=True):
+def run_incremental_load(*, embed=True, dry_run=False):
     if embed:
         from api.predictive.retired import assert_legacy_allowed
         assert_legacy_allowed()
-    print("🔁 Running incremental update...")
-
-    conn, cursor = connect_to_db()
-    if not conn:
-        print("❌ ERROR: Could not connect to database.")
-        raise RuntimeError('Source database connection unavailable')
-
-    # Clear before listing libraries so Admin/manual pipeline runs see newly-added
-    # media that Tautulli may still be serving from its cached metadata views.
-    clear_tautulli_cache()
-    
-    # 0. Sync Plex/Tautulli users into the `users` table
-    try:
-        sync_users_from_tautulli(conn, cursor)
-    except Exception as e:
-        # Don't kill the whole incremental run if user sync fails,
-        # but do log it so you can troubleshoot.
-        print(f"⚠️ Failed to sync users from Tautulli: {e}")
-
-    # 1. Fetch all current rating_keys from DB
-    cursor.execute("SELECT rating_key FROM library")
-    existing_keys = {str(row[0]) for row in cursor.fetchall()}
-    queued_keys = set()
-    new_items = []
-
-    def append_new_item(item):
-        rating_key = safe_int(item.get("rating_key")) if isinstance(item, dict) else None
-        if rating_key is None:
-            return
-        rating_key_str = str(rating_key)
-        if rating_key_str in existing_keys or rating_key_str in queued_keys:
-            return
-        new_items.append(item)
-        queued_keys.add(rating_key_str)
-
-    # 2. Get movies
-    print("🎞️ Fetching movies...")
-    movies = get_library_media_info(section_id=1)
-    for movie in movies:
-        append_new_item(movie)
-
-    # 3. Get shows, seasons, and episodes via show → season → episode
-    print("📺 Fetching shows, seasons, and episodes...")
-    shows = get_library_media_info(section_id=2)
-    for show in shows:
-        append_new_item(show)
-        show_key = show["rating_key"]
-        seasons = get_children_metadata(show_key)
-        for season in seasons:
-            if season.get("media_type") != "season":
-                continue
-            append_new_item(season)
-            season_key = season["rating_key"]
-            episodes = get_children_metadata(season_key)
-            for ep in episodes:
-                if ep.get("media_type") == "episode":
-                    append_new_item(ep)
-
-    print(f"📌 New media items to insert: {len(new_items)}")
-
-    # 4. Fetch detailed metadata for each new item
-    enriched = []
-    for item in new_items:
-        metadata = get_metadata(item["rating_key"])
-        if metadata:
-            enriched.append(metadata)
-        else:
-            print(f"⚠️ Could not fetch metadata for rating_key={item['rating_key']}")
-
-    if enriched:
-        print(f"📥 Inserting {len(enriched)} new media entries...")
-        store_library_data(conn, cursor, enriched)
-    else:
-        print("✅ No new content to add.")
-
-    # 5. Repair missing parent header rows implied by already-ingested descendants.
-    backfill_missing_header_records(conn, cursor)
-
-    # 6. One-time backfill path for existing rows added before plex_guid existed.
-    backfill_missing_plex_guids(conn, cursor)
-
-    # 7. Sync new watch history
-    if sync_new_watch_history(conn, cursor) is False:
-        conn.close()
-        raise RuntimeError("Watch history synchronization failed")
-
-    # 8. Optionally embed new stuff immediately after sync
-    if embed and get_setting_value("embeddings.enable_media", default=True):
-        generate_media_embeddings()
-
-    if embed and get_setting_value("embeddings.enable_watches", default=True):
-        generate_watch_embeddings()
-
-    conn.commit()
-    conn.close()
-    print("✅ Incremental update complete.")
+    from api.services.metadata_collection import run
+    return run(sys.modules[__name__], mode="incremental", dry_run=dry_run)
 
 
-def backfill_missing_header_records(conn, cursor):
-    print("🧱 Checking for missing show and season header records...")
-    cursor.execute(
-        """
-        WITH missing_seasons AS (
-            SELECT DISTINCT e.parent_rating_key AS rating_key
-            FROM library e
-            LEFT JOIN library s ON s.rating_key = e.parent_rating_key
-            WHERE e.media_type = 'episode'
-              AND e.parent_rating_key IS NOT NULL
-              AND s.rating_key IS NULL
-        ),
-        missing_shows_from_episodes AS (
-            SELECT DISTINCT e.show_rating_key AS rating_key
-            FROM library e
-            LEFT JOIN library sh ON sh.rating_key = e.show_rating_key
-            WHERE e.media_type = 'episode'
-              AND e.show_rating_key IS NOT NULL
-              AND sh.rating_key IS NULL
-        ),
-        missing_shows_from_seasons AS (
-            SELECT DISTINCT s.parent_rating_key AS rating_key
-            FROM library s
-            LEFT JOIN library sh ON sh.rating_key = s.parent_rating_key
-            WHERE s.media_type = 'season'
-              AND s.parent_rating_key IS NOT NULL
-              AND sh.rating_key IS NULL
-        )
-        SELECT DISTINCT rating_key
-        FROM (
-            SELECT rating_key FROM missing_seasons
-            UNION ALL
-            SELECT rating_key FROM missing_shows_from_episodes
-            UNION ALL
-            SELECT rating_key FROM missing_shows_from_seasons
-        ) missing_headers
-        WHERE rating_key IS NOT NULL
-        ORDER BY rating_key
-        """
-    )
-    missing_header_keys = [row[0] for row in cursor.fetchall()]
-
-    if not missing_header_keys:
-        print("✅ No missing show or season header records found.")
-        return
-
-    print(f"🧱 Backfilling {len(missing_header_keys)} missing show/season header records...")
-    recovered_items = []
-    for rating_key in missing_header_keys:
-        metadata = get_metadata(rating_key)
-        if metadata:
-            recovered_items.append(metadata)
-        else:
-            print(f"⚠️ Could not backfill header metadata for rating_key={rating_key}")
-
-    if not recovered_items:
-        print("⚠️ Missing header records were detected, but no metadata could be recovered.")
-        return
-
-    store_library_data(conn, cursor, recovered_items)
-    print(f"✅ Backfilled {len(recovered_items)} missing header records.")
+def backfill_missing_header_records(conn, cursor, *, dry_run=False):
+    from api.services.metadata_collection import missing_headers, ingest_keys
+    return ingest_keys(sys.modules[__name__], conn, missing_headers(cursor), dry_run=dry_run)
 
 
-def backfill_missing_plex_guids(conn, cursor):
-    print("🪪 Checking for library rows missing plex_guid...")
-    cursor.execute(
-        """
-        SELECT rating_key
-        FROM library
-        WHERE plex_guid IS NULL
-        ORDER BY rating_key
-        """
-    )
-    missing_guid_keys = [row[0] for row in cursor.fetchall()]
-
-    if not missing_guid_keys:
-        print("✅ No existing library rows need plex_guid backfill.")
-        return
-
-    print(f"🪪 Backfilling plex_guid for {len(missing_guid_keys)} existing library rows...")
-    recovered_items = []
-    for rating_key in missing_guid_keys:
-        metadata = get_metadata(rating_key)
-        if metadata:
-            recovered_items.append(metadata)
-        else:
-            print(f"⚠️ Could not backfill metadata for rating_key={rating_key}")
-
-    if not recovered_items:
-        print("⚠️ plex_guid backfill found rows to repair, but no metadata could be recovered.")
-        return
-
-    store_library_data(conn, cursor, recovered_items)
-    print(f"✅ Backfilled plex_guid metadata for {len(recovered_items)} library rows.")
+def backfill_missing_plex_guids(conn, cursor, *, dry_run=False):
+    from api.services.metadata_collection import repair_guids
+    return repair_guids(sys.modules[__name__], conn, dry_run=dry_run)
 
 
-def backfill_actor_cast_order():
-    print("🎭 Checking for actor links missing cast_order...")
-    conn, cursor = connect_to_db()
-    if not conn:
-        print("❌ ERROR: Could not connect to database.")
-        return
-
-    try:
-        cursor.execute(
-            """
-            SELECT DISTINCT l.rating_key
-            FROM library l
-            JOIN media_actors ma ON ma.media_id = l.rating_key
-            WHERE ma.cast_order IS NULL
-            ORDER BY l.rating_key
-            """
-        )
-        rating_keys = [row[0] for row in cursor.fetchall()]
-
-        if not rating_keys:
-            print("✅ No actor cast_order backfill needed.")
-            return
-
-        print(f"🎭 Backfilling actor cast_order for {len(rating_keys)} media item(s)...")
-        updated = 0
-        skipped = 0
-        for rating_key in rating_keys:
-            metadata = get_metadata(rating_key)
-            actors = metadata.get("actors", []) if metadata else []
-            if actors:
-                store_actors(conn, cursor, rating_key, actors)
-                updated += 1
-            else:
-                print(f"⚠️ No recoverable actor order for rating_key={rating_key}")
-                skipped += 1
-
-        conn.commit()
-        print(f"✅ Actor cast_order backfill complete. Updated {updated}, skipped {skipped}.")
-    except Exception as e:
-        print(f"❌ ERROR backfilling actor cast_order: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+def backfill_actor_cast_order(*, rating_keys=None, operator="operator", reason="cast_order_preview", apply=False, dry_run=True, plans=None):
+    from scripts.correct_metadata import order_repairs
+    return order_repairs(sys.modules[__name__], rating_keys=rating_keys, operator=operator,
+                         reason=reason, apply=apply and not dry_run, plans=plans)
 
 
 def recover_missing_media(dry_run=False):
-    print("🔍 Starting comprehensive media recovery process...")
-    conn, cursor = connect_to_db()
-    if not conn:
-        print("❌ ERROR: Could not connect to database.")
-        return
-
-    all_rating_keys = set()
-
-    # 1. Get all movie rating_keys
-    print("🎞️ Collecting movies...")
-    movies = get_library_media_info(section_id=1)
-    all_rating_keys.update(str(item["rating_key"]) for item in movies)
-
-    # 2. Get all episode rating_keys from shows
-    print("📺 Collecting episodes from all shows...")
-    shows = get_library_media_info(section_id=2)
-    for show in shows:
-        show_key = show["rating_key"]
-        seasons = get_children_metadata(show_key)
-        for season in seasons:
-            if season.get("media_type") != "season":
-                continue
-            season_key = season["rating_key"]
-            episodes = get_children_metadata(season_key)
-            for ep in episodes:
-                if ep.get("media_type") == "episode":
-                    all_rating_keys.add(str(ep["rating_key"]))
-
-    print(f"📦 Total media rating_keys found in Plex: {len(all_rating_keys)}")
-
-    # 3. Get existing rating_keys from DB
-    cursor.execute("SELECT rating_key FROM library")
-    existing_keys = {str(row[0]) for row in cursor.fetchall()}
-
-    # 4. Diff
-    missing_keys = all_rating_keys - existing_keys
-    print(f"🧩 Missing from DB: {len(missing_keys)}")
-
-    # 5. Fetch metadata and recover
-    recovered_items = []
-    for rk in missing_keys:
-        print(f"🔍 Attempting fetch for rating_key={rk}")
-        metadata = get_metadata(rk)
-        if metadata:
-            print(f"[RECOVER] rating_key={metadata['rating_key']}, type={metadata.get('media_type')}, title={metadata.get('title')}")
-            recovered_items.append(metadata)
-        else:
-            print(f"⚠️ Could not fetch metadata for rating_key={rk}")
-
-    # 6. Insert or preview
-    if recovered_items:
-        if dry_run:
-            print(f"\n📋 DRY RUN: Would recover {len(recovered_items)} items:")
-            for item in recovered_items:
-                print(f" - {item['media_type']} | {item['title']} (rating_key={item['rating_key']})")
-        else:
-            print(f"\n📥 Inserting {len(recovered_items)} recovered items into the database...")
-            store_library_data(conn, cursor, recovered_items)
-    else:
-        print("✅ No recoverable items found.")
-
-    conn.close()
-    print("🔒 Database connection closed after recovery.")
+    from api.services.metadata_collection import run
+    return run(sys.modules[__name__], mode="recover", dry_run=dry_run)
 
 #def sync_new_library_items(conn, cursor, dry_run=False):
 #    print("🔄 Starting library sync for new media...")
@@ -1509,87 +892,53 @@ def generate_watch_embeddings(batch_size: int | None = None):
     print("✅ Watch embeddings complete.")
 
 # ✅ Main execution
-def main():
-    print("🚀 Script started...")
-    """
-    Main function to fetch and store library data and watch history from Tautulli API to PostgreSQL.
-    """
-    print("🚀 Script started...")
-    ensure_app_schema()
-    conn, cursor = connect_to_db()
-    if not conn:
-        return
+def main(*, dry_run=False):
+    from api.services.metadata_collection import run
+    return run(sys.modules[__name__], mode="full", dry_run=dry_run)
 
-    try:
-        # First, sync Plex/Tautulli users into our `users` table
-        try:
-            sync_users_from_tautulli(conn, cursor)
-        except Exception as e:
-            print(f"⚠️ Failed to sync users from Tautulli in full mode: {e}")
-
-        # Fetch and store library data
-        library_data = get_library_data(movies_limit=None, tv_limit=None)
-        print(f"🚨 DEBUG: Retrieved library data count: {len(library_data)}")
-        if len(library_data) == 0:
-            print("🚨 DEBUG: Library data is EMPTY after get_library_data()!")
-        store_library_data(conn, cursor, library_data)
-
-        # Fetch and store watch history
-        watch_history = get_watch_history()
-        store_watch_history(conn, cursor, watch_history, source_grouping=1)
-
-        # 🔥 Crucial: commit database changes after cursor block
-        conn.commit()
-        print("✅ Data committed successfully.")
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        conn.rollback()
-    finally:
-        if conn:
-            conn.close()
-            print("🔒 Database connection closed.")
-
-# To run media recovery from CLI
-# recover_missing_media()
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plex/Tautulli Media Metadata Importer")
-    parser.add_argument(
-        "--mode",
-        choices=["full", "incremental", "recover", "embeddings", "watch_embeddings", "backfill_cast_order", "watch-history-backfill", "watch-sessions-backfill", "watch-sessions-sync"],
-        default="full",
-        help="Select grouped ingestion, recovery, embeddings, or independent watch-sessions sync/backfill",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview raw-session backfill changes without writes, or preview recover mode",
-    )
-    parser.add_argument("--since", help="Inclusive UTC ISO timestamp for raw-session backfill")
-    parser.add_argument("--until", help="Exclusive UTC ISO timestamp for raw-session backfill")
+def cli(argv=None):
+    parser = argparse.ArgumentParser(description="Plex/Tautulli importer: explicit acceptance, never implicit reimport")
+    parser.add_argument("--mode", required=True, choices=["full", "incremental", "recover", "embeddings", "watch_embeddings", "backfill_cast_order", "watch-history-backfill", "watch-sessions-backfill", "watch-sessions-sync"])
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--since"); parser.add_argument("--until")
     parser.add_argument("--page-size", type=int, default=1000)
-    parser.add_argument("--no-embeddings", action="store_true", help="Metadata/history ingestion only; generation pipeline owns encoding")
-    args = parser.parse_args()
+    parser.add_argument("--no-embeddings", action="store_true")
+    parser.add_argument("--rating-key", type=int, action="append")
+    parser.add_argument("--operator"); parser.add_argument("--reason")
+    parser.add_argument("--apply", action="store_true", help="Apply explicitly scoped cast-order repairs")
+    parser.add_argument("--plan", help="Reviewed cast-order preview JSON; required for --apply")
+    args = parser.parse_args(argv)
+    try:
+        if args.mode in ("watch-history-backfill", "watch-sessions-backfill", "watch-sessions-sync"):
+            stats = run_watch_sessions(dry_run=args.dry_run, since=args.since, until=args.until,
+                                      page_size=args.page_size, incremental=args.mode == "watch-sessions-sync")
+            return 75 if stats.get("busy") else (1 if stats["failed"] or stats["errors"] else 0)
+        if args.mode == "full": main(dry_run=args.dry_run)
+        elif args.mode == "incremental": run_incremental_load(embed=not args.no_embeddings, dry_run=args.dry_run)
+        elif args.mode == "recover": recover_missing_media(dry_run=args.dry_run)
+        elif args.mode == "backfill_cast_order":
+            if not args.rating_key or not args.operator or not args.reason:
+                parser.error("cast-order preparation requires --rating-key, --operator and --reason")
+            if args.apply and not args.plan:
+                parser.error("--apply requires the reviewed --plan; use scripts/correct_metadata.py for explicit corrections")
+            plans=None
+            if args.plan:
+                with open(args.plan) as handle: plans=json.load(handle)
+            if isinstance(plans,dict): plans=[plans]
+            plans = backfill_actor_cast_order(rating_keys=args.rating_key, operator=args.operator,
+                       reason=args.reason, apply=args.apply, dry_run=args.dry_run or not args.apply, plans=plans)
+            print(json.dumps(plans, indent=2, default=str))
+        else:
+            if args.dry_run:
+                parser.error("retired numeric modes do not support a writable preview")
+            if args.mode == "embeddings": generate_media_embeddings()
+            else: generate_watch_embeddings()
+        return 0
+    except Exception as exc:
+        from api.services.metadata_ingestion import error_code
+        print("Importer failed: " + type(exc).__name__ + ": " + error_code(exc), file=sys.stderr)
+        return 1
 
-    print(f"🚀 Starting script in '{args.mode}' mode...")
 
-    if args.mode == "full":
-        main()
-    elif args.mode in ("watch-history-backfill", "watch-sessions-backfill", "watch-sessions-sync"):
-        if args.mode == "watch-history-backfill":
-            print("Deprecated mode alias: backfill writes watch_sessions only")
-        stats = run_watch_sessions(dry_run=args.dry_run, since=args.since,
-                                  until=args.until, page_size=args.page_size,
-                                  incremental=args.mode == "watch-sessions-sync")
-        raise SystemExit(75 if stats.get("busy") else (1 if stats["failed"] or stats["errors"] else 0))
-    elif args.mode == "incremental":
-        run_incremental_load(embed=not args.no_embeddings)
-    elif args.mode == "recover":
-        recover_missing_media(dry_run=args.dry_run)
-    elif args.mode == "embeddings":
-        # Media embeddings via Ollama + VectorChord
-        generate_media_embeddings()
-    elif args.mode == "watch_embeddings":
-        # Watch embeddings via Ollama + VectorChord
-        generate_watch_embeddings()
-    elif args.mode == "backfill_cast_order":
-        backfill_actor_cast_order()
+if __name__ == "__main__":
+    raise SystemExit(cli())
