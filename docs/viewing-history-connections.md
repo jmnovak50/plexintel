@@ -131,8 +131,10 @@ The structured field is `viewing_history_connection`; existing `explanation`,
 The shared service enriches the existing authenticated session page after its
 current pagination, authorized agent/MCP/OpenWebUI recommendation results after
 their existing scope checks, and the recipient's digest. Public rendering
-allowlists relationship type, source title/kind, shared names, evidence category
-and factual text. It excludes source keys/GUIDs, raw history/session IDs,
+allowlists relationship type, source title/kind, target fact title/kind, shared
+names, evidence category and factual text. Episode/season cards explicitly name
+the target series for credits/genre connections, avoiding an episode-credit
+assertion. It excludes source keys/GUIDs, raw history/session IDs,
 provenance fingerprints and internal generations. Email output remains escaped.
 
 The unauthenticated legacy `/api/recs` and global-key public recommendation

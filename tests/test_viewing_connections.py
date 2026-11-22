@@ -87,7 +87,7 @@ def test_real_factual_connections_persist_and_reuse(db,monkeypatch,relation):
     assert c['relationship_type']==relation and c['viewer_evidence']=='watched'
     assert c['source_title']=='Film 1'
     assert 'because' not in c['display_text'] and 'you like' not in c['display_text'].lower()
-    assert set(c)=={'relationship_type','source_title','source_media_type','shared_elements','viewer_evidence','display_text'}
+    assert set(c)=={'relationship_type','source_title','source_media_type','shared_elements','viewer_evidence','display_text','target_scope'}
     monkeypatch.setattr(v,'derive',lambda *a:pytest.fail('Warm read rediscovered history'))
     second,reused=get(db);assert first==second and reused
     assert scalar(db,'SELECT count(*) FROM viewing_connection_context')==1
@@ -448,3 +448,14 @@ def test_new_accepted_title_recovers_previously_unlinked_watching(db):
     with db.cursor() as q:m.accept(q,candidate,operation_id=uuid4())
     db.commit()
     assert get(db)[0][2]['source_title']=='Fixture 1'
+
+
+@pytest.mark.parametrize('kind',['cast','director','genre'])
+def test_episode_card_explicitly_names_target_series_fact_scope(db,kind):
+    television(db);title(db,1);watch(db,1)
+    link(db,kind,1,'Shared');link(db,kind,10,'Shared')
+    c=get(db,(13,))[0][13]
+    assert c['target_scope']=={'title':'Film 10','media_type':'show'}
+    assert 'the series Film 10' in c['display_text']
+    assert 'Film 13' not in c['display_text']
+    assert c['source_media_type']=='movie'

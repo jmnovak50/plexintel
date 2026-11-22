@@ -190,7 +190,10 @@ def derive(cur, username, rows):
             found[r['target']] = {'relationship_type':r['relation'],'shared_names':r['names'],'shared_ids':r['ids'],
                 'source_identity':evidence['canonical'],'source_title':evidence['title'],
                 'source_media_type':evidence['media_type'],'source_year':evidence['year'],
-                'evidence':{k:evidence[k] for k in ('basis','event_count','fraction','last_seen','like_scope')}}
+                'evidence':{k:evidence[k] for k in ('basis','event_count','fraction','last_seen','like_scope')},
+                'target_fact_identity':targets[r['target']]['group_identity'],
+                'target_fact_title':catalog.rows[targets[r['target']]['fact_key']]['title'],
+                'target_fact_media_type':catalog.rows[targets[r['target']]['fact_key']]['media_type']}
     # Invalid/unsupported targets are explicit no-results too when identity is typed.
     return {row['rating_key']: (identity(catalog.rows.get(row['rating_key'],{})), found.get(catalog.canonical(row['rating_key']))) for row in rows}
 
@@ -206,11 +209,17 @@ def present(connection):
     if relation not in ('series','cast','director','genre'): return None
     joined = ', '.join(names[:-1])+' and '+names[-1] if len(names)>1 else (names[0] if names else '')
     if relation == 'series': text = start + '. This recommendation is from the same series.'
-    elif relation == 'cast': text = start + ', which also features ' + joined + '.'
-    elif relation == 'director': text = start + ', which shares a director: ' + joined + '.'
-    else: text = start + ('. Both list the genre ' if len(names)==1 else '. Both list the genres ') + joined + '.'
+    elif relation == 'cast':
+        text = start + (', which shares cast member ' + joined + ' with the series ' + connection['target_fact_title'] + '.' if connection.get('target_fact_media_type')=='show' else ', which also features ' + joined + '.')
+    elif relation == 'director':
+        text = start + (', which shares director ' + joined + ' with the series ' + connection['target_fact_title'] + '.' if connection.get('target_fact_media_type')=='show' else ', which shares a director: ' + joined + '.')
+    else:
+        text = start + ('. Both list the genre ' if len(names)==1 else '. Both list the genres ') + joined + '.'
+        if connection.get('target_fact_media_type')=='show':
+            text = start + '. ' + source + ' and the series ' + connection['target_fact_title'] + (' both list the genre ' if len(names)==1 else ' both list the genres ') + joined + '.'
     return {'relationship_type':relation,'source_title':source,'source_media_type':connection['source_media_type'],
-            'shared_elements':names,'viewer_evidence':basis,'display_text':text}
+            'shared_elements':names,'viewer_evidence':basis,'display_text':text,
+            'target_scope':{'title':connection.get('target_fact_title'),'media_type':connection.get('target_fact_media_type')}}
 
 
 def _versions(cur, username, *, lock=False):
