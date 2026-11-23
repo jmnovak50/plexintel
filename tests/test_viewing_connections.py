@@ -77,6 +77,8 @@ def common(db,kind='cast'):
     title(db,1);title(db,2)
     link(db,kind,1,'Shared Person' if kind!='genre' else 'Drama')
     link(db,kind,2,'Shared Person' if kind!='genre' else 'Drama')
+    if kind=='genre':
+        link(db,'genre',1,'Action');link(db,'genre',2,'Action')
     watch(db,1)
 
 
@@ -115,7 +117,7 @@ def test_intent_negative_and_explicit_likes(db,state,expected):
     common(db);execute(db,'DELETE FROM watch_history');feedback(db,1,state)
     c=get(db)[0][2]
     assert (c or {}).get('viewer_evidence')==expected
-    if c:assert c['display_text'].startswith('You marked Film 1 as liked')
+    if c:assert c['display_text'].startswith('You liked Film 1')
 
 
 @pytest.mark.parametrize('played,qualifies',[(0,False),(2999,False),(3000,True),(6000,True)])
@@ -163,9 +165,9 @@ def television(db):
 
 def test_show_facts_and_continuity_for_all_television_views(db):
     television(db);watch(db,12)
-    values=get(db,(10,11,13))[0]
+    values={key:get(db,(key,))[0][key] for key in (10,11,13)}
     assert all(c['relationship_type']=='series' for c in values.values())
-    assert all('same series' in c['display_text'] for c in values.values())
+    assert all(c['display_text']=="You've watched some of Film 10." for c in values.values())
     title(db,2);link(db,'cast',10,'Series Actor');link(db,'cast',2,'Series Actor')
     c=get(db)[0][2];assert c['source_title']=='Film 10' and c['source_media_type']=='show'
     assert 'episode' not in c['display_text'].lower() and 'Series Actor' in c['display_text']
@@ -173,7 +175,7 @@ def test_show_facts_and_continuity_for_all_television_views(db):
 
 def test_episode_like_is_not_claimed_as_whole_show_like(db):
     television(db);title(db,2);link(db,'cast',10,'Actor');link(db,'cast',2,'Actor');feedback(db,12,'watched_like')
-    assert get(db)[0][2]['display_text'].startswith('You marked an episode of Film 10 as liked')
+    assert get(db)[0][2]['display_text'].startswith('You liked an episode of Film 10. The series')
 
 
 @pytest.mark.parametrize('key',[10,11,12])
@@ -275,7 +277,7 @@ def test_failures_abstain_without_breaking_recommendations(monkeypatch):
 
 
 def test_genre_combination_and_deterministic_selection(db):
-    common(db,'genre');link(db,'genre',1,'Action');link(db,'genre',2,'Action')
+    common(db,'genre')
     first=get(db)[0][2];assert first['shared_elements']==['Action','Drama']
     execute(db,"DELETE FROM viewing_connection_context")
     assert get(db)[0][2]==first
@@ -454,8 +456,128 @@ def test_new_accepted_title_recovers_previously_unlinked_watching(db):
 def test_episode_card_explicitly_names_target_series_fact_scope(db,kind):
     television(db);title(db,1);watch(db,1)
     link(db,kind,1,'Shared');link(db,kind,10,'Shared')
+    if kind=='genre':
+        link(db,'genre',1,'Other');link(db,'genre',10,'Other')
     c=get(db,(13,))[0][13]
     assert c['target_scope']=={'title':'Film 10','media_type':'show'}
     assert 'the series Film 10' in c['display_text']
     assert 'Film 13' not in c['display_text']
     assert c['source_media_type']=='movie'
+
+
+def test_single_shared_genre_abstains_and_reuses_no_result(db,monkeypatch):
+    title(db,1);title(db,2);watch(db,1)
+    link(db,'genre',1,'Comedy');link(db,'genre',2,'Comedy')
+    assert get(db)[0]=={2:None}
+    assert scalar(db,"SELECT status FROM viewing_connection_context")=='none'
+    monkeypatch.setattr(v,'derive',lambda *args:pytest.fail('Single-genre abstention rediscovered'))
+    assert get(db)[0]=={2:None}
+
+
+def test_target_cast_prominence_precedes_raw_event_count(db):
+    for key in (1,2,3):title(db,key)
+    link(db,'cast',1,'Small target role',order=0);link(db,'cast',2,'Small target role',order=20)
+    link(db,'cast',3,'Prominent target role',order=0);link(db,'cast',2,'Prominent target role',order=0)
+    for event in range(10):watch(db,1,played=6000,event=100+event)
+    watch(db,3,played=6000)
+    c=get(db)[0][2]
+    assert c['shared_elements']==['Prominent target role']
+    assert c['source_title']=='Film 3'
+
+
+def test_source_cast_prominence_breaks_tie_before_event_count(db):
+    for key in (1,2,3):title(db,key)
+    link(db,'cast',1,'Actor',order=30);link(db,'cast',2,'Actor',order=0);link(db,'cast',3,'Actor',order=0)
+    for event in range(10):watch(db,1,played=6000,event=100+event)
+    watch(db,3,played=6000)
+    assert get(db)[0][2]['source_title']=='Film 3'
+
+
+def test_unknown_cast_order_is_available_but_known_order_wins(db):
+    for key in (1,2,3):title(db,key)
+    link(db,'cast',1,'Unknown role',order=None);link(db,'cast',2,'Unknown role',order=None)
+    watch(db,1,played=6000);assert get(db)[0][2]
+    link(db,'cast',3,'Known role',order=0);link(db,'cast',2,'Known role',order=0);watch(db,3,played=6000)
+    assert get(db)[0][2]['shared_elements']==['Known role']
+
+
+def test_repetition_suppression_preserves_every_saved_selection(db,monkeypatch):
+    common(db);title(db,3);link(db,'cast',3,'Shared Person')
+    first,_=get(db,(3,2));assert first[3] and first[2] is None
+    assert scalar(db,"SELECT count(*) FROM viewing_connection_context WHERE status='ready'")==2
+    monkeypatch.setattr(v,'derive',lambda *args:pytest.fail('Suppression discarded a saved selection'))
+    assert get(db,(3,2))[0]==first
+    assert get(db,(2,))[0][2]  # A different page can reuse the suppressed choice.
+    reverse=get(db,(2,3))[0];assert reverse[2] and reverse[3] is None
+
+
+def test_same_actor_from_different_sources_is_still_repetitive(db):
+    for key in (1,2,3,4):title(db,key)
+    for key in (1,2,3,4):link(db,'cast',key,'Actor')
+    watch(db,1);watch(db,3)
+    result=get(db,(2,4))[0]
+    assert sum(bool(c) for c in result.values())==1
+
+
+def test_series_repetition_and_short_wording(db):
+    television(db);watch(db,12)
+    result=get(db,(13,11,10))[0]
+    assert result[13]['display_text']=="You've watched some of Film 10."
+    assert result[11] is None and result[10] is None
+    assert scalar(db,"SELECT count(*) FROM viewing_connection_context WHERE status='ready'")==3
+
+
+@pytest.mark.parametrize('kind',['cast','director','genre'])
+def test_episode_like_sentence_never_attaches_series_credit_to_episode(db,kind):
+    television(db);title(db,2);feedback(db,12,'watched_like')
+    link(db,kind,10,'Shared');link(db,kind,2,'Shared')
+    if kind=='genre':link(db,kind,10,'Other');link(db,kind,2,'Other')
+    text=get(db)[0][2]['display_text']
+    assert text.startswith('You liked an episode of Film 10. The series')
+    assert 'episode of Film 10, which' not in text
+    assert 'because' not in text
+
+
+def test_policy_two_replaces_old_results_once_without_source_mutation(db,monkeypatch):
+    common(db);get(db)
+    execute(db,"UPDATE viewing_connection_context SET policy_version='viewing-history-connections/1'")
+    before=scalar(db,'SELECT count(*) FROM watch_history')
+    original=v.derive;calls=[]
+    def counted(*args):calls.append(1);return original(*args)
+    monkeypatch.setattr(v,'derive',counted)
+    assert get(db)[0][2] and get(db)[0][2]
+    assert calls==[1] and scalar(db,'SELECT count(*) FROM watch_history')==before
+    assert scalar(db,'SELECT policy_version FROM viewing_connection_context')=='viewing-history-connections/2'
+
+
+def test_different_facts_from_one_source_are_not_arbitrarily_limited(db):
+    for key in (1,2,3):title(db,key)
+    link(db,'cast',1,'Actor A');link(db,'cast',1,'Actor B',order=1)
+    link(db,'cast',2,'Actor A');link(db,'cast',3,'Actor B')
+    watch(db,1)
+    result=get(db,(2,3))[0]
+    assert result[2] and result[3]
+    assert result[2]['shared_elements']!=result[3]['shared_elements']
+
+
+def test_same_series_liked_episode_wording_is_short_and_scoped(db):
+    television(db);feedback(db,12,'watched_like')
+    assert get(db,(13,))[0][13]['display_text']=='You liked an episode of Film 10.'
+
+
+def test_independent_refresh_preserves_requested_presentation_order(db,monkeypatch):
+    from types import SimpleNamespace
+    from api.routes import recommendation_routes as r
+    common(db);title(db,3);link(db,'cast',3,'Shared Person')
+    execute(db,"INSERT INTO recommendations(username,rating_key,score) VALUES('alice',2,.9),('alice',3,.8)")
+    monkeypatch.setenv('PLEXINTEL_VIEWING_CONNECTIONS_ENABLED','true')
+    monkeypatch.setattr(r,'get_plex_username',lambda token,**kwargs:'alice')
+    monkeypatch.setattr(r,'connect_db',lambda:psycopg2.connect(db.dsn))
+    original=v.lookup
+    monkeypatch.setattr(v,'lookup',lambda owner,rows:original(owner,rows,connect=lambda:psycopg2.connect(db.dsn)))
+    request=SimpleNamespace(session={'plex_token':'fixture'})
+    response=r.get_viewing_history_connections(request,[3,2])
+    assert list(response['connections'])==[3,2]
+    assert response['connections'][3] and response['connections'][2] is None
+    reverse=r.get_viewing_history_connections(request,[2,3])
+    assert reverse['connections'][2] and reverse['connections'][3] is None

@@ -44,23 +44,47 @@ Separate qualified grouped events affect tie-breaking; no claim of a complete
 rewatch is made from those counts. Recent activity and more complete playback
 also affect ties, without creating another engagement classifier.
 
-## Selection policy v1
+## Selection policy v2
 
 Choose one connection per viewer/canonical display target, in this order:
 
 1. The same actual series relationship.
 2. A shared normalized director.
 3. A shared normalized cast member.
-4. Two or more shared genres, then a single shared genre.
+4. Two or more actual shared genres. A single shared genre does not qualify;
+   no connection is preferable to a broad single-tag fallback.
 
-Within a tier, prefer explicit liking, greater observed playback fraction
-(capped at one), more qualified grouped events, more recent evidence, then
-known target cast order, canonical source identity and entity ID. All ties are
-stable; there is no weighted quality formula. Genre wording includes at most
-three actual shared tags. Higher-priority matches prevent unnecessary lower-tier
-SQL work. Persisting a choice makes it independent of page arrival order. There
-is no page-dependent reshuffling or cross-page diversity state; repetition can
-be reviewed before adding such a policy.
+Within a tier, prefer explicit liking and greater observed playback fraction
+(capped at one), then known target cast order and source cast order, followed by
+qualified grouped-event count, recency, canonical source identity and entity ID.
+Cast order therefore influences selection before a raw event count can let a
+frequently watched series dominate a more prominent shared cast member. Unknown
+orders sort after known orders but do not disqualify a connection. There is no
+invented leading-cast cutoff or weighted quality formula. Genre wording includes
+at most three actual shared tags. Higher-priority matches prevent unnecessary
+lower-tier SQL work.
+
+Persist every selected viewer/target connection independently of page arrival
+order. At presentation, show each actor, director, displayed genre combination
+or same-series fact only once within the requested page/batch, in its existing
+order. Repetitions return null context for that page; their saved rows remain
+ready and can be reused when viewed on another page or alone. This is distinct
+from a persisted no-result: no supporting evidence is deleted or declared
+absent. Different facts from one historical source can still be shown. There is
+no arbitrary source quota, score/rank change, alternate filler selection,
+cross-page fatigue profile or dependency graph. The independent UI refresh
+preserves requested key order so its suppression winner matches the page.
+
+Same-series wording is concise: "You've watched some of X" for observed
+watching, or "You liked an episode/season of X" for scoped explicit feedback.
+Episode/season likes use a separate sentence naming the series before describing
+its credits, avoiding a relative clause that attaches a series credit to the
+liked episode. No episode-credit or completion metadata is newly required.
+
+Policy version `viewing-history-connections/2` invalidates version 1 saved
+connections and no-results on first access, then reuses version 2 results.
+Source revisions, persistence schema, authorization and feature activation are
+unchanged. No migration or source-data correction is needed for this refinement.
 
 Collections/franchise edges, writers and creators are not represented in the
 normalized relationship schema and are not inferred from names, genres or plot.

@@ -231,7 +231,7 @@ def get_viewing_history_connections(request: Request, rating_key: list[int] = Qu
         owner = get_plex_username(token, timeout=2)
     except Exception:
         raise HTTPException(status_code=403, detail="Invalid token") from None
-    keys = sorted(set(rating_key))
+    keys = list(dict.fromkeys(rating_key))
     if not keys or any(type(key) is not int or key <= 0 for key in keys):
         raise HTTPException(status_code=400, detail="Positive recommendation keys required")
     # Existing scoring rows authorize leaf targets and their displayed TV groups.
@@ -242,9 +242,9 @@ def get_viewing_history_connections(request: Request, rating_key: list[int] = Qu
         conn.set_session(readonly=True)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SET LOCAL statement_timeout='2s'")
-            cur.execute("""SELECT DISTINCT key AS rating_key FROM unnest(%s::int[]) key
+            cur.execute("""SELECT key AS rating_key FROM unnest(%s::int[]) WITH ORDINALITY requested(key,position)
                 WHERE EXISTS(SELECT 1 FROM recommendations r JOIN library l USING(rating_key)
-                 WHERE r.username=%s AND (r.rating_key=key OR l.show_rating_key=key OR l.parent_rating_key=key))""", (keys, owner))
+                 WHERE r.username=%s AND (r.rating_key=key OR l.show_rating_key=key OR l.parent_rating_key=key)) ORDER BY requested.position""", (keys, owner))
             rows = cur.fetchall()
         attach_viewing_connections(rows, owner)
         return {"connections": {r['rating_key']:r.get('viewing_history_connection') for r in rows}}

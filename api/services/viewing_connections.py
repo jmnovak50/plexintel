@@ -11,7 +11,7 @@ from psycopg2.extras import RealDictCursor, Json, execute_values
 from api.db.connection import connect_db
 from api.predictive.recovery import stable_identity, IdentityError
 
-POLICY = 'viewing-history-connections/1'
+POLICY = 'viewing-history-connections/2'
 MAX_PAGE = 250
 log = logging.getLogger(__name__)
 
@@ -155,18 +155,18 @@ DISCOVERY = '''WITH targets AS MATERIALIZED (
  SELECT * FROM jsonb_to_recordset(%s::jsonb) AS x(fact_key int,canonical text,title text,media_type text,year int,
  liked boolean,fraction float,event_count int,last_seen text,basis text,like_scope text)),
  continuity AS MATERIALIZED (
- SELECT t.target,s.canonical,0 tier,'series' relation,ARRAY[]::text[] names,ARRAY[]::int[] ids,0 prominence FROM targets t JOIN sources s ON s.canonical=t.group_identity WHERE s.media_type='show'),
+ SELECT t.target,s.canonical,0 tier,'series' relation,ARRAY[]::text[] names,ARRAY[]::int[] ids,0 prominence,0 source_prominence FROM targets t JOIN sources s ON s.canonical=t.group_identity WHERE s.media_type='show'),
  direction AS MATERIALIZED (
- SELECT t.target,s.canonical,1,'director',ARRAY[d.name],ARRAY[d.id],0 FROM targets t JOIN media_directors a ON a.media_id=t.fact_key JOIN media_directors b ON b.director_id=a.director_id JOIN sources s ON s.fact_key=b.media_id JOIN directors d ON d.id=a.director_id WHERE s.canonical<>t.group_identity AND NOT EXISTS(SELECT 1 FROM continuity h WHERE h.target=t.target)),
+ SELECT t.target,s.canonical,1,'director',ARRAY[d.name],ARRAY[d.id],0,0 FROM targets t JOIN media_directors a ON a.media_id=t.fact_key JOIN media_directors b ON b.director_id=a.director_id JOIN sources s ON s.fact_key=b.media_id JOIN directors d ON d.id=a.director_id WHERE s.canonical<>t.group_identity AND NOT EXISTS(SELECT 1 FROM continuity h WHERE h.target=t.target)),
  cast_matches AS MATERIALIZED (
- SELECT t.target,s.canonical,2,'cast',ARRAY[p.name],ARRAY[p.id],coalesce(a.cast_order,2147483647) FROM targets t JOIN media_actors a ON a.media_id=t.fact_key JOIN media_actors b ON b.actor_id=a.actor_id JOIN sources s ON s.fact_key=b.media_id JOIN actors p ON p.id=a.actor_id WHERE s.canonical<>t.group_identity AND NOT EXISTS(SELECT 1 FROM continuity h WHERE h.target=t.target) AND NOT EXISTS(SELECT 1 FROM direction h WHERE h.target=t.target)),
+ SELECT t.target,s.canonical,2,'cast',ARRAY[p.name],ARRAY[p.id],coalesce(a.cast_order,2147483647),coalesce(b.cast_order,2147483647) FROM targets t JOIN media_actors a ON a.media_id=t.fact_key JOIN media_actors b ON b.actor_id=a.actor_id JOIN sources s ON s.fact_key=b.media_id JOIN actors p ON p.id=a.actor_id WHERE s.canonical<>t.group_identity AND NOT EXISTS(SELECT 1 FROM continuity h WHERE h.target=t.target) AND NOT EXISTS(SELECT 1 FROM direction h WHERE h.target=t.target)),
  genre_matches AS MATERIALIZED (
- SELECT t.target,s.canonical,CASE WHEN count(*)>1 THEN 3 ELSE 4 END,'genre',array_agg(g.name ORDER BY g.name COLLATE "C"),array_agg(g.id ORDER BY g.name COLLATE "C"),0 FROM targets t JOIN media_genres a ON a.media_id=t.fact_key JOIN media_genres b ON b.genre_id=a.genre_id JOIN sources s ON s.fact_key=b.media_id JOIN genres g ON g.id=a.genre_id WHERE s.canonical<>t.group_identity AND NOT EXISTS(SELECT 1 FROM continuity h WHERE h.target=t.target) AND NOT EXISTS(SELECT 1 FROM direction h WHERE h.target=t.target) AND NOT EXISTS(SELECT 1 FROM cast_matches h WHERE h.target=t.target) GROUP BY t.target,s.canonical),
+ SELECT t.target,s.canonical,3,'genre',array_agg(g.name ORDER BY g.name COLLATE "C"),array_agg(g.id ORDER BY g.name COLLATE "C"),0,0 FROM targets t JOIN media_genres a ON a.media_id=t.fact_key JOIN media_genres b ON b.genre_id=a.genre_id JOIN sources s ON s.fact_key=b.media_id JOIN genres g ON g.id=a.genre_id WHERE s.canonical<>t.group_identity AND NOT EXISTS(SELECT 1 FROM continuity h WHERE h.target=t.target) AND NOT EXISTS(SELECT 1 FROM direction h WHERE h.target=t.target) AND NOT EXISTS(SELECT 1 FROM cast_matches h WHERE h.target=t.target) GROUP BY t.target,s.canonical HAVING count(*)>=2),
  candidates AS(SELECT * FROM continuity UNION ALL SELECT * FROM direction UNION ALL SELECT * FROM cast_matches UNION ALL SELECT * FROM genre_matches),
  ranked AS (
- SELECT c.*,to_jsonb(s) evidence,row_number() OVER(PARTITION BY target ORDER BY tier,liked DESC,fraction DESC,event_count DESC,last_seen DESC,prominence,s.canonical COLLATE "C",ids) position
+ SELECT c.*,to_jsonb(s) evidence,row_number() OVER(PARTITION BY target ORDER BY tier,liked DESC,fraction DESC,prominence,source_prominence,event_count DESC,last_seen DESC,s.canonical COLLATE "C",ids) position
  FROM candidates c JOIN sources s ON s.canonical=c.canonical)
- SELECT target,relation,names,ids,evidence FROM ranked WHERE position=1'''
+ SELECT target,relation,names,ids,evidence,prominence,source_prominence FROM ranked WHERE position=1'''
 
 
 def derive(cur, username, rows):
@@ -193,33 +193,67 @@ def derive(cur, username, rows):
                 'evidence':{k:evidence[k] for k in ('basis','event_count','fraction','last_seen','like_scope')},
                 'target_fact_identity':targets[r['target']]['group_identity'],
                 'target_fact_title':catalog.rows[targets[r['target']]['fact_key']]['title'],
-                'target_fact_media_type':catalog.rows[targets[r['target']]['fact_key']]['media_type']}
+                'target_fact_media_type':catalog.rows[targets[r['target']]['fact_key']]['media_type'],
+                'cast_orders':{scope:(r[field] if r[field]!=2147483647 else None) for scope,field in (('target','prominence'),('source','source_prominence'))} if r['relation']=='cast' else None}
     # Invalid/unsupported targets are explicit no-results too when identity is typed.
     return {row['rating_key']: (identity(catalog.rows.get(row['rating_key'],{})), found.get(catalog.canonical(row['rating_key']))) for row in rows}
 
 
 def present(connection):
-    """Allowlist public output; never return private identities/IDs/generations."""
+    """Allowlist public output; distinguish liking a part from its series facts."""
     if not connection: return None
     source = connection['source_title']
     basis = connection['evidence']['basis']
-    like_prefix = {'episode':'an episode of ', 'season':'a season of '}.get(connection['evidence'].get('like_scope'), '')
-    start = f'You marked {like_prefix}{source} as liked' if basis == 'explicitly_liked' else f"You've watched {source}"
+    scope = connection['evidence'].get('like_scope')
+    part_like = basis == 'explicitly_liked' and scope in ('episode','season')
+    like_prefix = {'episode':'an episode of ', 'season':'a season of '}.get(scope, '')
+    start = f'You liked {like_prefix}{source}' if basis == 'explicitly_liked' else f"You've watched {source}"
     relation = connection['relationship_type']; names = connection['shared_names'][:3]
     if relation not in ('series','cast','director','genre'): return None
     joined = ', '.join(names[:-1])+' and '+names[-1] if len(names)>1 else (names[0] if names else '')
-    if relation == 'series': text = start + '. This recommendation is from the same series.'
+    # The relative clause must not attach a series credit to the liked episode.
+    bridge = '. The series' if part_like else ', which'
+    target_series = connection.get('target_fact_media_type') == 'show'
+    if relation == 'series':
+        text = start + '.' if basis == 'explicitly_liked' else f"You've watched some of {source}."
     elif relation == 'cast':
-        text = start + (', which shares cast member ' + joined + ' with the series ' + connection['target_fact_title'] + '.' if connection.get('target_fact_media_type')=='show' else ', which also features ' + joined + '.')
+        text = start + bridge + (' shares cast member '+joined+' with the series '+connection['target_fact_title']+'.' if target_series else ' also features '+joined+'.')
+        if part_like and target_series:
+            text = start + '. The series '+source+' and '+connection['target_fact_title']+' both feature '+joined+'.'
     elif relation == 'director':
-        text = start + (', which shares director ' + joined + ' with the series ' + connection['target_fact_title'] + '.' if connection.get('target_fact_media_type')=='show' else ', which shares a director: ' + joined + '.')
+        text = start + bridge + (' shares director '+joined+' with the series '+connection['target_fact_title']+'.' if target_series else ' shares a director: '+joined+'.')
+        if part_like and target_series:
+            text = start + '. The series '+source+' and '+connection['target_fact_title']+' share director '+joined+'.'
     else:
-        text = start + ('. Both list the genre ' if len(names)==1 else '. Both list the genres ') + joined + '.'
-        if connection.get('target_fact_media_type')=='show':
-            text = start + '. ' + source + ' and the series ' + connection['target_fact_title'] + (' both list the genre ' if len(names)==1 else ' both list the genres ') + joined + '.'
+        if target_series:
+            text = start + '. ' + (('The series '+source+' and '+connection['target_fact_title']) if part_like else (source+' and the series '+connection['target_fact_title'])) + ' both list the genres '+joined+'.'
+        else:
+            text = start + ('. The series and this title both list the genres ' if part_like else '. Both list the genres ') + joined+'.'
     return {'relationship_type':relation,'source_title':source,'source_media_type':connection['source_media_type'],
             'shared_elements':names,'viewer_evidence':basis,'display_text':text,
             'target_scope':{'title':connection.get('target_fact_title'),'media_type':connection.get('target_fact_media_type')}}
+
+
+def present_page(rows, selections):
+    """Show each repeated fact once in input page order; retain every saved choice.
+
+    Actor/director IDs are local to their relation. A genre combination uses the
+    three displayed tags; series continuity uses its canonical series identity.
+    This is presentation suppression, never a persisted claim of absent evidence.
+    A different page/single-card request can reuse the suppressed saved selection.
+    """
+    seen = set(); result = {}
+    for row in rows:
+        key = row['rating_key']; connection = selections.get(key)
+        rendered = present(connection)
+        if rendered is not None:
+            relation = connection['relationship_type']
+            fact = connection['source_identity'] if relation=='series' else tuple(connection['shared_ids'][:3])
+            signature = (relation, fact)
+            if signature in seen: rendered = None
+            else: seen.add(signature)
+        result[key] = rendered
+    return result
 
 
 def _versions(cur, username, *, lock=False):
@@ -267,7 +301,7 @@ def lookup(username, rows, *, connect=None):
                     ON CONFLICT(username,target_identity) DO UPDATE SET policy_version=excluded.policy_version,catalog_revision=excluded.catalog_revision,viewer_revision=excluded.viewer_revision,status=excluded.status,connection=excluded.connection,updated_at=now()''',values)
         conn.commit()
         merged = {**cached,**{v[0]:v[1] for v in derived.values() if v[0]}}
-        return {r['rating_key']:present(merged.get(identities.get(r['rating_key']))) for r in rows},set(cached)
+        return present_page(rows,{r['rating_key']:merged.get(identities.get(r['rating_key'])) for r in rows}),set(cached)
     finally:
         try:
             conn.rollback()

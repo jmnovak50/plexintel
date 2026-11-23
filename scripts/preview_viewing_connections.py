@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 from api.db.connection import connect_db
 from api.services.recommendation_query_service import _build_recommendations_query
-from api.services.viewing_connections import derive, present
+from api.services.viewing_connections import derive, present_page
 
 
 def main():
@@ -37,15 +37,17 @@ def main():
             rows = cur.fetchall()
             connections = derive(cur, args.user, rows)
         conn.rollback()
+    public = present_page(rows, {key:value[1] for key,value in connections.items()})
     cards = []
     for row in rows:
-        connection = present(connections[row['rating_key']][1])
+        connection = public[row['rating_key']]
         if connection:
             detail = escape(connection['display_text'])
             facts = escape(connection['relationship_type']+' · '+connection['viewer_evidence'])
         else:
-            detail = 'No suitable supported connection.'
-            facts = 'Abstention'
+            repeated = connections[row['rating_key']][1] is not None
+            detail = 'Repeated context is already shown earlier on this page.' if repeated else 'No suitable supported connection.'
+            facts = 'Presentation suppressed; underlying selection retained' if repeated else 'Abstention'
         cards.append('<article><h2>'+escape(row['title'])+'</h2><p>'+facts+'</p><h3>Connections to Your Viewing History</h3><p>'+detail+'</p><small>New read-only derivation; no persistence writes.</small></article>')
     document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Private viewing-history preview</title><style>body{font:16px/1.5 system-ui;max-width:960px;margin:40px auto;padding:16px}article{border:1px solid #ccd5e1;border-radius:12px;padding:18px;margin:18px 0}h3{font-size:14px;color:#4338ca}</style><h1>Private viewing-history connection preview</h1><p>Current recommendations; selected viewer only. '+datetime.now(timezone.utc).isoformat()+'</p><p>Read-only preview. Production connections and existing explanations are unchanged.</p>'+''.join(cards)+'</html>'
     fd = os.open(args.output, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
