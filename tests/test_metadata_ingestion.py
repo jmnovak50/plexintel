@@ -575,3 +575,65 @@ raise SystemExit(f.cli(['--mode','full']+(['--dry-run'] if sys.argv[2]=='preview
     assert '"history": "committed"' in failed.stdout
     assert scalar(db,'SELECT count(*) FROM watch_history')==1
     assert snap(db) is None
+
+
+def navigation_row(**overrides):
+    return dict(title='All episodes',rating_key='',media_type='',parent_rating_key='',
+                grandparent_rating_key='',guid='',media_index='',parent_media_index='',**overrides)
+
+
+def test_children_excludes_only_untyped_all_episodes_navigation():
+    rows=[navigation_row(),{'rating_key':'11','media_type':'season'}, {'rating_key':'12','media_type':'season'}]
+    calls=[]
+    def fetch(endpoint,params):
+        calls.append((endpoint,params));return dict(children_count=3,children_type='season',children_list=rows)
+    assert c.children(fetch,10)==rows[1:]
+    assert calls==[('get_children_metadata',{'rating_key':10})]
+
+
+def test_children_complete_response_larger_than_legacy_page_limit():
+    rows=[{'rating_key':key,'media_type':'episode'} for key in range(1,80)]
+    calls=[]
+    def fetch(endpoint,params):
+        calls.append(params);return dict(children_count=79,children_type='episode',children_list=rows)
+    assert c.children(fetch,100)==rows and len(calls)==1
+
+
+@pytest.mark.parametrize('row,kind',[
+    ({'title':'Actual episode','rating_key':'','media_type':'episode'},'episode'),
+    ({'title':'All episodes','rating_key':'','media_type':'season'},'season'),
+    ({'title':'All episodes','rating_key':'','guid':'plex://season/real'},'season'),
+    ({'title':'All episodes','rating_key':'','parent_rating_key':'10'},'season'),
+    (navigation_row(),'episode'),
+    ({'title':'Unknown navigation','rating_key':'','media_type':''},'season'),
+])
+def test_children_does_not_hide_malformed_real_or_unknown_children(row,kind):
+    with pytest.raises(c.DiscoveryError,match='invalid_child_rating_key') as error:
+        c.children(lambda *a:dict(children_count=1,children_type=kind,children_list=[row]),10)
+    assert error.value.context==dict(endpoint='get_children_metadata',parent_rating_key=10,row_index=0,field='rating_key')
+
+
+@pytest.mark.parametrize('payload',[
+    {},{'children_list':[]},{'children_list':[],'children_count':1},
+    {'children_list':[navigation_row()],'children_type':'season','children_count':0},
+    {'children_list':[{'rating_key':1},{'rating_key':1}],'children_count':2},
+    {'children_list':[{}],'children_count':1},
+])
+def test_children_source_failure_truncation_and_duplicates_remain_failures(payload):
+    with pytest.raises(c.DiscoveryError):c.children(lambda *a:payload,10)
+
+
+def test_children_empty_and_real_title_named_all_episodes():
+    assert c.children(lambda *a:dict(children_count=0,children_list=[]),10)==[]
+    actual={'rating_key':12,'media_type':'episode','title':'All episodes'}
+    assert c.children(lambda *a:dict(children_count=1,children_type='episode',children_list=[actual]),10)==[actual]
+
+
+def test_importer_children_adapter_uses_complete_endpoint_contract(monkeypatch):
+    import fetch_tautulli_data as f
+    calls=[]
+    def fetch(endpoint,params):
+        calls.append((endpoint,params));return dict(children_count=0,children_list=[])
+    monkeypatch.setattr(f,'fetch_tautulli_data',fetch)
+    assert f.get_children_metadata(123)==[]
+    assert calls==[('get_children_metadata',{'rating_key':123})]

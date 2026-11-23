@@ -160,7 +160,8 @@ def get_library_media_info(section_id, limit=None):
     return rows[:limit] if limit is not None else rows
 
 def get_children_metadata(parent_rating_key):
-    return _metadata_pages("get_children_metadata", {"rating_key": parent_rating_key}, "children_list", 50)
+    from api.services.metadata_collection import children
+    return children(fetch_tautulli_data, parent_rating_key)
 
 
 

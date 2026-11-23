@@ -35,6 +35,44 @@ def pages(fetch, endpoint, params, collection, page_size):
     raise DiscoveryError('discovery_page_limit')
 
 
+def children(fetch, parent_rating_key):
+    """Tautulli returns a complete children envelope, not start/length pages.
+
+    Plex may include an untyped 'All episodes' navigation Directory among seasons.
+    Count the raw envelope before excluding that known non-media entry; malformed
+    real children must still fail discovery rather than disappear from coverage.
+    """
+    parent = metadata.integer(parent_rating_key, required=True)
+    if parent <= 0: raise DiscoveryError('invalid_children_parent')
+    payload = fetch('get_children_metadata', {'rating_key': parent})
+    if not isinstance(payload, dict) or not isinstance(payload.get('children_list'), list):
+        raise DiscoveryError('invalid_children_envelope')
+    try:
+        total = metadata.integer(payload.get('children_count'), required=True)
+    except metadata.MetadataError as exc:
+        raise DiscoveryError('invalid_children_count') from exc
+    rows = payload['children_list']
+    if total < 0 or total != len(rows): raise DiscoveryError('children_count_mismatch')
+    result, seen = [], set()
+    identity_fields = ('rating_key','media_type','parent_rating_key','grandparent_rating_key',
+                       'guid','media_index','parent_media_index')
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict): raise DiscoveryError('invalid_child_row')
+        if (payload.get('children_type') == 'season' and row.get('title') == 'All episodes'
+                and all(row.get(field) in (None, '') for field in identity_fields)):
+            continue
+        try:
+            key = metadata.integer(row.get('rating_key'), required=True)
+            if key <= 0: raise metadata.MetadataError('invalid_integer')
+        except metadata.MetadataError as exc:
+            error = DiscoveryError('invalid_child_rating_key')
+            error.context = dict(endpoint='get_children_metadata',parent_rating_key=parent,row_index=index,field='rating_key')
+            raise error from exc
+        if key in seen: raise DiscoveryError('duplicate_discovery_key')
+        seen.add(key); result.append(row)
+    return result
+
+
 def discover(adapter):
     """The existing two sections, with all hierarchy keys collected before writes."""
     inventory = {}
@@ -198,6 +236,8 @@ def run(adapter, *, mode, dry_run=False):
         except Exception as exc:
             conn.rollback(); result['metadata']['failed'] += 1
             result['error']=metadata.error_code(exc)
+            if isinstance(exc, DiscoveryError) and hasattr(exc, 'context'):
+                result['discovery_error']=exc.context
         if not dry_run and mode != 'recover':
             try:
                 with conn.cursor() as cur: adapter.sync_users_from_tautulli(conn,cur)

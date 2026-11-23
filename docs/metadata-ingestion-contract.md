@@ -33,6 +33,15 @@ transactions and visible outcomes. A partial metadata/discovery failure produces
 a nonzero collection exit even if other work committed, preserving the
 predictor's existing source-failure behavior and last published results.
 
+Tautulli library listings are paginated; its `get_children_metadata` endpoint
+returns one complete `children_list` with `children_count`. Validate that raw
+count before removing the known untyped "All episodes" navigation row from a
+season listing. That row has no rating key, GUID, type or hierarchy indexes and
+is not an ingestible title. All real children still require valid unique keys;
+truncated/count-mismatched responses fail coverage. Larger child lists must not
+be treated as 50-row pages or truncated to that size. A malformed real child
+reports its endpoint, parent key, row index and field without logging payloads.
+
 Only validated candidates are cached, with a bounded 128-title cache. No vectors
 or full provenance histories are loaded by this path. Receipt growth follows
 new acceptances, failed attempts and real corrections; ordinary skips create no
