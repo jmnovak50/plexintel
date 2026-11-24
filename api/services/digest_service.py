@@ -21,6 +21,7 @@ from api.db.connection import connect_db
 from api.services.app_settings import get_setting_value
 from api.services.poster_service import build_poster_url
 from api.services.user_sync_service import sync_users_from_tautulli
+from api.services.recommendation_query_service import _positive_label_array_sql, TITLE_TRAIT_DIMENSION_PREDICATE
 
 
 WEEKDAY_INDEX = {
@@ -518,9 +519,10 @@ def fetch_top_movie_recommendations(
     if limit <= 0:
         return []
     display_threshold = 0.70 if min_probability is None else min_probability
+    title_traits_sql = _positive_label_array_sql(TITLE_TRAIT_DIMENSION_PREDICATE)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """
+            f"""
             WITH latest_feedback AS (
                 SELECT DISTINCT ON (rating_key)
                     rating_key,
@@ -536,6 +538,7 @@ def fetch_top_movie_recommendations(
                 recs.year,
                 recs.genres,
                 recs.semantic_themes,
+                {title_traits_sql} AS title_traits,
                 recs.predicted_probability
             FROM public.expanded_recs_w_label_v recs
             LEFT JOIN latest_feedback lf ON lf.rating_key = recs.rating_key
@@ -592,10 +595,19 @@ def _build_item_subtitle(item: dict[str, Any]) -> str:
     subtitle_parts = [
         str(item["year"]) if item.get("year") is not None else None,
         item.get("genres"),
-        item.get("semantic_themes"),
-        ("Connections to Your Viewing History: " + item["viewing_history_connection"]["display_text"] if item.get("viewing_history_connection") else None),
     ]
     return " | ".join(part for part in subtitle_parts if part)
+
+
+def _digest_explanation_parts(item: dict[str, Any]) -> list[tuple[str, str]]:
+    parts = []
+    traits = item.get("title_traits")
+    if isinstance(traits, (list, tuple)) and traits:
+        parts.append(("Title Traits", ", ".join(str(x) for x in traits)))
+    connection = item.get("viewing_history_connection")
+    text = connection.get("display_text") if isinstance(connection, dict) else None
+    if isinstance(text, str) and text.strip(): parts.append(("Taste Match", text))
+    return parts
 
 
 def _decorate_items_with_proxy_posters(items: list[dict[str, Any]]) -> None:
@@ -671,6 +683,12 @@ def _render_item_card(item: dict[str, Any]) -> str:
     score_pct = float(item.get("predicted_probability") or 0) * 100
     title = escape(item.get("title") or "Untitled")
     subtitle = _build_item_subtitle(item)
+    explanation_html = ""
+    for label, text in _digest_explanation_parts(item):
+        color = "#065f46" if label == "Taste Match" else "#1e40af"
+        background = "#ecfdf5" if label == "Taste Match" else "#eff6ff"
+        explanation_html += (f'<div style="margin-top:8px;padding:8px;border-radius:6px;color:{color};background:{background};font-size:12px;line-height:1.5;">'
+                             f'<strong>{label}</strong><br>{escape(text)}</div>')
     poster_src = item.get("poster_src")
     if poster_src:
         poster_html = (
@@ -694,6 +712,7 @@ def _render_item_card(item: dict[str, Any]) -> str:
         f"<div style=\"font-size:15px;font-weight:700;line-height:1.35;color:#0f172a;\">{title}</div>"
         f"<div style=\"margin-top:6px;font-size:13px;color:#475569;\">Match score: {score_pct:.1f}%</div>"
         f"{f'<div style=\"margin-top:6px;font-size:12px;line-height:1.45;color:#64748b;\">{escape(subtitle)}</div>' if subtitle else ''}"
+        f"{explanation_html}"
         "</td></tr>"
         "</table>"
     )
@@ -823,12 +842,14 @@ def _render_digest_text(
         for item in movies:
             score_pct = float(item.get("predicted_probability") or 0) * 100
             lines.append(f"- {item.get('title') or 'Untitled'} ({score_pct:.1f}%)")
+            lines.extend(f"  {label}: {text}" for label,text in _digest_explanation_parts(item))
         lines.append("")
     if shows:
         lines.append("Top Shows")
         for item in shows:
             score_pct = float(item.get("predicted_probability") or 0) * 100
             lines.append(f"- {item.get('title') or 'Untitled'} ({score_pct:.1f}%)")
+            lines.extend(f"  {label}: {text}" for label,text in _digest_explanation_parts(item))
         lines.append("")
     base_url = digest_settings["base_url"].rstrip("/")
     lines.append(f"Open PlexIntel: {base_url}/recs")

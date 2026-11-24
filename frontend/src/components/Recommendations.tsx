@@ -21,6 +21,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import AdminNav from './AdminNav';
+import { RecommendationExplanation, hasRecommendationExplanation } from './RecommendationExplanation';
 import { Link } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 
@@ -542,84 +543,8 @@ function RecommendationPoster({
   );
 }
 
-function RecommendationChipGroup({
-  label,
-  chips,
-  chipClassName,
-  compact,
-}: {
-  label: string;
-  chips: string[];
-  chipClassName: string;
-  compact: boolean;
-}) {
-  if (chips.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="min-w-0">
-      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
-      <div className="flex flex-wrap gap-1">
-        {chips.map((chip, index) => (
-          <span
-            key={`${chip}-${index}`}
-            className={`inline-block min-w-0 max-w-full whitespace-normal break-words rounded-full border text-left leading-snug ${chipClassName} ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`}
-          >
-            {chip}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function invalidateViewingConnection(rec: Recommendation): Recommendation {
   return 'viewing_history_connection' in rec ? { ...rec, viewing_history_connection: null } : rec;
-}
-
-function ViewingHistoryConnection({ connection }: { connection: Recommendation['viewing_history_connection'] }) {
-  if (!connection) return null;
-  return (
-    <section className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 text-sm text-slate-700 dark:border-indigo-800 dark:bg-indigo-950/30 dark:text-slate-200">
-      <h4 className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">Connections to Your Viewing History</h4>
-      <p className="mt-1">{connection.display_text}</p>
-    </section>
-  );
-}
-
-function RecommendationExplanation({
-  titleTraits,
-  tasteMatch,
-  compact = false,
-}: {
-  titleTraits: string[];
-  tasteMatch: string[];
-  compact?: boolean;
-}) {
-  const safeTitleTraits = Array.isArray(titleTraits) ? titleTraits : [];
-  const safeTasteMatch = Array.isArray(tasteMatch) ? tasteMatch : [];
-
-  if (safeTitleTraits.length === 0 && safeTasteMatch.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      <RecommendationChipGroup
-        label="Title Traits"
-        chips={safeTitleTraits}
-        chipClassName="border-blue-100 bg-blue-50/80 text-blue-800"
-        compact={compact}
-      />
-      <RecommendationChipGroup
-        label="Taste Match"
-        chips={safeTasteMatch}
-        chipClassName="border-emerald-100 bg-emerald-50/80 text-emerald-800"
-        compact={compact}
-      />
-    </div>
-  );
 }
 
 function RecommendationScore({
@@ -925,7 +850,6 @@ function DesktopRecommendationsTable({
                   </td>
                   <td className="px-4 py-3">
                     <RecommendationTitleCell rec={rec} />
-                    <ViewingHistoryConnection connection={rec.viewing_history_connection} />
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-700">{rec.show_title || '—'}</td>
                   <td className="px-4 py-3 text-sm text-slate-700">{rec.season_number ?? '—'}</td>
@@ -933,12 +857,12 @@ function DesktopRecommendationsTable({
                   <td className="px-4 py-3 text-sm text-slate-700">{rec.year ?? '—'}</td>
                   <td className="px-4 py-3 text-sm text-slate-600">{rec.genres || '—'}</td>
                   <td className="px-4 py-3">
-                    {(rec.title_traits?.length ?? 0) === 0 && (rec.taste_match?.length ?? 0) === 0 ? (
+                    {!hasRecommendationExplanation(rec.title_traits, rec.viewing_history_connection) ? (
                       '—'
                     ) : (
                       <RecommendationExplanation
                         titleTraits={rec.title_traits}
-                        tasteMatch={rec.taste_match}
+                        connection={rec.viewing_history_connection}
                       />
                     )}
                   </td>
@@ -1003,7 +927,7 @@ function MobileRecommendationsList({
         const statusMessage = canSubmitBulkFeedback(rec.media_type)
           ? getAggregateStatusMessage(rec)
           : getFeedbackStatusMessage(rec);
-        const hasExplanation = (rec.title_traits?.length ?? 0) > 0 || (rec.taste_match?.length ?? 0) > 0;
+        const hasExplanation = hasRecommendationExplanation(rec.title_traits, rec.viewing_history_connection);
 
         return (
           <div
@@ -1025,7 +949,6 @@ function MobileRecommendationsList({
 
             <div className="mt-3">
               <RecommendationTitleCell rec={rec} layout="mobile" />
-              <ViewingHistoryConnection connection={rec.viewing_history_connection} />
             </div>
 
             {hasExplanation && (
@@ -1039,7 +962,7 @@ function MobileRecommendationsList({
                 <div className="mt-2">
                   <RecommendationExplanation
                     titleTraits={rec.title_traits}
-                    tasteMatch={rec.taste_match}
+                    connection={rec.viewing_history_connection}
                     compact
                   />
                 </div>

@@ -980,7 +980,6 @@ class Pipeline:
                 "score": item.get("score"),
                 "year": item.get("year"),
                 "genres": item.get("genres"),
-                "explanation": item.get("explanation"),
             }
             for index, item in enumerate(items, start=1)
         ]
@@ -992,7 +991,8 @@ class Pipeline:
                 {
                     "role": "system",
                     "content": (
-                        "Write one concise paragraph explaining these PlexIntel recommendations. "
+                        "Summarize the supplied content facts in one concise paragraph. "
+                        "Do not infer viewing history, viewer preferences, Taste Match, or causes of predictive scores. "
                         "Use only the supplied facts. Do not add titles, ranks, posters, tables, "
                         "or change the order."
                     ),
@@ -1096,9 +1096,15 @@ class Pipeline:
         for label, key in (("Genres", "genres"), ("Cast", "actors"), ("Directors", "directors")):
             if item.get(key):
                 lines.append(f"   - {label}: {item[key]}")
-        reason = item.get("explanation") or item.get("summary")
-        if reason:
-            lines.append(f"   - Why: {self._truncate(str(reason), 220)}")
+        traits = item.get("title_traits")
+        if isinstance(traits, list) and traits:
+            lines.append("   - Title Traits: " + ", ".join(str(x) for x in traits))
+        connection = item.get("viewing_history_connection")
+        text = connection.get("display_text") if isinstance(connection, dict) else None
+        if isinstance(text, str) and text.strip():
+            lines.append(f"   - Taste Match: {text}")
+        if item.get("summary"):
+            lines.append(f"   - Summary: {self._truncate(str(item['summary']), 220)}")
         return lines
 
     def _inline_poster_markup(self, poster_item: dict[str, Any] | None, title: str) -> str | None:

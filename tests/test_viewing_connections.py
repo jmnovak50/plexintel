@@ -390,7 +390,9 @@ def test_authorized_agent_and_digest_keep_semantic_fields(monkeypatch):
     assert response.items[0].explanation=='Original theme'
     assert response.items[0].viewing_history_connection=={'display_text':'A shared credit.'}
     text=d._build_item_subtitle(dict(row,viewing_history_connection={'display_text':'A shared credit.'}))
-    assert 'Original theme' in text and 'Connections to Your Viewing History: A shared credit.' in text
+    assert 'Original theme' not in text and 'Connections to Your Viewing History' not in text
+    html=d._render_item_card(dict(row,viewing_history_connection={'display_text':'A shared credit.'}))
+    assert 'Taste Match' in html and 'A shared credit.' in html
 
 
 def test_context_refresh_endpoint_is_session_scoped_and_bounded(db,monkeypatch):

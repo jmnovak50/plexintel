@@ -1,6 +1,6 @@
-# Connections to Your Viewing History
+# Factual Taste Match from viewing history
 
-This capability adds factual context to an already selected recommendation. It
+This capability supplies factual Taste Match for an already selected recommendation. It
 never explains why XGBoost scored a title, infers actor preferences, invokes a
 model, or changes recommendation visibility, ranking, scores, filters or paging.
 The existing Title Traits, Taste Match, semantic search, labels and diagnostics
@@ -288,3 +288,13 @@ then restore and verify every trigger. Never treat saved contexts as current
 after an untracked source-change interval. Do not automatically drop tables or
 revert the metadata-ingestion contract. Preserve all legacy metadata, labels,
 SHAP, scores, embeddings, models, schedules and historical records.
+
+## Consolidated presentation
+
+The November 24 presentation update moves this existing structured connection
+into Taste Match within Why This?, alongside Title Traits. The former separate
+Connections to Your Viewing History panel and legacy preference chips are no
+longer rendered. Policy version 2, factual wording, persistence, invalidation,
+authorization and the feature flag are unchanged. See
+[recommendation presentation](recommendation-explanations.md) for consumer
+compatibility, the focused Title Traits decision and presentation rollback.

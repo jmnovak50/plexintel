@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from psycopg2.extras import RealDictCursor
 
 from api.db.connection import connect_db
@@ -37,8 +37,9 @@ class AgentRecommendation(BaseModel):
     genres: Optional[str] = None
     actors: Optional[str] = None
     directors: Optional[str] = None
-    explanation: Optional[str] = None
-    viewing_history_connection: Optional[dict] = None
+    explanation: Optional[str] = Field(default=None, description="Legacy semantic payload retained for compatibility; do not present as Taste Match.")
+    title_traits: list[str] = Field(default_factory=list, description="Existing media-side labels for Title Traits presentation.")
+    viewing_history_connection: Optional[dict] = Field(default=None, description="Viewer-private factual Taste Match; render display_text when present, otherwise omit. Does not explain the predictive score.")
     summary: Optional[str] = None
     duration: Optional[int] = None
     rating: float | None = None
@@ -251,6 +252,7 @@ def get_agent_recommendations(
             visible_recommendation_episode_count=row.get("visible_recommendation_episode_count"),
             visible_recommendation_season_count=row.get("visible_recommendation_season_count"),
             explanation=row.get("semantic_themes"),
+            title_traits=row.get("title_traits") or [],
             viewing_history_connection=row.get("viewing_history_connection"),
         )
         for row in rows

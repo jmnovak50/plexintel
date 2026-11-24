@@ -1411,7 +1411,10 @@ def _build_mcp_server() -> FastMCP:
             "The media_type argument remains supported for backward compatibility "
             "(movie, episode, show, and series map to the matching view). Results "
             "include rating_key values; call get_poster_image with a rating_key "
-            "when the user asks to see a poster. Omit user to scope to the authenticated user."
+            "when the user asks to see a poster. Omit user to scope to the authenticated user. "
+            "Present viewing_history_connection.display_text as Taste Match only when present; "
+            "do not substitute the legacy explanation field. Title Traits uses title_traits. "
+            "Factual relationships do not explain or cause the predictive score."
         ),
         structured_output=True,
         annotations=tool_annotations,
