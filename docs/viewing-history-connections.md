@@ -219,6 +219,28 @@ Production deployment and activation on birch were authorized on November 24,
 The rollout receipt records the exact deployed commit, including operator
 instruction updates. The pre-deployment rollback baseline is **`cc20e24`**.
 
+Activation was verified on November 24, 2026: the migration is installed and
+`PLEXINTEL_VIEWING_CONNECTIONS_ENABLED=true` is effective in the running backend.
+Actual public HTTPS desktop and mobile cards render the new section alongside
+Title Traits and Taste Match. Live requests demonstrated all four relationship
+types, page repetition suppression, a persisted no-result and unchanged warm
+context timestamps/revisions. Existing source tables, predictive artifacts,
+scheduling and containment were fingerprinted before and after activation.
+Actual examples, screenshots, timings and the detailed rollout receipt are
+retained in the operator-only `.secrets/viewing-connections-rollout-20261124/`
+folder, outside Git. No production viewing/feedback was fabricated and no email
+was sent.
+
+Validation used one currently Plex-authenticated viewer plus existing ordinary
+accounts through authorized signed-session REST requests; cross-owner access
+was denied. Recipient-specific digest preview was exercised. MCP remains in
+its existing OAuth-only (`jwt`) mode. No OAuth client token was available for a
+new end-to-end MCP call; the shared agent recommendation path was verified live
+and the accepted MCP regression coverage remains applicable. Authentication was
+not weakened or reconfigured to produce a demonstration. Other saved Plex
+credentials were not refreshed or changed. These are validation coverage limits,
+not a change to the consumer interface.
+
 The non-containerized `plexintel-backend.service` runs this checkout and reads
 its `.env` via systemd's existing `EnvironmentFile`. Set
 `PLEXINTEL_VIEWING_CONNECTIONS_ENABLED=true` there to enable version 2. The
