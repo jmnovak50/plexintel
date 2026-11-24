@@ -211,7 +211,12 @@ Preview storage status refers to that isolated persistence, not a production
 cache hit. Read-only derivation agrees with saved results. No private artifacts
 are committed or transmitted to external inference services.
 
-## Production operation and rollback
+## Original engine activation and rollback (historical)
+
+This section records the original engine activation. The current presentation
+rollout and its `8d6c7ba` rollback baseline are documented in
+[recommendation presentation](recommendation-explanations.md#deployment-and-rollback).
+The earlier `cc20e24` baseline below applies to the original engine rollout only.
 
 Production deployment and activation on birch were authorized on November 24,
 2026. The approved engine is integrated in `f64e1d8`, including `acd2b7f`,

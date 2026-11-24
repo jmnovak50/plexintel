@@ -85,3 +85,16 @@ rollout is `8d6c7ba`, preserving the incomplete-new-title ingestion fix.
 Rollback only the presentation code/build to that baseline under the same guard;
 keep the connection flag, persistence, invalidation and existing source data.
 Do not drop tables or restore old metadata/labels as a presentation rollback.
+
+Production activation of this presentation was verified on November 24, 2026,
+using application commit `9d74a60`; subsequent operator-documentation commits do
+not change its runtime files. Actual public HTTPS desktop/mobile screenshots,
+recipient digest preview, authorized REST results, warm-reuse checks and the
+focused Title Traits assessment are retained in the private rollout folder.
+The startup comparison preserved all 46 existing production data tables and
+model/configuration fingerprints. No migration or production job was run.
+
+The optional external OpenWebUI adapter source and formatter were updated and
+tested against actual production response data. This rollout does not claim to
+have uploaded a separate copy to an external OpenWebUI host or reauthenticated
+an OAuth MCP client. Existing OAuth settings and read scopes remain unchanged.
