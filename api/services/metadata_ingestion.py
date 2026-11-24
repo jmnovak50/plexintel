@@ -31,6 +31,13 @@ class MetadataError(ValueError):
     pass
 
 
+class IncompleteMetadata(MetadataError):
+    """A requested title lacks source data; never an accepted metadata record."""
+    def __init__(self, reason, *, rating_key, field):
+        super().__init__(reason)
+        self.rating_key, self.field = rating_key, field
+
+
 class Conflict(MetadataError):
     pass
 
@@ -120,13 +127,25 @@ def normalize_metadata(requested_key, raw, *, show=None):
         raise MetadataError('requested_key_mismatch')
     kind = raw.get('media_type')
     if kind not in KINDS: raise MetadataError('unsupported_media_kind')
-    if not isinstance(raw.get('title'), str) or not raw['title'].strip():
-        raise MetadataError('missing_title')
-    identity(kind, raw.get('guid'))
-    item = dict(rating_key=key, title=raw['title'], media_type=kind,
-                plex_guid=raw['guid'], summary=raw.get('summary'), rating=raw.get('rating'),
+    missing = []
+    if raw.get('title') is None or isinstance(raw.get('title'), str) and not raw['title'].strip():
+        missing.append(('missing_title','title'))
+    elif not isinstance(raw.get('title'), str): raise MetadataError('missing_title')
+    try:
+        identity(kind, raw.get('guid'))
+    except MetadataError:
+        guid = raw.get('guid')
+        if guid is None or isinstance(guid, str) and (not guid.strip() or guid == f'local://{key}'):
+            missing.append(('unresolved_identity','guid'))
+        else: raise
+    def required_number(field):
+        if raw.get(field) in (None, ''):
+            missing.append(('missing_integer',field)); return None
+        return integer(raw[field], required=True)
+    item = dict(rating_key=key, title=raw.get('title'), media_type=kind,
+                plex_guid=raw.get('guid'), summary=raw.get('summary'), rating=raw.get('rating'),
                 year=integer(raw.get('year')) if raw.get('year') else None,
-                duration=integer(raw.get('duration')) if raw.get('duration') else None,
+                duration=integer(raw.get('duration')) or None,
                 added_at=integer(raw.get('added_at')), parent_rating_key=integer(raw.get('parent_rating_key')),
                 grandparent_title=raw.get('grandparent_title'), parent_title=raw.get('parent_title'),
                 thumb_path=raw.get('thumb'), parent_thumb_path=raw.get('parent_thumb'),
@@ -135,22 +154,27 @@ def normalize_metadata(requested_key, raw, *, show=None):
     for field in ('summary','thumb_path','parent_thumb_path','grandparent_thumb_path'):
         if item[field] is not None and not isinstance(item[field], str):
             raise MetadataError('invalid_' + field)
-    if kind in ('movie','episode') and (item['duration'] is None or item['duration'] <= 0):
+    if kind in ('movie','episode') and item['duration'] in (None, 0):
+        missing.append(('missing_runtime','duration'))
+    elif kind in ('movie','episode') and item['duration'] < 0:
         raise MetadataError('missing_runtime')
     if kind == 'episode':
-        item.update(season_number=integer(raw.get('parent_media_index'), required=True),
-                    episode_number=integer(raw.get('media_index'), required=True),
-                    show_rating_key=integer(raw.get('grandparent_rating_key'), required=True))
+        item.update(season_number=required_number('parent_media_index'),
+                    episode_number=required_number('media_index'),
+                    show_rating_key=required_number('grandparent_rating_key'))
     elif kind == 'season':
-        item.update(season_number=integer(raw.get('media_index'), required=True),
+        item.update(season_number=required_number('media_index'),
                     show_rating_key=item['parent_rating_key'])
     elif kind == 'show': item['show_rating_key'] = key
     if kind in ('season','episode'):
-        if not item['parent_rating_key'] or not item['show_rating_key']:
-            raise MetadataError('missing_parent')
-        if item['season_number'] < 0 or (kind == 'episode' and item['episode_number'] < 0):
+        for field in ('parent_rating_key', 'show_rating_key'):
+            if item[field] is None:
+                missing.append(('missing_parent',field))
+            elif item[field] <= 0: raise MetadataError('missing_parent')
+            elif item[field] == key: raise MetadataError('cyclic_parent')
+        if (item['season_number'] is not None and item['season_number'] < 0) or (kind == 'episode' and item['episode_number'] is not None and item['episode_number'] < 0):
             raise MetadataError('invalid_episode_number')
-    evidence = dict(adapter_contract=CONTRACT, requested_key=key, media_type=kind, plex_guid=raw['guid'],
+    evidence = dict(adapter_contract=CONTRACT, requested_key=key, media_type=kind, plex_guid=raw.get('guid'),
                     observed_at=datetime.now(timezone.utc).isoformat(), presence={}, scopes={})
     for field in ('summary','year','duration','rating','added_at','thumb'):
         v = raw.get(field)
@@ -167,6 +191,10 @@ def normalize_metadata(requested_key, raw, *, show=None):
             evidence['scopes'][name] = dict(scope='series', source_key=item['show_rating_key'])
         item[name] = values
     if show: evidence['show_guid'] = show.get('plex_guid')
+    if missing:
+        # Missing data must never hide a conflicting/malformed supplied field.
+        reason,field = missing[0]
+        raise IncompleteMetadata(reason,rating_key=key,field=field)
     item['_ingestion_evidence'] = evidence
     return item
 
@@ -250,6 +278,11 @@ def ingestion_status(cur, rating_key):
         FROM public.metadata_ingestion_events WHERE rating_key=%s""", (rating_key,))
     row=row_dict(cur,cur.fetchone())
     status=('corrected' if row['last_change'] else 'accepted') if present and row['accepted'] else 'historical_unknown' if present else 'failed_initial' if row['failed'] else 'absent'
+    if status == 'failed_initial':
+        cur.execute("""SELECT evidence->>'disposition' AS disposition FROM public.metadata_ingestion_events
+            WHERE rating_key=%s AND operation='ingest' AND outcome='failed' ORDER BY event_id DESC LIMIT 1""", (rating_key,))
+        latest = row_dict(cur, cur.fetchone())
+        if latest and latest['disposition'] == 'deferred': status = 'deferred_initial'
     return {'status':status,'accepted':bool(row['accepted'] and present),'last_change':row['last_change']}
 
 
@@ -347,6 +380,41 @@ def record_failure(cur, key, operation_id, exc, *, operation='ingest', operator=
     }.items() if v}
     _event(cur, key, operation_id, operation, 'failed', operator=operator,
            reason=error_code(exc), evidence=evidence)
+
+
+def guard_deferral(cur, key):
+    """Only a new, safely omitted target may be deferred; reads also support preview."""
+    cur.execute('SELECT 1 FROM public.library WHERE rating_key=%s', (key,))
+    if cur.fetchone(): return False  # An ordinary concurrent acceptance owns this key.
+    cur.execute('SELECT 1 FROM public.library WHERE parent_rating_key=%s OR show_rating_key=%s LIMIT 1', (key,key))
+    if cur.fetchone(): raise MetadataError('unsafe_deferral_existing_descendants')
+    # Fresh installs/tests need not have optional predictive tables. If a table
+    # exists, its errors propagate: unknown dependency coverage is never safe.
+    for table in ('metadata_ingestion_events','media_embeddings','recommendations','training_data','user_feedback'):
+        cur.execute('SELECT to_regclass(%s) AS relation', ('public.'+table,))
+        if row_dict(cur,cur.fetchone())['relation'] is None: continue
+        condition = " AND outcome='applied'" if table == 'metadata_ingestion_events' else ''
+        cur.execute(sql.SQL('SELECT 1 FROM public.{} WHERE rating_key=%s'+condition+' LIMIT 1').format(sql.Identifier(table)), (key,))
+        if cur.fetchone(): raise MetadataError('unsafe_deferral_existing_dependency')
+    cur.execute("SELECT to_regclass('public.watch_embeddings') AS vectors,to_regclass('public.watch_history') AS history")
+    relations = row_dict(cur,cur.fetchone())
+    if relations['vectors'] and not relations['history']:
+        raise MetadataError('unsafe_deferral_unknown_watch_coverage')
+    if all(relations.values()):
+        cur.execute('''SELECT 1 FROM public.watch_embeddings v JOIN public.watch_history h USING(watch_id)
+            WHERE h.rating_key=%s LIMIT 1''', (key,))
+        if cur.fetchone(): raise MetadataError('unsafe_deferral_existing_watch_vector')
+    return True
+
+
+def record_deferral(cur, key, operation_id, exc):
+    require_schema(cur); writer_lock(cur)
+    if not isinstance(exc, IncompleteMetadata): raise MetadataError('invalid_deferral')
+    if not guard_deferral(cur,key): return 'skipped_existing'
+    _event(cur, key, operation_id, 'ingest', 'failed', operator='ingestion', reason=error_code(exc),
+           evidence=dict(disposition='deferred', field=exc.field, source_rating_key=exc.rating_key,
+                         observed_at=datetime.now(timezone.utc).isoformat()))
+    return 'deferred'
 
 
 def make_plan(cur, key, *, fields=None, relationships=None, operator, reason, mode='correct', operation_id=None):

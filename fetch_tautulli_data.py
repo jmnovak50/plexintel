@@ -218,16 +218,19 @@ def get_metadata(rating_key, *, parent_lookup=None, expected_type=None):
         raise MetadataError('requested_key_mismatch')
     if expected_type and raw.get('media_type') != expected_type:
         raise MetadataError('discovered_kind_mismatch')
+    # Validate supplied child fields before a deferred parent can short-circuit
+    # retrieval. Series inheritance is applied after resolving the parent.
+    result = normalize_metadata(key, raw)
     show = None
     show_key = raw.get("grandparent_rating_key") if raw.get("media_type") == "episode" else raw.get("parent_rating_key") if raw.get("media_type") == "season" else None
-    if show_key is not None:
+    if show_key not in (None, ''):
         show_key = integer(show_key, required=True)
         if show_key == key:
             raise MetadataError("cyclic_parent")
         show = parent_lookup(show_key) if parent_lookup else None
         if show is None:
             show = get_metadata(show_key, parent_lookup=parent_lookup, expected_type='show')
-    result = normalize_metadata(key, raw, show=show)
+    if show is not None: result = normalize_metadata(key, raw, show=show)
     _METADATA_CACHE[key] = result
     if len(_METADATA_CACHE) > _METADATA_CACHE_LIMIT:
         _METADATA_CACHE.pop(next(iter(_METADATA_CACHE)))

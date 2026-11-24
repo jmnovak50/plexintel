@@ -1,5 +1,6 @@
 """Existing importer orchestration with explicit coverage and transaction outcomes."""
 import json
+import psycopg2
 from uuid import uuid4
 from . import metadata_ingestion as metadata
 
@@ -103,7 +104,7 @@ def missing_headers(cur):
 
 
 def _stats():
-    return dict(accepted=0, skipped_existing=0, previewed=0, failed=0, receipt_failed=0)
+    return dict(accepted=0, skipped_existing=0, previewed=0, deferred=0, failed=0, receipt_failed=0)
 
 
 def _failure(conn, key, operation, exc, stats):
@@ -116,6 +117,35 @@ def _failure(conn, key, operation, exc, stats):
     code = metadata.error_code(exc)
     print(json.dumps(dict(event='metadata_acceptance', rating_key=key, operation_id=str(operation),
                          status='failed', reason=code, receipt_failed=bool(stats['receipt_failed']))), flush=True)
+
+
+def _incomplete(conn, key, operation, exc, stats, *, dry_run=False):
+    conn.rollback()
+    try:
+        with conn.cursor() as cur:
+            if dry_run:
+                outcome = 'deferred' if metadata.guard_deferral(cur,key) else 'skipped_existing'
+            else:
+                outcome = metadata.record_deferral(cur,key,operation,exc)
+        if dry_run: conn.rollback()
+        else:
+            try: conn.commit()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                # A deferral is safe only with a confirmed audit receipt. Never
+                # retry an uncertain receipt write or label it accepted.
+                raise metadata.CommitUncertain(key,operation,'unknown') from None
+        stats[outcome] += 1
+        print(json.dumps(dict(event='metadata_preview' if dry_run else 'metadata_acceptance',
+            rating_key=key,operation_id=str(operation),status=outcome,
+            reason=metadata.error_code(exc),field=exc.field,source_rating_key=exc.rating_key)),flush=True)
+        return outcome
+    except metadata.CommitUncertain: raise
+    except Exception as failure:
+        if dry_run:
+            conn.rollback();stats['failed'] += 1
+            print(json.dumps(dict(event='metadata_preview',rating_key=key,status='failed',reason=metadata.error_code(failure))),flush=True)
+        else: _failure(conn,key,operation,failure,stats)
+        return 'failed'
 
 
 def store_candidates(conn, items, *, dry_run=False, operation_id=None):
@@ -135,13 +165,15 @@ def store_candidates(conn, items, *, dry_run=False, operation_id=None):
 
 
 def ingest_keys(adapter, conn, inventory, *, dry_run=False):
-    stats = _stats(); preview = {}; operation = uuid4()
+    stats = _stats(); preview = {}; deferred = set(); operation = uuid4()
     with conn.cursor() as cur:
         if not dry_run: metadata.require_schema(cur)
         cur.execute('SELECT rating_key FROM public.library')
         existing = {metadata.row_dict(cur, x)['rating_key'] for x in cur.fetchall()}
     conn.rollback()
     def lookup(key):
+        if key in deferred:
+            raise metadata.IncompleteMetadata('deferred_parent',rating_key=key,field='parent')
         if key in preview: return preview[key]
         with conn.cursor() as cur: item = metadata.parent_metadata(cur, key)
         conn.rollback()
@@ -157,6 +189,9 @@ def ingest_keys(adapter, conn, inventory, *, dry_run=False):
             item = adapter.get_metadata(key, parent_lookup=lookup, expected_type=kind)
             metadata.validate_candidate(item)
             if item['media_type'] != kind: raise metadata.MetadataError('discovered_kind_mismatch')
+            for field in ('parent_rating_key','show_rating_key'):
+                if item.get(field) in deferred:
+                    raise metadata.IncompleteMetadata('deferred_parent',rating_key=item[field],field=field)
             if dry_run:
                 if kind in ('episode','season'):
                     parent, show = lookup(item['parent_rating_key']), lookup(item['show_rating_key'])
@@ -171,6 +206,8 @@ def ingest_keys(adapter, conn, inventory, *, dry_run=False):
                 result = store_candidates(conn, [item], operation_id=operation)
                 for name in stats: stats[name] += result[name]
         except metadata.CommitUncertain: raise
+        except metadata.IncompleteMetadata as exc:
+            if _incomplete(conn,key,operation,exc,stats,dry_run=dry_run) == 'deferred': deferred.add(key)
         except Exception as exc:
             if dry_run:
                 stats['failed'] += 1
@@ -255,6 +292,11 @@ def run(adapter, *, mode, dry_run=False):
             except Exception:
                 conn.rollback(); result['history']='failed'
         result['ok'] = result['coverage']=='complete' and result['metadata']['failed']==0 and result.get('guid_completion',{}).get('failed',0)==0 and result['users']!='failed' and result['history']!='failed'
+        result['metadata_coverage'] = 'incomplete' if result['metadata']['failed'] else 'partial' if result['metadata']['deferred'] else 'complete'
+        result['status'] = 'failed' if not result['ok'] else 'completed_with_deferrals' if result['metadata']['deferred'] else 'complete'
+        if result['metadata']['deferred']:
+            print(f"⚠️ {result['metadata']['deferred']} new title(s) deferred for incomplete source metadata; "
+                  'left unaccepted for retry during normal ingestion. See metadata_acceptance events for keys and reasons.',flush=True)
         print('Metadata ingestion metrics: ' + json.dumps(result,sort_keys=True),flush=True)
         if not result['ok']: raise metadata.MetadataError('metadata_collection_incomplete')
         return result

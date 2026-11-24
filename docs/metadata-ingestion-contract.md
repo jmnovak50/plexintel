@@ -32,6 +32,8 @@ new titles, preserving the existing library scope. Users/history retain separate
 transactions and visible outcomes. A partial metadata/discovery failure produces
 a nonzero collection exit even if other work committed, preserving the
 predictor's existing source-failure behavior and last published results.
+The narrow incomplete-new-title deferrals described below are reported
+separately from those failures.
 
 Tautulli library listings are paginated; its `get_children_metadata` endpoint
 returns one complete `children_list` with `children_count`. Validate that raw
@@ -46,6 +48,56 @@ Only validated candidates are cached, with a bounded 128-title cache. No vectors
 or full provenance histories are loaded by this path. Receipt growth follows
 new acceptances, failed attempts and real corrections; ordinary skips create no
 events. Measure actual storage/concurrency before changing these limits.
+
+## Incomplete new titles
+
+A new title with genuinely missing required source data is **deferred**, not
+accepted as an incomplete immutable snapshot. Missing/blank GUIDs, the exact
+`local://<requested key>` placeholder, empty titles, missing/zero
+runtime, absent TV numbering and absent hierarchy keys can be incomplete source
+data. The normal validators still reject these candidates. The collector may
+continue for other titles only after dependency checks and an audited deferral.
+Negative or malformed values, wrong returned keys/kinds, conflicting GUIDs,
+unsupported nonlocal GUID formats and malformed collections remain errors.
+
+A deferral writes no library row, relationships, vectors or successful acceptance
+receipt. It reuses `metadata_ingestion_events`: `operation='ingest'`,
+`outcome='failed'` (acceptance did not happen), the precise reason, and
+`evidence.disposition='deferred'`, source key, field and observation time.
+This preserves the existing schema and audit meaning; **no migration is needed**.
+The operator status reports `deferred_initial` while that remains the latest
+initial attempt; successful later acceptance reports `accepted` and retains all
+prior receipts. Ordinary ingestion retries absent titles naturally. There is
+no new scheduler or ongoing refresh of accepted metadata.
+
+Before deferring, the collector checks for a concurrent accepted row and protects
+previous applied receipts, existing descendants, media/watch vectors, published
+recommendations, training rows and feedback. A concurrent valid acceptance is
+an ordinary skip. Unsafe existing dependencies or unknown dependency coverage
+stay fatal. Newly deferred parents also defer their new dependent children,
+without inventing parent identities or repeatedly refetching the same parent.
+
+Raw watch history is retained. Existing predictive history partitioning explicitly
+accounts for library-unlinked events without existing vectors as quarantined
+history; it can re-admit them once their title is accepted. Existing watch vectors
+and unresolved feedback are never silently dropped behind a deferral. Predictive
+identity rules, supervision, suppression and vector/publication contracts are
+unchanged.
+
+Importer metrics distinguish `metadata.deferred` from `metadata.failed`, complete
+inventory discovery from `metadata_coverage='partial'`, and successful collection
+with `status='completed_with_deferrals'`. Per-title events and an explicit warning
+appear in the existing pipeline output. Thus four valid new titles plus one
+incomplete title produce four acceptances and one deferral, with exit status 0
+provided all other work succeeds. The pipeline can process eligible accepted
+sources; it does not claim full metadata acceptance coverage.
+
+Incomplete inventory discovery, provider/transport failures, missing schema,
+transaction/receipt errors, identity conflicts and unsafe dependencies still
+produce a nonzero exit and preserve prior published predictions. A deferral
+receipt whose commit acknowledgement is lost also stops the run with an unknown
+outcome; no write is retried. Preview applies the same dependency checks in a
+read-only transaction and writes neither receipts nor sequences.
 
 ## The one additive relation
 

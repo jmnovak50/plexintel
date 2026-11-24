@@ -321,7 +321,7 @@ def test_valid_discovery_total_and_missing_headers(db):
 def adapter(db, *, invalid=False):
     def get_metadata(key,**kwargs):
         value=raw(key)
-        if invalid:value['guid']=None
+        if invalid:value['guid']='plex://show/wrong-media-kind'
         return m.normalize_metadata(key,value)
     def users(conn,q):q.execute("INSERT INTO operational_probe VALUES('users')")
     def history(conn,q):q.execute("INSERT INTO operational_probe VALUES('history')");conn.commit();return True
@@ -396,7 +396,8 @@ def test_parent_cycle_cannot_cause_unbounded_reads(monkeypatch):
     f._METADATA_CACHE.clear();calls=[]
     def fetch(endpoint,params):
         key=params['rating_key'];calls.append(key)
-        return {'rating_key':key,'media_type':'season','parent_rating_key':2 if key==1 else 1}
+        value=raw(key,'season');value.update(parent_rating_key=2 if key==1 else 1,media_index=1)
+        return value
     monkeypatch.setattr(f,'fetch_tautulli_data',fetch)
     with pytest.raises(m.MetadataError,match='discovered_kind_mismatch'):f.get_metadata(1)
     assert calls==[1,2]
@@ -568,9 +569,9 @@ raise SystemExit(f.cli(['--mode','full']+(['--dry-run'] if sys.argv[2]=='preview
     again=run(changed,'apply');assert again.returncode==0,again.stderr+again.stdout
     db.rollback();assert snap(db)==before
     assert scalar(db,"SELECT count(*) FROM metadata_ingestion_events WHERE outcome='applied'")==1
-    # A new invalid key has nonzero status while independent history still commits.
+    # A conflicting identity has nonzero status while independent history still commits.
     with db.cursor() as q:q.execute('DELETE FROM watch_history; DELETE FROM media_actors; DELETE FROM media_directors; DELETE FROM media_genres; DELETE FROM library')
-    db.commit();bad=raw();bad['guid']=None
+    db.commit();bad=raw();bad['guid']='plex://show/wrong-media-kind'
     failed=run(bad,'apply');assert failed.returncode==1
     assert '"history": "committed"' in failed.stdout
     assert scalar(db,'SELECT count(*) FROM watch_history')==1
