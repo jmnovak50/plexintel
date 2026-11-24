@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from api.services.viewing_connections import attach as attach_viewing_connections
 import logging
 import os
 import psycopg2
@@ -37,6 +38,7 @@ class AgentRecommendation(BaseModel):
     actors: Optional[str] = None
     directors: Optional[str] = None
     explanation: Optional[str] = None
+    viewing_history_connection: Optional[dict] = None
     summary: Optional[str] = None
     duration: Optional[int] = None
     rating: float | None = None
@@ -223,6 +225,7 @@ def get_agent_recommendations(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
+    attach_viewing_connections(rows, user)
     items = [
         AgentRecommendation(
             rating_key=row["rating_key"],
@@ -248,6 +251,7 @@ def get_agent_recommendations(
             visible_recommendation_episode_count=row.get("visible_recommendation_episode_count"),
             visible_recommendation_season_count=row.get("visible_recommendation_season_count"),
             explanation=row.get("semantic_themes"),
+            viewing_history_connection=row.get("viewing_history_connection"),
         )
         for row in rows
     ]

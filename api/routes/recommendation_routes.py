@@ -1,3 +1,4 @@
+from api.services.viewing_connections import attach as attach_viewing_connections, enabled as viewing_connections_enabled
 from typing import Optional
 
 import requests
@@ -73,12 +74,13 @@ def resolve_score_range_params(
     return score_min, None, None
 
 
-def get_plex_username(token: str) -> str:
+def get_plex_username(token: str, *, timeout: float | None = None) -> str:
     headers = {
         "Accept": "application/json",
         "X-Plex-Token": token,
     }
-    resp = requests.get("https://plex.tv/users/account.json", headers=headers)
+    options = {"timeout": timeout} if timeout is not None else {}
+    resp = requests.get("https://plex.tv/users/account.json", headers=headers, **options)
 
     if resp.status_code != 200:
         raise HTTPException(status_code=403, detail="Failed to fetch Plex username")
@@ -157,6 +159,7 @@ def get_recommendations(
         fetched_rows = cur.fetchall()
         rec_rows, has_more, next_offset = _page_rows(fetched_rows, limit=limit, offset=offset)
         _decorate_recommendation_rows(rec_rows)
+        attach_viewing_connections(rec_rows, plex_username)
 
         print(f"Found {len(rec_rows)} recs for {plex_username}")
 
@@ -214,3 +217,41 @@ def get_recommendations_refresh_status(request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     return {"is_refreshing": is_score_model_refreshing()}
+
+
+@router.get("/recommendations/viewing-history-connections")
+def get_viewing_history_connections(request: Request, rating_key: list[int] = Query(..., max_length=250)):
+    """Refresh visible context independently of predictions; session owner only."""
+    token = request.session.get("plex_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not viewing_connections_enabled():
+        return {"connections": {}}
+    try:
+        owner = get_plex_username(token, timeout=2)
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid token") from None
+    keys = list(dict.fromkeys(rating_key))
+    if not keys or any(type(key) is not int or key <= 0 for key in keys):
+        raise HTTPException(status_code=400, detail="Positive recommendation keys required")
+    # Existing scoring rows authorize leaf targets and their displayed TV groups.
+    # A request never chooses another viewer or an arbitrary library/history target.
+    conn = None
+    try:
+        conn = connect_db()
+        conn.set_session(readonly=True)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SET LOCAL statement_timeout='2s'")
+            cur.execute("""SELECT key AS rating_key FROM unnest(%s::int[]) WITH ORDINALITY requested(key,position)
+                WHERE EXISTS(SELECT 1 FROM recommendations r JOIN library l USING(rating_key)
+                 WHERE r.username=%s AND (r.rating_key=key OR l.show_rating_key=key OR l.parent_rating_key=key)) ORDER BY requested.position""", (keys, owner))
+            rows = cur.fetchall()
+        attach_viewing_connections(rows, owner)
+        return {"connections": {r['rating_key']:r.get('viewing_history_connection') for r in rows}}
+    except HTTPException:
+        raise
+    except Exception:
+        return {"connections": {}}  # Clear stale context without failing the card page.
+    finally:
+        if conn is not None:
+            conn.close()
