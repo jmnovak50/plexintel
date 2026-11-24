@@ -206,33 +206,63 @@ writes contexts, and does not require activating the feature.
 The private review package under `.secrets/viewing-connections-20261122/` contains
 read-only current-source exports, replay examples, screenshots, timings and test
 results. Actual facts and compact evidence were copied into a disposable local
-database to demonstrate persisted reuse; production context tables are absent.
+database to demonstrate persisted reuse; production context tables were absent at that review.
 Preview storage status refers to that isolated persistence, not a production
 cache hit. Read-only derivation agrees with saved results. No private artifacts
 are committed or transmitted to external inference services.
 
-## Later deployment and rollback (not executed by this assignment)
+## Production operation and rollback
 
-1. After owner acceptance, integrate the reviewed commit while preserving the
-   deployed baseline. Preserve current metadata, models, scheduling, containment
-   and existing explanation presentation.
-2. Use the established guarded backend deployment procedure while no pipeline or
-   labeling worker is active. Explicitly apply **only** `001_context.sql` in one
-   transaction with `psql -X --single-transaction --set ON_ERROR_STOP=1` using
-   private production credentials. Never apply `create.sql` to production.
-3. Deploy the coherent backend and built frontend. Keep the feature off initially;
-   schema absence always abstains. Enable only the named environment flag after
-   authorized rollout review, then restart only the necessary backend service.
-4. Verify app/recommendation health, receipt/context schema, unchanged source data,
-   model hashes/settings/containment, and actual context on the authorized pages.
-   Do not start imports, training, scoring or labeling as validation.
+Production deployment and activation on birch were authorized on November 24,
+2026. The approved engine is integrated in `f64e1d8`, including `acd2b7f`,
+`5d1aaca`, policy refinement `86e6956` and Tautulli ingestion fix `cc20e24`.
+The rollout receipt records the exact deployed commit, including operator
+instruction updates. The pre-deployment rollback baseline is **`cc20e24`**.
 
-Rollback: turn off the connection flag and use the guarded backend restart;
-revert the UI/service change to the deployed `6058081` baseline if needed. Leave
-these additive tables/indexes and their audit evidence in place while reviewing
-removal. If completely uninstalling later, disable/drop only triggers named
-`viewing_connection_*` on the listed source owners, then their function and two
-new tables and three new indexes in a separately reviewed, bounded transaction.
-No legacy metadata, labels, SHAP, scores, embeddings, artifacts, schedules or
-historical reports need alteration. Contexts can be derived again from current
-facts after reactivation; their original creation time is not historical proof.
+The non-containerized `plexintel-backend.service` runs this checkout and reads
+its `.env` via systemd's existing `EnvironmentFile`. Set
+`PLEXINTEL_VIEWING_CONNECTIONS_ENABLED=true` there to enable version 2. The
+backend serves the committed frontend build. Title Traits and Taste Match remain
+available alongside the new section; labeling containment and scheduling are
+independent and must remain unchanged.
+
+For deployment, acquire the existing `try_acquire_pipeline_lock()` exclusion,
+check `active_workers()` and pending dimension reviews, and retain the lock
+through the database migration, code installation, necessary backend restart
+and readiness checks. Coordinate with the existing predictive advisory lock;
+never start a pipeline as a deployment check. Preserve scheduler settings and
+check the current slot before restarting an enabled scheduler.
+
+Apply only `api/db/migrations/optional/viewing_connections/001_context.sql`
+once in one transaction with production credentials (`psql -X
+--single-transaction --set ON_ERROR_STOP=1`, or the existing psycopg2 transaction
+procedure). Verify its reviewed bytes before executing it. The approved schema
+adds two tables, one function, 44 statement triggers and three reverse credit
+indexes. Do not run `create.sql`, certify historical metadata, backfill or
+precompute connection contexts. Normal authorized recommendation, refresh and
+digest-preview requests create the viewer-specific contexts naturally.
+
+Verify local and public HTTPS health, the active feature flag in the backend
+process, authenticated recommendation and context requests, desktop/mobile
+cards, entitled agent/MCP consumers and recipient-specific digest preview
+without sending mail. Compare recommendation ordering/scores/visibility and
+existing source/model/settings fingerprints, retain actual examples privately,
+and compare context timestamps and revisions across repeated requests to verify
+warm reuse. Existing isolated tests cover destructive invalidation scenarios;
+do not change production viewing or feedback to demonstrate them.
+
+For rollback, set `PLEXINTEL_VIEWING_CONNECTIONS_ENABLED=false` and restart only
+the backend while holding the existing execution lock and checking workers. If
+code rollback is necessary, restore **`cc20e24`**, which preserves the latest
+Tautulli ingestion fix; do not use `6058081`. Retain additive tables, indexes and
+persisted records. Disabling the flag stops connection lookups/rendering but
+does not stop transactional invalidation triggers.
+
+If the triggers themselves cause a material problem, use a separately recorded,
+narrow, reversible containment of only `viewing_connection_*` triggers on the
+listed source tables. Before permitting any later connection reads, invalidate
+all persisted contexts by transactionally incrementing the catalog revision,
+then restore and verify every trigger. Never treat saved contexts as current
+after an untracked source-change interval. Do not automatically drop tables or
+revert the metadata-ingestion contract. Preserve all legacy metadata, labels,
+SHAP, scores, embeddings, models, schedules and historical records.

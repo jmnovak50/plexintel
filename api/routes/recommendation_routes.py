@@ -115,8 +115,6 @@ def get_recommendations(
         description="Maximum raw predicted_probability to display (inclusive).",
     ),
 ):
-    print("Session:", request.session)
-
     token = request.session.get("plex_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
