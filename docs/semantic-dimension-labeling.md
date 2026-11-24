@@ -15,6 +15,55 @@ Labels are approximate semantic interpretations of coordinates. They are not
 proven causal explanations of XGBoost predictions. Prediction probabilities,
 ranking, training data, embedding arithmetic and SHAP computations are unchanged.
 
+## Media-only interpretation (November 24, 2026)
+
+Future semantic evaluation is restricted to the active contract's media text group
+(currently 0–767). `all` means all eligible media dimensions. User/watch dimensions
+are historical only: CLI evaluation/review, queued dispatch, evidence retrieval,
+prompt construction, provider admission and new saves reject them before private
+user evidence processing. Historical CSV exports, usage, labels, assessments,
+review/action records, suppression controls and SHAP inspection remain available.
+The evidence constructor now loads only media vectors and title metadata.
+
+Dimension Explorer preserves existing diagnostic `eligible` semantics and full
+inventory totals. Additive `labeling_eligible`/`labeling_scope` fields describe
+ownership for future work; pause, provenance, policy and sample-quality gates still
+apply. Separate `labeling_inventory_count`, `historical_only_dimensions`,
+`labeling_unlabeled` and `labeling_due` counts avoid treating user history as an
+unfinished labeling workload. The review action is disabled for historical user
+rows. Existing queued/running user records are preserved without dispatch or stale
+reconciliation. A stored user-only automatic scope fails explicitly; no stored
+settings or schedule are migrated.
+
+Prompt examples use `canonical-series-tail/1`: retain the entire media vector
+population, take rank-ordered representatives within each extreme 5% tail (at
+least the requested sample width for small populations), and include at most one
+known exact canonical title or TV series per tail. Keep actual extremes, allow
+TV episodes, use stored GUID/hierarchy only, and never search the middle merely
+to fill a sample. LOW excludes the HIGH region, including ties. Insufficient
+independent examples remain short and existing validity/contrast gates abstain.
+Franchise relationships are unknown unless explicitly present in existing data;
+none are guessed from names. Correlated series may occur on both tails; the prompt
+warns that this is not independent semantic validation. Prompt provenance retains
+the policy and population size. The media guidance emphasizes generalizable HIGH
+content characteristics, correlated-series bias, polarity and abstention.
+
+The isolated `research/title_traits/selector.py` experiment is not imported by
+serving code. It compares raw coordinates with per-coordinate empirical midrank
+percentiles, retained HIGH regions and independent evidence. Its 95th-percentile
+floor is experimental, not calibrated semantic confidence. A private 14-title
+comparison found misleading surviving traits as well as useful abstentions and a
+plausible match. Existing labels do **not** yet support reliable automatic title
+characterization. Production SHAP-derived Title Traits and the shared selection
+function remain unchanged. Viewer independence alone does not establish accuracy.
+No new persistence, LLM calls, embeddings or production selection changes are
+part of this experiment. If later validated, reuse a media-distribution snapshot
+by vector/feature-space and label-governance revision instead of sorting per request.
+
+Automatic labeling remains disabled. Configured provider/model, financial policy,
+predictive behavior, all historical records and existing operational settings are
+preserved. This release contains no schema migration.
+
 ## Optional automatic daily stage
 
 The daily CLI calls `pipeline_labeling.run_after_publication()` only after the
@@ -37,11 +86,11 @@ run's labeling record. Core and complete worker durations are reported separatel
 | Setting / existing control | Automatic behavior |
 | --- | --- |
 | `pipeline.labeling_enabled` | Existing enablement switch; **insufficient by itself**, including its historical `true` value |
-| `pipeline.labeling_cloud_authorized` | New standing authorization, default **false**. Explicitly permits transmission of the existing prompt evidence to the configured cloud interpreter; viewer names are aliased, but titles and engagement evidence remain potentially sensitive |
+| `pipeline.labeling_cloud_authorized` | New standing authorization, default **false**. Explicitly permits transmission of the existing prompt evidence to the configured cloud interpreter; future requests contain media title evidence only; historical user/watch assessments remain potentially sensitive |
 | `pipeline.labeling_budget_usd` | New cumulative automatic reserved/estimated USD ceiling, default **0** |
 | `labeling.provider`, `labeling.ollama_model` | Existing Setup provider/model. Current-generation batches require `ollama`; normal Gemma 4 choice is `gemma4:31b-cloud`. Unknown model pricing blocks requests |
 | `labeling.ollama_host`, `ollama.host`, `ollama.api_key` / key file | Existing label endpoint, fallback host and credentials; never the embedding model setting |
-| `pipeline.label_batch_limit`, `pipeline.label_dim_type` | Existing per-publication selection limit (default 25) and media/user/all scope |
+| `pipeline.label_batch_limit`, `pipeline.label_dim_type` | Existing per-publication selection limit (default 25) and media/all eligible media scope (user is historical only) |
 | `pipeline.label_selection_mode` | Existing current-generation `eligible` or `importance` selection. Legacy `coverage`/`hybrid` are rejected with an optional-stage failure, not silently reinterpreted; `label_coverage_share` is therefore not used here |
 | `pipeline.refresh_existing_labels` | Existing explicit refresh control, default false. Compatible saved labels and identical-prompt abstentions are reused by default. Refresh is bounded to selected dimensions and skips outcomes already saved/abstained for that publication |
 | `labeling.max_output_tokens`, advanced labeling settings | Existing output cap, evidence counts, HIGH coverage, LOW overlap, and governance rules |

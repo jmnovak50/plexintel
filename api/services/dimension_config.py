@@ -53,6 +53,26 @@ def feature_groups(config):
     return groups
 
 
+def semantic_media_range(config):
+    """Half-open ownership range for future text-semantic interpretation.
+
+    Historical inventories (including user/poster features) remain inspectable.
+    Only the contract's text media group is eligible for new labeling.
+    """
+    groups = [g for g in feature_groups(config) if g['name'] in ('media', 'media_text')]
+    if len(groups) != 1:
+        raise ValueError('No unambiguous media text labeling group')
+    group = groups[0]
+    return group['start'], group['start'] + group['width']
+
+
+def require_semantic_media(config, dimension):
+    start, end = semantic_media_range(config)
+    if type(dimension) is not int or not start <= dimension < end:
+        raise ValueError('User/watch dimensions are historical only; new semantic evaluation requires a media dimension')
+    return dimension - start
+
+
 def build_independent_metadata(feature_names,model_sha256,*,generation_id,contract_hash,encoder_digest,serializer):
     groups=[dict(name='media_text',start=0,width=768),dict(name='media_poster',start=768,width=768),dict(name='user',start=1536,width=768)]
     expected=[f"{g['name']}_{i}" for g in groups for i in range(g['width'])]

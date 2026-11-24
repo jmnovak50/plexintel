@@ -98,7 +98,7 @@ def test_batch_progress_observes_actual_attempts_acceptances_reviews_and_abstent
     import gpt_utils as gpt
     from api.services import dimension_label_batch as batch
     from api.services.labeling_costs import Pricing
-    ctx=dict(config_id='fictional-config',feature_space_id='fictional-space')
+    ctx=dict(media_dimensions=768,user_dimensions=768,config_id='fictional-config',feature_space_id='fictional-space')
     requests=[];events=[];review_calls=[]
     class Ledger:
         def __init__(self,*a,**kw):pass

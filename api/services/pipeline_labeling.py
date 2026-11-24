@@ -111,9 +111,14 @@ def _run(conn,result,caps,*,output=None):
     args.model_source='Setup: labeling.ollama_model'
     args.limit=int(get_setting_value('pipeline.label_batch_limit',default=25))
     args.dim_type=get_setting_value('pipeline.label_dim_type',default='all')
+    if args.dim_type == 'user':
+        raise LabelingError('USER_LABELING_RETIRED','configuration','User/watch dimensions are historical only; select media or all eligible media')
+    from api.services.dimension_config import feature_groups
+    args.labeling_inventory={side:sum(g['width'] for g in feature_groups(context) if g['name'] in names)
+        for side,names in [('media',('media','media_text')),('user',('user',))]}
     args.selection_mode=get_setting_value('pipeline.label_selection_mode',default='eligible')
     if args.limit<1 or args.dim_type not in ('media','user','all') or args.selection_mode not in ('eligible','importance'):
-        raise LabelingError('AUTOMATIC_SELECTION_UNSUPPORTED','configuration','Use a positive batch limit, media/user/all scope and eligible/importance selection')
+        raise LabelingError('AUTOMATIC_SELECTION_UNSUPPORTED','configuration','Use a positive batch limit, media/all eligible media scope and eligible/importance selection')
     args.regenerate=bool(get_setting_value('pipeline.refresh_existing_labels',default=False))
     args.max_output_tokens=gpt.label_output_limit(None);args.label=True;args.save_label=True
     args.budget_usd=caps['budget_usd']

@@ -96,15 +96,15 @@ function choiceLabel(field: SettingField, choice: string) {
     return `${choice.charAt(0).toUpperCase()}${choice.slice(1)}`;
   }
   if (field.key === "pipeline.label_dim_type") {
-    if (choice === "all") return "All dimensions";
+    if (choice === "all") return "All eligible media dimensions";
     if (choice === "media") return "Media dimensions";
-    if (choice === "user") return "User dimensions";
+    if (choice === "user") return "User dimensions (historical only; ineligible)";
   }
   return choice;
 }
 
 function SettingHelp({ field }: { field: SettingField }) {
-  const helpText = field.description?.trim() || "No guidance has been written for this setting yet.";
+  const helpText = field.key === "pipeline.label_dim_type" ? "New semantic evaluation is media-only. All means all eligible media dimensions. User/watch results remain available as history; a stored user-only scope cannot execute new labeling." : field.description?.trim() || "No guidance has been written for this setting yet.";
 
   return (
     <span className="group/help relative inline-flex shrink-0">
@@ -428,7 +428,7 @@ export default function AdminSettings() {
                               className="recs-input"
                             >
                               {field.choices.map((choice) => (
-                                <option key={choice} value={choice}>
+                                <option key={choice} value={choice} disabled={field.key === "pipeline.label_dim_type" && choice === "user"}>
                                   {choiceLabel(field, choice)}
                                 </option>
                               ))}

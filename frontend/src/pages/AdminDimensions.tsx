@@ -5,6 +5,7 @@ import { ErrorBanner, SuccessBanner } from '../components/StatusBanner';
 
 type RecordData = Record<string, unknown>;
 interface Dimension {
+  labeling_eligible?: boolean; labeling_scope?: string; labeling_ineligible_reason?: string | null;
   dimension: number; feature_name?: string; side: string; local_index: number; label: string | null; display_label: string | null;
   label_row_count: number | null; label_type: string | null; eligible: boolean; needs_review: boolean | null; validation_status: string | null;
   review_attempt_count: number; last_reviewed_at: string | null; next_review_at: string | null;
@@ -73,6 +74,7 @@ function Pager({ offset, total, size, onChange }: { offset: number; total: numbe
 function Governance({ row }: { row: Dimension }) {
   return <div className="space-y-1 text-xs">
     {(row.label_row_count || 0) > 1 && <p className="text-orange-700">Multiple saved rows: latest timestamped wording shown. Investigate before review.</p>}
+    <p className="text-xs">{row.labeling_scope === 'historical_only' ? 'Historical; not eligible for future semantic evaluation' : 'Media: eligible for future labeling, subject to controls and evidence'}</p>
     <p>{row.label_type || 'Unclassified'} · {row.eligible ? 'Explanation eligible' : 'Explanation ineligible'}</p>
     <p>{row.needs_review ? 'Unresolved review' : row.label ? 'No unresolved review' : row.assessment_id ? 'No compatible saved label' : 'Not assessed'} · Candidate validation: {row.validation_status || 'Not retained'}</p>
     {row.assessment_id && <p>Latest record: {row.assessment_source === 'provenance-reconciliation' ? 'Provenance reconciled (no inference)' : row.outcome?.replace(/_/g, ' ') || 'Assessment recorded'}{row.assessment_error_code ? ` · ${row.assessment_error_code}` : ''}</p>}
@@ -157,7 +159,7 @@ export default function AdminDimensions() {
       .catch(err => { if (!controller.signal.aborted) { setError(String(err.message)); setLoading(false); } }), 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [query, dimension, prediction, refresh]);
-  const reviewSupported = Boolean(data && (!data.config.feature_groups || data.config.ordering === 'media_text,user'));
+  const reviewSupported = Boolean(data && (!data.config.feature_groups || data.config.ordering === 'media_text,user') && data.rows?.find(r => r.dimension === Number(dimension))?.labeling_eligible);
   useEffect(() => { setReason(''); setAction(reviewSupported ? 'review' : 'investigate'); setMessage(''); }, [dimension, reviewSupported]);
   const pending = data?.rows?.some(row => row.in_flight || ['queued', 'running'].includes(row.job_status || ''))
     || data?.recent_labeling_runs?.some(run => ['running', 'started', 'cancel_requested'].includes(run.status));
@@ -237,6 +239,7 @@ export default function AdminDimensions() {
             {['inventory_count', 'unlabeled', 'unresolved', 'due', 'cooldown', 'repeated'].map(key => <div className={panel} key={key}><p className="text-2xl font-semibold">{data.overview[key]}</p><p className="text-xs capitalize">{key.replace('_', ' ')}</p></div>)}
           </section>
           <p className="text-xs text-slate-500">Current feature-space assessment records: {data.overview.assessed_dimensions} dimensions assessed · {data.overview.abstained_dimensions} latest abstentions · {data.overview.failed_assessment_dimensions} latest failures. Unlabeled means no compatible saved label; an abstention or failed assessment can remain unlabeled.</p>
+          <p className="text-xs">Future labeling: {data.overview.labeling_inventory_count} media dimensions · {data.overview.labeling_unlabeled} unpaused unlabeled · {data.overview.labeling_due} due · {data.overview.historical_only_dimensions} historical-only dimensions. Automatic labeling remains subject to Setup controls.</p>
           <p className="text-xs text-slate-500">Scope denominator: {data.overview.scoped_predictions} current scored user/title instances; {data.overview.observed_predictions} have retained SHAP. Selected wordings: {data.overview.selected_wordings} across API groups; {data.overview.semantic_selected_wordings} legacy semantic themes (deduplicated before dimension attribution). Scores updated {date(data.overview.scored_at)}; SHAP updated {date(data.overview.shap_timestamp)}. Repeated = ≥{data.thresholds.repeated_attempts} attempts on a currently unresolved label (not a consecutive-failure count); frequent = ≥{data.thresholds.frequent_selections} current selections. These filters do not change automatic review policy. Unresolved labels are normally ineligible, so the frequent-under-review filter can be empty.</p>
         </>}
         {!prediction && dimension === null && <details className={panel} open>
@@ -270,7 +273,7 @@ export default function AdminDimensions() {
             <label className="block text-xs">Action<select className="recs-input mt-1 w-full" value={action} onChange={e => setAction(e.target.value)}><option disabled={!reviewSupported} value="review">Request review / retry now</option><option value={row.paused ? 'resume' : 'pause'}>{row.paused ? 'Resume' : 'Pause'} automatic review</option><option value={row.suppressed ? 'restore' : 'suppress'}>{row.suppressed ? 'Restore' : 'Suppress'} explanation display</option><option value={row.investigation_status === 'open' ? 'clear' : 'investigate'}>{row.investigation_status === 'open' ? 'Clear' : 'Flag'} investigation</option></select></label>
             <label className="block text-xs">Reason (recorded with your administrator identity)<textarea className="recs-input mt-1 w-full" maxLength={2000} value={reason} onChange={e => setReason(e.target.value)} /></label>
             <button className="recs-btn-primary" disabled={busy || !reason.trim() || (action === 'review' && (row.paused || !reviewSupported))} onClick={intervene}>{busy ? 'Recording…' : 'Apply to this dimension'}</button>
-            {!reviewSupported && <p className="text-xs">Semantic wording reviews require a labeling workflow for this feature layout. Contribution inspection and governance controls are available.</p>}
+            {!reviewSupported && <p className="text-xs">Future semantic reviews are restricted to eligible media dimensions. Historical labels, contribution inspection and governance controls remain available.</p>}
             {reviewSupported && <p className="text-xs">Review runs one manual HIGH/LOW assessment. Batch forecasts and spending limits are available through the labeling CLI. Labels are approximate coordinate interpretations, not causal explanations.</p>}
             {row.paused && <p className="text-xs">Resume before requesting review. Pausing does not hide the current label.</p>}
           </section>

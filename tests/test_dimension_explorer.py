@@ -151,41 +151,27 @@ def test_production_selection_attribution_rollups_and_suppression(database):
     assert stale.value.status_code==409
 
 
-def test_review_queue_audit_stale_actions_and_pause_race(database):
+def test_historical_user_review_rejected_but_governance_preserved(database):
     connect, config = database
-    cid = config['config_id']
-    first = governance.apply_action(cid,769,'fixture-admin','review','Assess this dimension',0)
-    again = governance.apply_action(cid,769,'fixture-admin','review','Repeated click',0)
-    assert first['review_id']==again['review_id'] and first['status']=='queued'
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute('SELECT COUNT(*) FROM embedding_dimension_reviews'); assert cur.fetchone()[0]==1
-        cur.execute('SELECT actor,reason,before_state,after_state FROM embedding_dimension_actions')
-        action = cur.fetchone(); assert action[0]=='fixture-admin' and action[1]=='Assess this dimension'
-        assert action[2]['version']==0 and action[3]['version']==1
-    with pytest.raises(HTTPException) as stale:
-        governance.apply_action(cid,769,'fixture-admin','pause','Stale state',0)
-    assert stale.value.status_code==409
-    with connect() as running, running.cursor() as cur:
-        with governance.dimension_review_guard(cur,769) as allowed:
-            assert allowed
-            with connect() as second, second.cursor() as other:
-                with governance.dimension_review_guard(other,769) as duplicate:
-                    assert not duplicate
-            governance.apply_action(cid,769,'fixture-admin','pause','Investigate evidence',1)
-            cur.execute("UPDATE embedding_labels SET label='Valid replacement',needs_review=true,review_attempt_count=review_attempt_count+1 WHERE dimension=769")
-            running.commit()
-    detail = explorer.get_dimension(769,dict(top_n=0))
-    row = detail['rows'][0]
-    assert row['paused'] and row['needs_review'] and row['cooldown']
-    with connect() as conn, conn.cursor() as cur:
-        with governance.dimension_review_guard(cur,769) as allowed:
-            assert not allowed
-    governance.apply_action(cid,769,'fixture-admin','resume','Resume normal due date',2)
-    row = explorer.get_dimension(769,dict(top_n=0))['rows'][0]
-    assert not row['paused'] and row['cooldown']
-    governance.apply_action(cid,769,'fixture-admin','investigate','Evidence concern',3)
-    flagged = explorer.get_dimension(769,dict(top_n=0))['rows'][0]
-    assert flagged['investigation_status']=='open' and flagged['cooldown'] and not flagged['suppressed']
+    cid=config['config_id']
+    with pytest.raises(HTTPException) as retired:
+        governance.apply_action(cid,769,'fixture-admin','review','Historical dimension',0)
+    assert retired.value.status_code==409
+    with connect() as conn,conn.cursor() as cur:
+        cur.execute('SELECT count(*) FROM embedding_dimension_reviews');assert cur.fetchone()[0]==0
+        cur.execute('SELECT count(*) FROM embedding_dimension_actions');assert cur.fetchone()[0]==0
+    governance.apply_action(cid,769,'fixture-admin','pause','Investigate retained evidence',0)
+    governance.apply_action(cid,769,'fixture-admin','suppress','Retained wording concern',1)
+    governance.apply_action(cid,769,'fixture-admin','investigate','Historical evidence concern',2)
+    with pytest.raises(HTTPException):
+        governance.apply_action(cid,769,'fixture-admin','resume','Stale version',0)
+    governance.apply_action(cid,769,'fixture-admin','resume','Preserve ordinary controls',3)
+    with connect() as conn,conn.cursor() as cur:
+        cur.execute('SELECT paused,suppressed,investigation_status,version FROM embedding_dimension_admin WHERE dimension=769')
+        assert cur.fetchone()==(False,True,'open',4)
+        cur.execute('SELECT count(*) FROM embedding_dimension_actions');assert cur.fetchone()[0]==4
+    detail=explorer.get_dimension(769,dict(top_n=0))
+    assert detail['rows'][0]['labeling_scope']=='historical_only' and detail['actions_total']==4
 
 
 def test_new_contexts_do_not_mix_models_legacy_or_stale_predictions(database):
@@ -257,13 +243,13 @@ def test_dispatcher_uses_exact_request_outcome_and_distinguishes_progress(databa
         def release(self):
             self.handle.close()
     monkeypatch.setattr(worker,'try_acquire_pipeline_lock',lambda **kw: Lock())
-    job = governance.apply_action(config['config_id'],769,'fixture-admin','review','Fixture assessment',0)
+    job = governance.apply_action(config['config_id'],0,'fixture-admin','review','Fixture assessment',0)
     def process(args,**kwargs):
-        assert '--dimension' in args and '769' in args and '--selection_mode' in args
+        assert '--dimension' in args and '0' in args and '--selection_mode' in args
         assert kwargs['pass_fds']
         with patch.dict(os.environ,kwargs['env']):
             with connect() as conn, conn.cursor() as cur:
-                governance.record_assessment(cur,769,source='review',provider='fixture',model='fixture',
+                governance.record_assessment(cur,0,source='review',provider='fixture',model='fixture',
                     prompt=dict(prompt_text='fixture'),result=dict(validation_status='invalid'),
                     saved=False,outcome='repair_cooldown_scheduled',before=dict(needs_review=True),after=dict(needs_review=True))
         return SimpleNamespace(returncode=0)
@@ -275,8 +261,9 @@ def test_dispatcher_uses_exact_request_outcome_and_distinguishes_progress(databa
         cur.execute('SELECT review_id FROM embedding_dimension_assessments')
         assert cur.fetchone()[0]==job['review_id']
     # Completed execution with zero resolutions is not presented as review progress.
-    row = explorer.get_dimension(769,dict(top_n=0))['rows'][0]
-    assert row['job_status']=='completed' and row['needs_review']
+    row = explorer.get_dimension(0,dict(top_n=0))['rows'][0]
+    assert row['job_status']=='completed' and row['assessment_count']==1
+    assert row['outcome']=='repair_cooldown_scheduled'
 
 
 def test_register_query_plan_uses_scoped_retained_observations(database):

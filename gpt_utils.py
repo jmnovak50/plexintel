@@ -32,7 +32,7 @@ OLLAMA_LABEL_MODEL = get_setting_value("labeling.ollama_model", default="gemma4:
 OLLAMA_TIMEOUT_S = get_setting_value("ollama.timeout_s", default=300)
 
 SYSTEM_PROMPT = """
-You label one embedding dimension for film and TV data.
+You interpret one MEDIA embedding dimension as a generalizable film/TV content characteristic.
 
 Find the strongest reusable semantic separator between HIGH and LOW examples.
 Use all available evidence: titles, genres, media type, plot hints, and cast/director only
@@ -40,17 +40,14 @@ when they reveal an obvious cluster.
 Genres are often broad and noisy. Plot hints may contain the clearest signal for story/entity
 dimensions, so a repeated plot concept can be the primary basis for the label.
 
-For media dimensions, identify a concrete item-side separator and label the title/content trait.
-For user dimensions, infer a viewer preference, taste, affinity, or tendency from the representative
-watches associated with HIGH versus LOW users. User-dimension labels must be preference-framed;
-do not label them as direct title/content traits.
+Identify a concrete title/content characteristic supported across independent canonical titles or TV series.
+The label describes the HIGH end only. LOW is contrasting coordinate evidence, not semantic absence.
+Repeated episodes, aliases and franchise entries are correlated evidence, not independent support.
 
 Prefer concrete story/entity separators over broad genre labels.
 Bad labels are broad genre summaries, such as "sci-fi action", "speculative themes", or
 "complex narratives".
 Good media labels are short, concrete, evidence-derived noun phrases.
-Good user labels are short, concrete, preference-framed phrases such as "preference for workplace comedy"
-or "viewer affinity for relationship-driven stories".
 Do not copy example wording from these instructions into the label. The label must come only
 from the HIGH/LOW evidence for the current dimension.
 If related dimensions share a broad theme, label each dimension by its distinguishing nuance
@@ -61,13 +58,9 @@ Do not use labels like redemption, coming of age, relationships, secrets, truth,
 humanity, moral ambiguity, family healing, or similar moral-arc language unless the pattern is
 explicitly repeated across several items and clearly separates HIGH from LOW.
 
-Do not return UNCLEAR / MIXED SIGNAL merely because the label is imperfect.
-If one or two HIGH examples are outliers but the remaining examples form a clear cluster,
-label the dominant cluster and lower confidence.
-
-Use UNCLEAR / MIXED SIGNAL only when no concrete label reaches the coverage threshold or
-HIGH and LOW examples are not meaningfully separable:
-UNCLEAR / MIXED SIGNAL
+Use UNCLEAR / MIXED SIGNAL when evidence is incoherent, weak, series-specific, or cannot support
+a reusable content characteristic. Do not force a title/franchise cluster label to avoid abstention.
+A high numerical coverage estimate cannot establish generalization beyond correlated examples.
 
 Return JSON only.
 Complete all checks before answering. Emit exactly ONE final JSON object, with no
@@ -94,7 +87,7 @@ Rules:
 {label_style_guidance}
 - Derive the label only from the listed HIGH/LOW items for this dimension.
 - Never copy wording from these instructions or reuse a prior label unless the current dimension independently supports the exact words.
-- When a dimension resembles a broader theme seen elsewhere, choose the narrower nuance that best separates this HIGH set from this LOW set.
+- When a dimension resembles a broader theme seen elsewhere, choose the narrower nuance only when independently supported across titles/series; otherwise abstain.
 - Label must be 8 words or fewer.
 - Explanation must be exactly 1 sentence.
 - Provide exactly 3 evidence bullets as short strings.
@@ -108,18 +101,18 @@ Rules:
 - A proposed label is only strong if HIGH coverage is at or above {minimum_label_coverage_percent}% and LOW overlap is at or below {maximum_low_overlap_percent}%.
 - If fewer than {minimum_label_coverage_percent}% of HIGH examples clearly support the proposed label, do not assign a confident semantic label.
 - If one or two HIGH examples are outliers but the remaining examples form a clear cluster, assign the dominant cluster label and lower confidence.
-- When coverage is far below the threshold, return UNCLEAR / MIXED SIGNAL unless there is an obvious narrow cluster label such as "Gossip Girl episode cluster" or "mostly short episodic titles"; narrow cluster labels should be low or medium confidence.
+- When coverage is below the threshold or only a title/series/franchise association is evident, return UNCLEAR / MIXED SIGNAL; do not substitute a mechanical or cluster label to avoid abstention.
 - If LOW overlap is above {maximum_low_overlap_percent}%, the label cannot be high confidence.
-- If LOW overlap is 50% or higher, return UNCLEAR / MIXED SIGNAL unless the label is a very narrow mechanical label that is still clearly useful.
+- If LOW overlap is 50% or higher, return UNCLEAR / MIXED SIGNAL.
 - Do not claim broad labels based on only a minority of examples.
 - Do not assign broad semantic labels that apply equally well to HIGH and LOW examples.
 - Prefer labels that separate HIGH from LOW, not merely labels that describe HIGH.
 - Prefer concrete semantic labels over broad genres, mechanical labels, or creative vibe labels.
 - Report coverage as counts and percents: coverage_high_count / coverage_high_total and coverage_low_overlap_count / coverage_low_total, such as 7/10 and 2/8.
-- Return UNCLEAR / MIXED SIGNAL only if:
-  1. no concrete label reaches the coverage threshold after allowing a dominant cluster with one or two outliers,
+- Return UNCLEAR / MIXED SIGNAL whenever no coherent, generalizable content characteristic is supported, including:
+  1. no concrete label reaches the coverage threshold across independent titles/series,
   2. malformed or truncated titles dominate,
-  3. HIGH vs LOW contrast is weak or contradictory.
+  3. HIGH vs LOW contrast is weak, contradictory or series-specific.
 
 Return ONLY this JSON shape:
 {{
@@ -830,6 +823,11 @@ def _select_prompt_rows(
     return pd.DataFrame(selected_rows).reset_index(drop=True)
 
 
+def _require_media_labeling(dimension_mode, dimension=None):
+    if dimension_mode != 'media' or (dimension is not None and get_dimension_mode(dimension) != 'media'):
+        raise ValueError('User/watch dimensions are historical only; new semantic evaluation is media-only')
+
+
 def _get_dimension_scope_text(dimension_mode: str) -> str:
     if dimension_mode == "user":
         return (
@@ -859,7 +857,13 @@ def _get_dimension_guidance_text(dimension_mode: str) -> str:
         )
     return (
         "Infer an item-side semantic separator. Favor labels that distinguish the high-value titles from the "
-        "low-value titles based on concrete shared characteristics."
+        "low-value titles based on concrete shared content characteristics. Describe HIGH polarity only: "
+        "LOW is contrasting coordinate evidence, not an opposite trait, dislike, or proof of semantic absence. "
+        "Seek a distinctive characteristic shared across independent canonical titles or television series. "
+        "Repeated episodes, aliases and franchise entries are correlated evidence, not independent support. "
+        "Do not name a title or franchise from recognition alone, or generalize its entire plot to unrelated titles. "
+        "Report UNCLEAR / MIXED SIGNAL when the contrast is weak, series-specific, or lacks a coherent generalizable "
+        "content characteristic. Fewer interpretable dimensions are preferable to generic or invented labels."
     )
 
 
@@ -926,6 +930,7 @@ def build_dimension_prompt(
     prepared_negative: dict | None = None,
 ) -> dict:
     dimension_mode = _resolve_dimension_mode(dimension, dimension_mode)
+    _require_media_labeling(dimension_mode, dimension)
     positive_bundle = prepared_positive if prepared_positive is not None else prepare_dimension_items(
         positive_df,
         min_valid_items=min_valid_items,
@@ -1022,6 +1027,7 @@ def _build_user_prompt(
     existing_label_type: str | None = None,
 ) -> str:
     dimension_mode = _resolve_dimension_mode(dimension, dimension_mode)
+    _require_media_labeling(dimension_mode, dimension)
     return USER_PROMPT_TEMPLATE.format(
         dimension=dimension,
         dimension_scope=_get_dimension_scope_text(dimension_mode),
@@ -1097,6 +1103,7 @@ def _extract_label_from_response(response_text: str) -> str:
 
 
 def _call_openai_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media") -> dict:
+    _require_media_labeling(dimension_mode)
     client = openai.OpenAI(api_key=get_setting_value("openai.api_key"))
     response = client.chat.completions.create(
         model=model,
@@ -1267,6 +1274,7 @@ def _parse_ollama_label_response(raw, prompt, dimension_mode):
 
 def _call_ollama_for_label_result(prompt_text: str, model: str, dimension_mode: str = "media",
                                 max_output_tokens: int | None = None, on_usage=None, strict_json=False) -> dict:
+    _require_media_labeling(dimension_mode)
     from api.services.labeling_costs import LabelingError
     max_output_tokens=label_output_limit(max_output_tokens)
     resolved_model = _resolve_ollama_model_name(model)
@@ -1334,6 +1342,7 @@ def call_llm_for_label_result(
     before_attempt=None,
     attempt_callback=None,
 ) -> dict:
+    _require_media_labeling(dimension_mode)
     resolved_provider, resolved_model = resolve_label_backend(provider, model)
     last_error = None
 
@@ -1401,6 +1410,7 @@ def call_gpt_for_label(
 
 
 def insert_label(dimension, label):
+    _require_media_labeling(get_dimension_mode(dimension), dimension)
     conn = connect_db()
     cur = conn.cursor()
     cur.execute(
@@ -1448,6 +1458,8 @@ def _get_ranked_embedding_ids(
     top_n: int = DEFAULT_FETCH_ITEMS,
     ascending: bool = False,
 ) -> list:
+    if table_name != 'media_embeddings':
+        raise ValueError('Only media evidence can be read for semantic labeling')
     conn = connect_db()
     cur = conn.cursor()
     cur.execute(f"SELECT {id_column}, embedding FROM {table_name}")
@@ -1488,13 +1500,7 @@ def get_bottom_media_for_dimension(dimension, top_n: int = DEFAULT_FETCH_ITEMS):
 
 
 def get_ranked_users_for_dimension(dimension, top_n: int = DEFAULT_FETCH_ITEMS, ascending: bool = False):
-    return _get_ranked_embedding_ids(
-        "user_embeddings",
-        "username",
-        get_user_embedding_index(dimension),
-        top_n=top_n,
-        ascending=ascending,
-    )
+    raise ValueError('User/watch evidence is ineligible for semantic labeling')
 
 
 def get_top_users_for_dimension(dimension, top_n: int = DEFAULT_FETCH_ITEMS):
@@ -1588,74 +1594,7 @@ def get_media_metadata(rating_keys):
 
 
 def get_user_positive_training_examples(usernames, min_engagement_ratio: float = 0.50):
-    usernames = list(usernames or [])
-    if not usernames:
-        return _ensure_metadata_columns(pd.DataFrame())
-
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT
-            td.username,
-            NULL::timestamp AS watched_at,
-            m.rating_key,
-            m.title,
-            m.year,
-            m.media_type,
-            m.show_title,
-            m.rating,
-            COALESCE(NULLIF(m.summary, ''), m.episode_summary, '') AS summary,
-            m.duration,
-            COALESCE(g.genre_tags, '') AS genre_tags,
-            COALESCE(a.actor_tags, '') AS actor_tags,
-            COALESCE(d.director_tags, '') AS director_tags,
-            td.played_duration,
-            td.media_duration AS training_media_duration,
-            td.engagement_ratio,
-            td.label AS training_label,
-            ROUND((td.played_duration::numeric / 60.0), 2) AS played_minutes,
-            ROUND(
-                COALESCE(
-                    NULLIF(m.duration, 0)::numeric / 60000.0,
-                    NULLIF(td.media_duration, 0)::numeric / 60.0
-                ),
-                2
-            ) AS media_minutes
-        FROM training_data td
-        JOIN library m ON td.rating_key = m.rating_key
-        LEFT JOIN (
-            SELECT mg.media_id, STRING_AGG(g.name, ', ') AS genre_tags
-            FROM media_genres mg
-            JOIN genres g ON mg.genre_id = g.id
-            GROUP BY mg.media_id
-        ) g ON g.media_id = m.rating_key
-        LEFT JOIN (
-            SELECT ma.media_id, STRING_AGG(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name) AS actor_tags
-            FROM media_actors ma
-            JOIN actors a ON ma.actor_id = a.id
-            GROUP BY ma.media_id
-        ) a ON a.media_id = m.rating_key
-        LEFT JOIN (
-            SELECT md.media_id, STRING_AGG(d.name, ', ') AS director_tags
-            FROM media_directors md
-            JOIN directors d ON md.director_id = d.id
-            GROUP BY md.media_id
-        ) d ON d.media_id = m.rating_key
-        WHERE td.username = ANY(%s)
-          AND td.label = 1
-          AND td.engagement_ratio >= %s
-        """,
-        (usernames, min_engagement_ratio),
-    )
-    rows = cur.fetchall()
-    colnames = [desc[0] for desc in cur.description]
-    cur.close()
-    conn.close()
-
-    df = pd.DataFrame(rows, columns=colnames)
-    df = _ensure_metadata_columns(df)
-    return _order_dataframe(df, "username", usernames, secondary_desc_column="engagement_ratio")
+    raise ValueError('User/watch evidence is ineligible for semantic labeling')
 
 
 def get_user_watch_history(usernames):

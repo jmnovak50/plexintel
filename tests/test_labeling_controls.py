@@ -53,11 +53,11 @@ def candidate_fixture():
             [(d,1.) for d in dims],[],[(12,True),(24,False)],[(36,batch.prompt_hash(prompt(36)))]]
         return c
     attempts={(48,batch.prompt_hash(prompt(48))):3}
-    return conn,Mock(context=dict(config_id='c',model_sha256='m',feature_space_id='f'),prompt=Mock(side_effect=prompt)),attempts
+    return conn,Mock(context=dict(media_dimensions=768,user_dimensions=768,config_id='c',model_sha256='m',feature_space_id='f'),prompt=Mock(side_effect=prompt)),attempts
 
 
 @pytest.mark.parametrize('mode',['eligible','importance','review'])
-@pytest.mark.parametrize('side',['all','media','user'])
+@pytest.mark.parametrize('side',['all','media'])
 def test_bounded_selection_matches_full_evidence_semantics(mode,side):
     make,evidence,attempts=candidate_fixture()
     args=batch.parser().parse_args(['--selection-mode',mode,'--dim-type',side,'--limit','2'])

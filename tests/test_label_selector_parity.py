@@ -7,7 +7,7 @@ def test_candidates_include_negative_only_dimensions_and_preserve_review_cooldow
     conn=MagicMock();cur=conn.cursor.return_value.__enter__.return_value
     # The SQL query, not a positive-SHAP filter, owns retained coordinate scope.
     cur.fetchall.side_effect=[[(12,2.0),(24,1.0),(36,.5),(48,.2)],[],[(12,True),(24,False),(36,False)],[]]
-    evidence=Mock(context=dict(config_id='synthetic',model_sha256='model',feature_space_id='space'))
+    evidence=Mock(context=dict(media_dimensions=768,user_dimensions=768,config_id='synthetic',model_sha256='model',feature_space_id='space'))
     evidence.prompt.return_value=dict(prompt_text='synthetic high/low',skipped_reason=None)
     rows,_=batch.candidates(conn,evidence)
     query=cur.execute.call_args_list[0].args[0]

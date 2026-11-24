@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from psycopg2.extras import Json, RealDictCursor
 
 from api.db.connection import connect_db
-from api.services.dimension_config import get_active_config, identity
+from api.services.dimension_config import get_active_config, identity, require_semantic_media
 
 LOCK_NAMESPACE = 184724
 
@@ -77,6 +77,9 @@ def apply_action(config_id, dimension, actor, action, reason, version):
             if config['config_id'] != config_id:
                 raise HTTPException(409, 'Configuration changed; reload the explorer')
             identity(config, dimension)
+            if action == 'review':
+                try: require_semantic_media(config, dimension)
+                except ValueError as exc: raise HTTPException(409, str(exc)) from exc
             if action == 'review' and (config['media_dimensions'],config['user_dimensions']) != (768,768):
                 raise HTTPException(409, 'The current labeling implementation supports 768 dimensions per side; review requires a compatible labeling implementation')
             if action == 'review' and config.get('feature_space_id'):

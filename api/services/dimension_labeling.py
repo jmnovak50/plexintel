@@ -9,7 +9,7 @@ import json
 
 from psycopg2.extras import RealDictCursor
 
-from api.services.dimension_config import get_active_config, feature_groups
+from api.services.dimension_config import get_active_config, feature_groups, require_semantic_media
 
 
 def compatible_label_sql(label='saved', config='c'):
@@ -37,7 +37,7 @@ def validate_context(config, state=None, control=None):
         raise ValueError('Labeling requires verified Gemma 2 text/user provenance')
     names=[f"{g['name']}_{i}" for g in expected for i in range(768)]
     if config.get('feature_names',[])[:1536]!=names:raise ValueError('Invalid dimension coordinates')
-    return dict(config_id=config['config_id'],feature_space_id=config['feature_space_id'],
+    return dict(feature_groups=feature_groups(config),ordering=config['ordering'],config_id=config['config_id'],feature_space_id=config['feature_space_id'],
         contract_hash=config['contract_hash'],encoder_digest=config['encoder_digest'],
         encoder_model=contract['encoder']['name'],media_serializer=contract['media_serializer'],profile=contract['profile'],
         model_sha256=config['model_sha256'],publication_id=config.get('workload_id'),
@@ -76,90 +76,60 @@ class Evidence:
         self.context = current_context(conn)
         self.vectors = {}
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            for side,table,key,kind in [('media','media_embeddings','rating_key','media_text'),('user','user_embeddings','username','user')]:
+            for side,table,key,kind in [('media','media_embeddings','rating_key','media_text')]:
                 cur.execute(f'''SELECT e.{key} AS id,e.embedding::text AS embedding,e.provenance AS record
                     FROM public.{table} e ORDER BY e.{key}''')
                 self.vectors[side] = checked_vectors(cur.fetchall(),self.context)
+            cur.execute('SELECT rating_key,media_type,plex_guid,show_rating_key FROM public.library ORDER BY rating_key')
+            from api.services.dimension_sampling import sample_groups
+            self.groups = sample_groups(cur.fetchall())
         self.media = gpt.get_media_metadata(self.vectors['media'][0])
-        self.user = gpt.get_user_positive_training_examples(self.vectors['user'][0])
-        # Keep the user grouping required by the original prompt, without sending
-        # account names to a cloud interpreter. The mapping is batch-local only.
-        aliases = {name:f'Viewer {i+1}' for i,name in enumerate(self.vectors['user'][0])}
-        self.aliases = aliases
         self.prompt_cache = {}
-        self.prepare_user_cache()
-
-    def prepare_user_cache(self):
-        import gpt_utils as gpt
-        self.user_prepared = gpt.prepare_dimension_items(self.user,dimension_mode='user')
-        self.user_candidates = {}
-        for username,group in self.user_prepared['valid_items'].groupby('username',sort=False) if not self.user_prepared['valid_items'].empty else []:
-            # Selection is round-robin and capped per user. Cache exactly those
-            # candidates, while retaining full-population quality gate counts.
-            self.user_candidates[username] = gpt._select_prompt_rows(group,gpt.MAX_ITEMS_PER_USER_IN_PROMPT,'user')
 
     def ranked(self, side, index, count, ascending=False):
-        import numpy as np
-        ids,values = self.vectors[side]
-        order = np.argsort(values[:,index] if ascending else -values[:,index],kind='stable')
-        # Disjoint tails even for the small population of user vectors.
-        count = min(count,len(ids)//2)
-        if ascending:
-            high = set(np.argsort(-values[:,index],kind='stable')[:count])
-            order = [i for i in order if i not in high]
-        return [ids[i] for i in order[:count]]
+        if side != 'media':
+            raise ValueError('User/watch evidence is ineligible for semantic labeling')
+        from api.services.dimension_sampling import representative_tail
+        ids, values = self.vectors['media']
+        return representative_tail(ids, values, index, count, self.groups, ascending)
 
     def variable(self, dimension):
         import numpy as np
-        side,index = ('media',dimension) if dimension<768 else ('user',dimension-768)
-        _,values = self.vectors[side]
+        index = require_semantic_media(self.context, dimension)
+        _,values = self.vectors['media']
         return len(values)>=2 and bool(np.ptp(values[:,index])>1e-12)
 
     def samples(self, dimension, count):
         import gpt_utils as gpt
-        side,index = ('media',dimension) if dimension<768 else ('user',dimension-768)
-        frame,key = (self.media,'rating_key') if side=='media' else (self.user,'username')
+        index = require_semantic_media(self.context, dimension)
         selected = []
-        for ascending in (False,True):
-            ids = self.ranked(side,index,count,ascending)
-            if frame.empty or key not in frame:
+        for ascending in (False, True):
+            ids = self.ranked('media', index, count, ascending)
+            frame = self.media
+            if frame.empty or 'rating_key' not in frame:
                 selected.append(frame.copy())
                 continue
-            result = gpt._order_dataframe(frame[frame[key].isin(ids)].copy(),key,ids,
-                                         secondary_desc_column='engagement_ratio' if side=='user' else None)
-            if side=='user':
-                result['username'] = result['username'].map(self.aliases)
-            selected.append(result)
-        return side,*selected
+            selected.append(gpt._order_dataframe(frame[frame.rating_key.isin(ids)].copy(), 'rating_key', ids))
+        return 'media', *selected
 
     def prompt(self, dimension):
         import gpt_utils as gpt
+        require_semantic_media(self.context, dimension)
         if dimension not in self.prompt_cache:
-            if dimension<768:
-                side,high,low = self.samples(dimension,self.fetch_count)
-                bundle = gpt.build_dimension_prompt(dimension,high,low,dimension_mode=side)
-            else:
-                high = self.user_bundle(self.ranked('user',dimension-768,self.fetch_count))
-                low = self.user_bundle(self.ranked('user',dimension-768,self.fetch_count,True))
-                bundle = gpt.build_dimension_prompt(dimension,None,dimension_mode='user',
-                    prepared_positive=high,prepared_negative=low)
+            side, high, low = self.samples(dimension, self.fetch_count)
+            bundle = gpt.build_dimension_prompt(dimension, high, low, dimension_mode=side)
+            from api.services.dimension_sampling import SAMPLE_POLICY, TAIL_FRACTION
+            bundle['sampling'] = dict(policy=SAMPLE_POLICY,tail_fraction=TAIL_FRACTION,
+                population=len(self.vectors['media'][0]),maximum_per_canonical_or_series=1,
+                unknown_identity_count=sum(not g['known'] for g in self.groups.values()),
+                franchise_coverage='Unknown; no franchise identity inferred')
+            bundle['prompt_text'] += ('\nSampling: rank-ordered representatives from each extreme 5% tail; '
+                'at most one example per known canonical title or television series in each tail. '
+                'The full coordinate population is unchanged. Unknown identities and cross-tail series '
+                'overlap are not independent semantic validation.\n')
             if not self.variable(dimension):
                 bundle['skipped_reason'] = 'Constant or insufficient coordinate population'
             elif len(bundle['negative_items'])<min(gpt.MIN_VALID_ITEMS,gpt.DEFAULT_TOP_NEGATIVE_ITEMS):
                 bundle['skipped_reason'] = 'Insufficient valid LOW examples for contrast'
             self.prompt_cache[dimension] = bundle
         return self.prompt_cache[dimension]
-
-    def user_bundle(self, usernames):
-        import pandas as pd
-        pieces = [self.user_candidates[u] for u in usernames if u in self.user_candidates]
-        valid = pd.concat(pieces,ignore_index=True) if pieces else self.user_prepared['valid_items'].iloc[:0].copy()
-        if not valid.empty:
-            valid['username'] = valid['username'].map(self.aliases)
-        result = {'valid_items':valid}
-        for key in ('all_items','flagged_items'):
-            frame = self.user_prepared[key]
-            result[key] = frame[frame['username'].isin(usernames)] if not frame.empty else frame
-        frame = self.user_prepared['valid_items']
-        result['valid_count'] = len(frame[frame['username'].isin(usernames)]) if not frame.empty else 0
-        return result

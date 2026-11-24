@@ -64,7 +64,7 @@ class ActorCastOrderTests(unittest.TestCase):
 
         self.assertGreaterEqual(
             source.count("STRING_AGG(a.name, ', ' ORDER BY ma.cast_order NULLS LAST, a.name)"),
-            2,
+            1,  # Media-only labeling no longer fetches user training watches.
         )
         self.assertIn("_split_tags(row.get(\"actor_tags\", row.get(\"actors\", \"\")), MAX_CAST_NAMES)", source)
 

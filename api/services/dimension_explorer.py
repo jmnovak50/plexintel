@@ -4,7 +4,7 @@ import json
 from contextlib import contextmanager, nullcontext
 from psycopg2.extras import RealDictCursor
 from api.db.connection import connect_db
-from api.services.dimension_config import get_active_config, identity, feature_groups
+from api.services.dimension_config import get_active_config, identity, semantic_media_range, feature_groups
 from api.services.dimension_labeling import compatible_label_sql
 
 REPEATED_ATTEMPTS = max(1, int(os.getenv('DIMENSION_EXPLORER_REPEATED_ATTEMPTS', '3')))
@@ -240,7 +240,13 @@ def get_register(scope, search='', side='', status='', sort='dimension', offset=
         config = get_active_config(cur)
         scope, versions = resolve_scope(cur, scope, config)
         sql, params = register_cte(scope, config)
-        summary_sql = ''' SELECT COUNT(*) AS inventory_count,
+        start, end = semantic_media_range(config)
+        # Existing counts/eligibility describe the diagnostic inventory, including history.
+        summary_sql = f''' SELECT COUNT(*) AS inventory_count,
+            COUNT(*) FILTER(WHERE dimension >= {start} AND dimension < {end}) AS labeling_inventory_count,
+            COUNT(*) FILTER(WHERE dimension < {start} OR dimension >= {end}) AS historical_only_dimensions,
+            COUNT(*) FILTER(WHERE dimension >= {start} AND dimension < {end} AND NOT paused AND NULLIF(BTRIM(label),'') IS NULL) AS labeling_unlabeled,
+            COUNT(*) FILTER(WHERE dimension >= {start} AND dimension < {end} AND NOT paused AND due) AS labeling_due,
             COUNT(*) FILTER(WHERE NULLIF(BTRIM(label),'') IS NULL) AS unlabeled,
             COUNT(*) FILTER(WHERE needs_review IS TRUE) AS unresolved,
             COUNT(*) FILTER(WHERE due AND NOT paused) AS due,
@@ -277,6 +283,10 @@ def get_register(scope, search='', side='', status='', sort='dimension', offset=
             params + [REPEATED_ATTEMPTS] + extra + [limit,offset])
         result = cur.fetchone()
         overview, total, rows = result['overview'], result['total'], result['rows']
+        for row in rows:
+            row['labeling_eligible'] = start <= row['dimension'] < end
+            row['labeling_scope'] = 'media_only' if row['labeling_eligible'] else 'historical_only'
+            row['labeling_ineligible_reason'] = None if row['labeling_eligible'] else 'Historical dimension; not eligible for future semantic evaluation'
         cur.execute('SELECT DISTINCT username FROM recommendations ORDER BY username')
         users = [r['username'] for r in cur.fetchall()]
         recent_runs=recent_labeling_runs(cur,config)

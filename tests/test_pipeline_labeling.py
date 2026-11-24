@@ -24,7 +24,7 @@ def setup(monkeypatch):
               'pipeline.labeling_budget_usd':1.}
     monkeypatch.setattr(auto,'get_setting_value',lambda key,default=None:settings.get(key,default))
     monkeypatch.setattr(auto,'resolve_settings',lambda **kw:{key:SimpleNamespace(value=settings[key]) for key in kw['keys']})
-    ctx=dict(feature_space_id='generation',publication_id='publication',model_sha256='model',config_id='config')
+    ctx=dict(media_dimensions=768,user_dimensions=768,feature_space_id='generation',publication_id='publication',model_sha256='model',config_id='config')
     summary=dict(outcome='daily_completed',model_after='model',final_verification=dict(ctx,verified=True))
     result=dict(verified=True,model_sha256='model',run_id='daily-run',feature_space_id='generation',promotion_id='publication',summary=deepcopy(summary))
     conn=MagicMock();cur=conn.cursor.return_value.__enter__.return_value
@@ -262,7 +262,7 @@ def test_existing_batch_engine_with_mock_cloud_keeps_publication_independent(led
     import gpt_utils as gpt
     from api.embedding_generation import model,backfill
     from api.services.labeling_costs import LabelingError
-    context=dict(config_id='config',feature_space_id='generation')
+    context=dict(media_dimensions=768,user_dimensions=768,config_id='config',feature_space_id='generation')
     row=dict(dimension=1,side='media',completed=False,abstained=False,
              prompt=dict(prompt_text='fictional high low',positive_items=[{}]*6,negative_items=[{}]*4))
     existing=dict(dimension=0,side='media',completed=True,abstained=False,prompt=dict(prompt_text='existing'))

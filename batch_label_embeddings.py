@@ -205,12 +205,11 @@ def connect_db():
     return conn
 
 
-def _get_dimension_range(dim_type):
-    if dim_type == "media":
-        return (0, EMBEDDING_SIDE_DIMENSIONS)
-    if dim_type == "user":
-        return (EMBEDDING_SIDE_DIMENSIONS, COMBINED_EMBEDDING_DIMENSIONS)
-    return (0, COMBINED_EMBEDDING_DIMENSIONS)
+def _get_dimension_range(dim_type, cur):
+    from api.services.dimension_config import get_active_config, semantic_media_range
+    if dim_type not in ('media', 'all'):
+        raise ValueError('User/watch dimensions are historical only; new semantic evaluation is media-only')
+    return semantic_media_range(get_active_config(cur))
 
 
 def _should_persist_label(label: str) -> bool:
@@ -546,7 +545,7 @@ def get_ranked_dimension_stats(cur):
 def get_top_dimensions(cur, limit=25, dim_type="media", include_labeled=False):
     cur.execute("SELECT dimension FROM embedding_labels")
     labeled = {row[0] for row in cur.fetchall()}
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
 
     ranked_stats = get_ranked_dimension_stats(cur)
     cur.execute("SELECT a.dimension FROM embedding_dimension_admin a JOIN embedding_feature_config c USING(config_id) WHERE c.active AND a.paused")
@@ -565,6 +564,9 @@ def get_top_unlabeled_dimensions(cur, limit=25, dim_type="media"):
 
 
 def get_dimension_stats_for_dimensions(cur, dimensions: list[int]):
+    from api.services.dimension_config import get_active_config, require_semantic_media
+    config = get_active_config(cur)
+    for dimension in dimensions: require_semantic_media(config, dimension)
     ranked_stats = {
         stat["dimension"]: stat
         for stat in get_ranked_dimension_stats(cur)
@@ -589,7 +591,7 @@ def get_dimension_stats_for_dimensions(cur, dimensions: list[int]):
 
 
 def get_coverage_dimension_candidates(cur, dim_type="all"):
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
     usable_existing_label_sql = _usable_label_sql("el_existing")
     query = """
         SELECT
@@ -742,7 +744,7 @@ def get_coverage_selection_diagnostics(cur, dim_type="all") -> dict:
     if cur is None:
         return diagnostics
 
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
     usable_existing_label_sql = _usable_label_sql("el_existing")
     query = """
         WITH coverage_candidates AS (
@@ -873,7 +875,7 @@ def get_review_selection_diagnostics(cur, dim_type="all") -> dict:
     if cur is None:
         return diagnostics
 
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
     query = """
         SELECT
             COUNT(*) AS total_needing_review,
@@ -918,7 +920,7 @@ def get_review_selection_diagnostics(cur, dim_type="all") -> dict:
 
 
 def get_review_dimension_candidates(cur, limit=25, dim_type="all") -> list[dict]:
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
     query = """
         SELECT
             el.dimension,
@@ -996,7 +998,7 @@ def get_eligible_dimension_diagnostics(cur, dim_type="all") -> dict:
     if cur is None:
         return diagnostics
 
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
     query = """
         WITH active_dims AS (
             SELECT si.dimension
@@ -1040,7 +1042,7 @@ def get_eligible_dimension_candidates(cur, limit=25, dim_type="all") -> list[dic
     and review-due labels (needs_review with a null or expired next_review_at).
     Cooldown is preserved: not_due dimensions are excluded by the WHERE clause.
     """
-    dim_min, dim_max = _get_dimension_range(dim_type)
+    dim_min, dim_max = _get_dimension_range(dim_type, cur)
     query = """
         WITH active_dims AS (
             SELECT
@@ -1692,13 +1694,7 @@ def _fetch_dimension_samples(dimension: int):
         negative_ids = get_bottom_media_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
         return "media", get_media_metadata(positive_ids), get_media_metadata(negative_ids)
 
-    positive_ids = get_top_users_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
-    negative_ids = get_bottom_users_for_dimension(dimension, top_n=DEFAULT_FETCH_ITEMS)
-    return (
-        "user",
-        get_user_positive_training_examples(positive_ids),
-        get_user_positive_training_examples(negative_ids),
-    )
+    raise ValueError('User/watch evidence is ineligible for semantic labeling')
 
 
 def _default_label_result(skipped_reason: str = "") -> dict:
@@ -1866,6 +1862,8 @@ def save_label_result(
     maximum_low_overlap_percent=MAXIMUM_LOW_OVERLAP_PERCENT,
 ) -> tuple[bool, str]:
     dim_type = dim_type or get_dimension_mode(dimension)
+    if dim_type != 'media' or get_dimension_mode(dimension) != 'media':
+        raise ValueError('User/watch dimensions are historical only; new semantic labels cannot be saved')
     label_result = validate_label_perspective(label_result, dimension_mode=dim_type)
     existing_row = get_existing_label_row(cur, dimension)
     existing_status, existing_reason = _label_repair_status(existing_row)
@@ -2130,7 +2128,7 @@ def _legacy_main():
         [args.dimension] if args.dimension is not None else []
     )
     if requested_dimensions:
-        dim_min, dim_max = _get_dimension_range(args.dim_type)
+        dim_min, dim_max = _get_dimension_range(args.dim_type, cur)
         for dimension in requested_dimensions:
             if dimension < 0 or dimension >= COMBINED_EMBEDDING_DIMENSIONS:
                 parser.error(

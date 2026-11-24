@@ -75,13 +75,7 @@ def _fetch_dimension_samples(dimension: int, top_n: int):
         negative_ids = get_bottom_media_for_dimension(dimension, top_n=top_n)
         return "media", get_media_metadata(positive_ids), get_media_metadata(negative_ids)
 
-    positive_ids = get_top_users_for_dimension(dimension, top_n=top_n)
-    negative_ids = get_bottom_users_for_dimension(dimension, top_n=top_n)
-    return (
-        "user",
-        get_user_positive_training_examples(positive_ids),
-        get_user_positive_training_examples(negative_ids),
-    )
+    raise ValueError('User/watch evidence is ineligible for semantic labeling')
 
 
 def label_single_dimension(dimension, top_n=10, generate_label=False, save_label=False,

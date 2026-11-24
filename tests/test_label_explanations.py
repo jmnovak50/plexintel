@@ -12,6 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
+
+@pytest.fixture(autouse=True)
+def synthetic_feature_ownership(monkeypatch):
+    monkeypatch.setattr("api.services.dimension_config.get_active_config", lambda cur: dict(media_dimensions=768,user_dimensions=768))
+
 
 try:
     import pgvector.psycopg2  # noqa: F401
@@ -94,25 +100,11 @@ class DimensionRoutingTests(unittest.TestCase):
             )
 
     def test_user_dimensions_use_offset_user_embedding_indexes(self):
-        with patch.object(gpt_utils, "_get_ranked_embedding_ids", return_value=["alice"]) as mock_ranked:
-            self.assertEqual(gpt_utils.get_top_users_for_dimension(768), ["alice"])
-            mock_ranked.assert_called_once_with(
-                "user_embeddings",
-                "username",
-                0,
-                top_n=gpt_utils.DEFAULT_FETCH_ITEMS,
-                ascending=False,
-            )
-
-        with patch.object(gpt_utils, "_get_ranked_embedding_ids", return_value=["bob"]) as mock_ranked:
-            self.assertEqual(gpt_utils.get_bottom_users_for_dimension(1535), ["bob"])
-            mock_ranked.assert_called_once_with(
-                "user_embeddings",
-                "username",
-                767,
-                top_n=gpt_utils.DEFAULT_FETCH_ITEMS,
-                ascending=True,
-            )
+        self.assertEqual(gpt_utils.get_user_embedding_index(768),0)
+        self.assertEqual(gpt_utils.get_user_embedding_index(1535),767)
+        with patch.object(gpt_utils,'connect_db') as connect:
+            with self.assertRaises(ValueError): gpt_utils.get_ranked_users_for_dimension(768)
+        connect.assert_not_called()
 
     def test_fetch_dimension_samples_routes_to_correct_scope(self):
         with patch.object(batch_label_embeddings, "get_top_media_for_dimension", return_value=[11]) as top_media:
@@ -124,137 +116,19 @@ class DimensionRoutingTests(unittest.TestCase):
         top_media.assert_called_once_with(0, top_n=batch_label_embeddings.DEFAULT_FETCH_ITEMS)
         bottom_media.assert_called_once_with(0, top_n=batch_label_embeddings.DEFAULT_FETCH_ITEMS)
 
-        with patch.object(label_embeddings, "get_top_users_for_dimension", return_value=["u1"]) as top_users:
-            with patch.object(label_embeddings, "get_bottom_users_for_dimension", return_value=["u2"]) as bottom_users:
-                with patch.object(
-                    label_embeddings,
-                    "get_user_positive_training_examples",
-                    side_effect=["high-user", "low-user"],
-                ) as training_examples:
-                    mode, positive, negative = label_embeddings._fetch_dimension_samples(768, top_n=4)
-
-        self.assertEqual((mode, positive, negative), ("user", "high-user", "low-user"))
-        top_users.assert_called_once_with(768, top_n=4)
-        bottom_users.assert_called_once_with(768, top_n=4)
-        self.assertEqual(
-            [call.args[0] for call in training_examples.call_args_list],
-            [["u1"], ["u2"]],
-        )
+        with patch.object(label_embeddings, 'get_top_users_for_dimension') as users:
+            with self.assertRaises(ValueError): label_embeddings._fetch_dimension_samples(768, top_n=4)
+        users.assert_not_called()
 
     def test_user_dimension_prompt_excludes_non_training_watch_history_noise(self):
-        training_columns = [
-            "username",
-            "watched_at",
-            "rating_key",
-            "title",
-            "year",
-            "media_type",
-            "show_title",
-            "rating",
-            "summary",
-            "duration",
-            "genre_tags",
-            "actor_tags",
-            "director_tags",
-            "played_duration",
-            "training_media_duration",
-            "engagement_ratio",
-            "training_label",
-            "played_minutes",
-            "media_minutes",
-        ]
-        watch_history_columns = [
-            "username",
-            "watched_at",
-            "rating_key",
-            "title",
-            "year",
-            "media_type",
-            "show_title",
-            "rating",
-            "summary",
-            "duration",
-            "genre_tags",
-            "actor_tags",
-            "director_tags",
-        ]
-
-        class FakeCursor:
-            def __init__(self):
-                self.description = []
-                self.rows = []
-                self.executed_sql = []
-
-            def execute(self, sql, params=None):
-                self.executed_sql.append(sql)
-                normalized_sql = " ".join(sql.lower().split())
-                if "from training_data td" in normalized_sql:
-                    self.description = [(column,) for column in training_columns]
-                    self.rows = []
-                    return
-                if "from watch_history" in normalized_sql:
-                    self.description = [(column,) for column in watch_history_columns]
-                    self.rows = [
-                        (
-                            "joshcohen827",
-                            datetime(2026, 6, 30),
-                            13929,
-                            "Whiplash",
-                            2014,
-                            "movie",
-                            "",
-                            "R",
-                            "A young drummer enters a punishing music program.",
-                            6405509,
-                            "Drama, Music",
-                            "Miles Teller",
-                            "Damien Chazelle",
-                        )
-                    ]
-                    return
-                raise AssertionError(f"Unexpected SQL: {sql}")
-
-            def fetchall(self):
-                return self.rows
-
-            def close(self):
-                pass
-
-        class FakeConnection:
-            def __init__(self):
-                self.cursor_obj = FakeCursor()
-
-            def cursor(self):
-                return self.cursor_obj
-
-            def close(self):
-                pass
-
-        fake_conn = FakeConnection()
-        with patch.object(gpt_utils, "connect_db", return_value=fake_conn):
-            with patch.object(label_embeddings, "get_top_users_for_dimension", return_value=["joshcohen827"]):
-                with patch.object(label_embeddings, "get_bottom_users_for_dimension", return_value=[]):
-                    mode, positive_df, negative_df = label_embeddings._fetch_dimension_samples(1385, top_n=1)
-
-        prompt_bundle = gpt_utils.build_dimension_prompt(
-            1385,
-            positive_df,
-            negative_df,
-            dimension_mode=mode,
-            min_valid_items=1,
-        )
-        executed_sql = "\n".join(fake_conn.cursor_obj.executed_sql)
-
-        self.assertEqual(mode, "user")
-        self.assertIn("FROM training_data td", executed_sql)
-        self.assertNotIn("FROM watch_history", executed_sql)
-        self.assertNotIn("Whiplash", prompt_bundle["prompt_text"])
-        self.assertNotIn("13929", prompt_bundle["prompt_text"])
+        with patch.object(gpt_utils,'connect_db') as connect:
+            with self.assertRaises(ValueError): gpt_utils.get_user_positive_training_examples(['fictional'])
+        connect.assert_not_called()
 
     def test_batch_dimension_ranges_match_combined_embedding_layout(self):
-        self.assertEqual(batch_label_embeddings._get_dimension_range("media"), (0, 768))
-        self.assertEqual(batch_label_embeddings._get_dimension_range("user"), (768, 1536))
-        self.assertEqual(batch_label_embeddings._get_dimension_range("all"), (0, 1536))
+        self.assertEqual(batch_label_embeddings._get_dimension_range("media", None), (0, 768))
+        with self.assertRaises(ValueError): batch_label_embeddings._get_dimension_range("user", None)
+        self.assertEqual(batch_label_embeddings._get_dimension_range("all", None), (0, 768))
 
     def test_dimension_boundaries_resolve_to_expected_modes(self):
         self.assertEqual(gpt_utils.get_dimension_mode(0), "media")
@@ -827,7 +701,7 @@ class EligibleSelectionTests(unittest.TestCase):
         batch_label_embeddings.get_eligible_dimension_candidates(cur, limit=25, dim_type="all")
 
         sql, params = cur.executed[0]
-        self.assertEqual(params, (0, 1536, 25))
+        self.assertEqual(params, (0, 768, 25))
         self.assertIn("WITH active_dims AS", sql)
         self.assertIn("FROM shap_impact si", sql)
         self.assertIn("MAX(ABS(si.shap_value)) AS max_abs_impact", sql)
@@ -865,9 +739,9 @@ class EligibleSelectionTests(unittest.TestCase):
 
         diagnostics_sql, diagnostics_params = cur.executed[0]
         _candidate_sql, candidate_params = cur.executed[1]
-        self.assertEqual(diagnostics_params, (0, 1536))
+        self.assertEqual(diagnostics_params, (0, 768))
         self.assertIn("COUNT(*) FILTER (WHERE candidate_reason = 'new_unlabeled_dimension')", diagnostics_sql)
-        self.assertEqual(candidate_params, (0, 1536, 25))
+        self.assertEqual(candidate_params, (0, 768, 25))
 
         self.assertEqual(summary["selection_mode"], "eligible")
         self.assertEqual(summary["eligible_selected_count"], 2)
@@ -1066,56 +940,16 @@ class LabelRepairSaveTests(unittest.TestCase):
         self.assertEqual(insert_params, (122, "movies released 1990-1999", "metadata", False, None, False))
 
     def test_user_dimension_plain_trait_label_is_not_saved(self):
-        cur = self.FakeCursor(existing_row=None)
-        label_result = {
-            "label": "workplace comedy",
-            "label_type": "semantic",
-            "validation_status": "valid",
-        }
-
-        saved, status = batch_label_embeddings.save_label_result(
-            cur,
-            800,
-            label_result,
-            repair_cooldown_days=7,
-        )
-
-        self.assertFalse(saved)
-        self.assertEqual(status, "invalid_label_not_saved")
-        self.assertEqual(len(cur.executed), 1)
+        cur=self.FakeCursor(None)
+        with self.assertRaises(ValueError):
+            batch_label_embeddings.save_label_result(cur,768,dict(label='preference for workplace comedy'),dim_type='user')
+        self.assertEqual(cur.executed,[])
 
     def test_user_dimension_preference_framed_label_is_saved(self):
-        cur = self.FakeCursor(existing_row=None)
-        label_result = {
-            "label": "preference for workplace comedy",
-            "label_type": "semantic",
-            "validation_status": "valid",
-            "label_confidence": "medium",
-            "coverage_high_percent": 100,
-            "coverage_low_overlap_percent": 0,
-        }
-
-        saved, status = batch_label_embeddings.save_label_result(
-            cur,
-            800,
-            label_result,
-            repair_cooldown_days=7,
-        )
-
-        self.assertTrue(saved)
-        self.assertEqual(status, "inserted_missing_label")
-        insert_params = cur.executed[-1][1]
-        self.assertEqual(
-            insert_params,
-            (
-                800,
-                "preference for workplace comedy",
-                "semantic_candidate",
-                True,
-                "preference for workplace comedy",
-                False,
-            ),
-        )
+        cur=self.FakeCursor(None)
+        with self.assertRaises(ValueError):
+            batch_label_embeddings.save_label_result(cur,768,dict(label='preference for workplace comedy'),dim_type='user')
+        self.assertEqual(cur.executed,[])
 
     def test_valid_review_replacement_updates_existing_usable_label_with_history(self):
         existing_row = (
@@ -1479,68 +1313,9 @@ class LabelCoveragePromptTests(unittest.TestCase):
         self.assertEqual(prompt_bundle["maximum_low_overlap_percent"], 35)
 
     def test_user_prompt_requires_preference_framed_labels(self):
-        positive_df = pd.DataFrame(
-            [
-                {
-                    "username": "alice",
-                    "title": "Office One",
-                    "year": 2001,
-                    "media_type": "show",
-                    "genre_tags": "Comedy",
-                    "played_minutes": 52,
-                    "media_minutes": 100,
-                    "engagement_ratio": 0.52,
-                    "training_label": 1,
-                },
-                {
-                    "username": "bob",
-                    "title": "Office Two",
-                    "year": 2002,
-                    "media_type": "show",
-                    "genre_tags": "Comedy",
-                    "played_minutes": 48,
-                    "media_minutes": 80,
-                    "engagement_ratio": 0.60,
-                    "training_label": 1,
-                },
-            ]
-        )
-        negative_df = pd.DataFrame(
-            [
-                {
-                    "username": "cara",
-                    "title": "Hospital Drama",
-                    "year": 2003,
-                    "media_type": "show",
-                    "genre_tags": "Drama",
-                    "played_minutes": 45,
-                    "media_minutes": 75,
-                    "engagement_ratio": 0.60,
-                    "training_label": 1,
-                },
-            ]
-        )
-
-        prompt_bundle = gpt_utils.build_dimension_prompt(
-            768,
-            positive_df,
-            negative_df,
-            min_valid_items=1,
-        )
-        prompt_text = prompt_bundle["prompt_text"]
-
-        self.assertIn("USER preference dimension", prompt_text)
-        self.assertIn("user embedding values", prompt_text)
-        self.assertIn("Do not label this as a direct title trait", prompt_text)
-        self.assertIn("Good USER labels are compact evidence-derived preference phrases", prompt_text)
-        self.assertIn('"preference for workplace comedy"', prompt_text)
-        self.assertIn('Do not return plain title traits like "workplace comedy"', prompt_text)
-        self.assertIn("training_data rows with label=1 and engagement_ratio >= 0.50", prompt_text)
-        self.assertIn("LOW examples are still positive engaged watches from low-dimension users", prompt_text)
-        self.assertIn("played_minutes=52.00", prompt_text)
-        self.assertIn("media_minutes=100.00", prompt_text)
-        self.assertIn("engagement_ratio=0.5200", prompt_text)
-        self.assertIn("training_label=1", prompt_text)
+        with patch.object(gpt_utils,'prepare_dimension_items') as prepare:
+            with self.assertRaises(ValueError): gpt_utils.build_dimension_prompt(768,None,dimension_mode='user')
+        prepare.assert_not_called()
 
     def test_review_prompt_includes_existing_governance_without_forcing_replacement(self):
         positive_df = pd.DataFrame(

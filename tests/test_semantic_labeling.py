@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 from uuid import uuid4
 
 import numpy as np
@@ -131,6 +131,10 @@ def test_high_low_coordinate_mapping_and_disjoint_populations(dimension,side,ind
     ids=[f'fictional-{i}' for i in range(31)]
     matrix=np.zeros((31,768),dtype='<f4');matrix[:,index]=np.arange(31)
     evidence.vectors={side:(ids,matrix)}
+    evidence.groups={}
+    if side=='user':
+        with pytest.raises(ValueError): evidence.ranked(side,index,10)
+        return
     high=evidence.ranked(side,index,10);low=evidence.ranked(side,index,10,True)
     assert high==ids[::-1][:10] and low==ids[:10]
     assert not set(high)&set(low)
@@ -150,27 +154,13 @@ def test_forecast_uses_full_prompts_and_separate_media_user_counts():
     assert calibrated['media']['expected']['output_tokens']==25
 
 
-def test_cached_user_preprocessing_preserves_exact_original_prompts_and_gates():
+def test_user_evidence_rejected_before_preprocessing():
     evidence=Evidence.__new__(Evidence)
-    usernames=['fictional-'+str(i) for i in range(10)]
-    rows=[]
-    for user in usernames:
-        for i in range(20):
-            rows.append(dict(username=user,rating_key=i,title='Fictional story '+str(i),media_type='movie',year=2000+i,
-                summary='A fictional workplace conflict.',duration=6_000_000,engagement_ratio=1-i/100,training_label=1))
-    evidence.user=gpt._ensure_metadata_columns(pd.DataFrame(rows))
-    evidence.aliases={u:'Viewer '+str(i) for i,u in enumerate(usernames)}
-    evidence.fetch_count=4;evidence.prompt_cache={}
-    matrix=np.repeat(np.arange(10,dtype='<f4')[:,None],768,axis=1)
-    evidence.vectors={'user':(usernames,matrix)}
-    evidence.prepare_user_cache()
-    side,high,low=evidence.samples(768,4)
-    original=gpt.build_dimension_prompt(768,high,low,dimension_mode=side)
-    optimized=evidence.prompt(768)
-    for key in ('prompt_text','summary','valid_positive_count','valid_negative_count','flagged_item_count','skipped_reason'):
-        assert optimized[key]==original[key],key
-    pd.testing.assert_frame_equal(optimized['positive_items'],original['positive_items'])
-    pd.testing.assert_frame_equal(optimized['negative_items'],original['negative_items'])
+    evidence.context=context_fixture()[2]
+    with patch.object(gpt,'prepare_dimension_items') as prepare:
+        with pytest.raises(ValueError): evidence.prompt(768)
+        with pytest.raises(ValueError): evidence.samples(1535,10)
+    prepare.assert_not_called()
 
 
 def test_pricing_cache_discount_and_missing_metering_are_explicit():
@@ -205,11 +195,11 @@ def test_pricing_follows_configured_model_and_unknown_prices_are_not_guessed():
 def test_resume_skip_and_explicit_regeneration():
     args=parser().parse_args(['--limit','25','--dim_type','all'])
     rows=[dict(dimension=i,side='media' if i<768 else 'user',completed=i==0,abstained=i==1) for i in (0,1,2,768)]
-    assert [r['dimension'] for r in choose(rows,args)]==[2,768]
+    assert [r['dimension'] for r in choose(rows,args)]==[2]
     args=parser().parse_args(['--regenerate','--dimensions','0','1'])
     assert [r['dimension'] for r in choose(rows,args)]==[0,1]
     args=parser().parse_args(['--dim_type','user','--all'])
-    assert [r['dimension'] for r in choose(rows,args)]==[768]
+    with pytest.raises(ValueError):choose(rows,args)
     args=parser().parse_args(['--dimension','1536'])
     with pytest.raises(ValueError):choose(rows,args)
 
@@ -422,7 +412,8 @@ def test_dry_run_reads_forecasts_without_cloud_or_label_writes(monkeypatch):
     from contextlib import nullcontext
     import api.services.dimension_label_batch as batch
     _,_,context=context_fixture()
-    conn=Mock();evidence=Mock(context=context)
+    conn=Mock();conn.cursor=MagicMock();evidence=Mock(context=context)
+    monkeypatch.setattr(batch,'get_active_config',lambda cur:context_fixture()[0])
     row=dict(dimension=0,side='media',completed=False,abstained=False,prompt=dict(prompt_text='fictional full prompt'))
     monkeypatch.setattr(batch,'connect_db',lambda:conn)
     monkeypatch.setattr(batch,'batch_lock',lambda:nullcontext())
@@ -442,7 +433,9 @@ def test_review_invocation_uses_setup_model_and_matching_price_in_forecast(monke
     from contextlib import nullcontext
     import api.services.dimension_label_batch as batch
     _,_,context=context_fixture()
-    conn=Mock();row=dict(dimension=0,side='media',completed=True,abstained=False,prompt=dict(prompt_text='fictional full prompt'))
+    conn=Mock();conn.cursor=MagicMock()
+    monkeypatch.setattr(batch,'get_active_config',lambda cur:context_fixture()[0])
+    row=dict(dimension=0,side='media',completed=True,abstained=False,prompt=dict(prompt_text='fictional full prompt'))
     monkeypatch.setattr(batch,'connect_db',lambda:conn)
     monkeypatch.setattr(batch,'batch_lock',lambda:nullcontext())
     monkeypatch.setattr(batch,'Evidence',lambda *a:Mock(context=context))

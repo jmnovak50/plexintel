@@ -12,6 +12,7 @@ from psycopg2.extras import Json, RealDictCursor
 
 from api.db.connection import connect_db
 from api.services.dimension_governance import dimension_review_guard, record_assessment
+from api.services.dimension_config import get_active_config, semantic_media_range, require_semantic_media, feature_groups
 from api.services.dimension_labeling import Evidence, current_context, compatible_label_sql
 from api.services.labeling_costs import (Pricing, UsageLedger, BudgetExceeded, LabelingError, failure_diagnostic,
                                        failure_signature, forecast, usage_report, pricing_for_model)
@@ -70,6 +71,7 @@ def batch_lock():
 
 def candidates(conn, evidence, *, output=None, args=None, attempt_counts=None, exclude_dimensions=()):
     ctx = evidence.context
+    start, end = semantic_media_range(ctx)
     with conn.cursor() as cur:
         cur.execute('''SELECT s.dimension,SUM(ABS(s.shap_value)) AS priority
             FROM shap_impact s JOIN shap_prediction_context context
@@ -77,9 +79,9 @@ def candidates(conn, evidence, *, output=None, args=None, attempt_counts=None, e
             JOIN recommendations r ON r.username=context.username AND r.rating_key=context.rating_key
                 AND r.scored_at=context.scored_at
             WHERE context.config_id=%s AND context.model_version=%s
-                AND s.dimension BETWEEN 0 AND 1535 AND s.shap_value::text NOT IN ('NaN','Infinity','-Infinity')
+                AND s.dimension >= %s AND s.dimension < %s AND s.shap_value::text NOT IN ('NaN','Infinity','-Infinity')
             GROUP BY s.dimension
-            ORDER BY priority DESC,s.dimension''',(ctx['config_id'],ctx['model_sha256']))
+            ORDER BY priority DESC,s.dimension''',(ctx['config_id'],ctx['model_sha256'],start,end))
         ranked = [r[0] for r in cur.fetchall()]
         cur.execute('''SELECT dimension FROM embedding_dimension_admin WHERE config_id=%s AND paused''',(ctx['config_id'],))
         paused = {r[0] for r in cur.fetchall()}
@@ -94,10 +96,10 @@ def candidates(conn, evidence, *, output=None, args=None, attempt_counts=None, e
             WHERE config_id=%s AND outcome='abstained' AND result->'provenance'->>'feature_space_id'=%s
             ORDER BY dimension,assessment_id DESC''',(ctx['config_id'],ctx['feature_space_id']))
         abstained = dict(cur.fetchall())
-    eligible,ineligible = [],dict(paused=len(paused),insufficient_contrast=0)
-    rows=[dict(dimension=dimension,side='media' if dimension<768 else 'user',
+    eligible,ineligible = [],dict(paused=sum(start <= d < end for d in paused),insufficient_contrast=0,labeling_scope='media_only')
+    rows=[dict(dimension=dimension,side='media',
         completed=dimension in completed,review_due=dimension in review_due,abstained=False)
-        for dimension in ranked if dimension not in paused and dimension not in exclude_dimensions]
+        for dimension in ranked if start <= dimension < end and dimension not in paused and dimension not in exclude_dimensions]
     # Explicit forecasts retain full coverage. Real batches only construct the
     # exact same prompts until enough admissible dimensions have been found.
     bounded=args is not None and args.dimension is None and not args.dimensions
@@ -129,9 +131,11 @@ def candidates(conn, evidence, *, output=None, args=None, attempt_counts=None, e
 
 
 def choose(eligible, args):
+    if args.dim_type == 'user':
+        raise ValueError('User/watch dimensions are historical only; new semantic evaluation is media-only')
     dimensions = args.dimensions or ([args.dimension] if args.dimension is not None else [])
     def scope(row):
-        return args.dim_type=='all' or row['side']==args.dim_type
+        return row['side']=='media'
     if dimensions:
         lookup = {r['dimension']:r for r in eligible}
         invalid = [d for d in dimensions if d not in lookup or not scope(lookup[d])]
@@ -153,12 +157,14 @@ def workload_forecast(eligible, selected, pricing, args, observations):
     import gpt_utils as gpt
     args.max_output_tokens=gpt.label_output_limit(args.max_output_tokens)
     unfinished=lambda r:r.get('review_due') or (not r['completed'] and not r['abstained'])
-    remaining = [r for r in eligible if unfinished(r)]
+    if any(r['side'] != 'media' for r in selected):
+        raise ValueError('Only media dimensions can be forecast for future labeling')
+    remaining = [r for r in eligible if r['side']=='media' and unfinished(r)]
     common = dict(system=gpt.SYSTEM_PROMPT,output_limit=args.max_output_tokens,attempts=args.max_attempts,observations=observations)
     counts = {}
     for side in ('media','user'):
-        rows = [r for r in eligible if r['side']==side]
-        counts[side] = dict(inventory=768,eligible=len(rows),already_labeled=sum(r['completed'] and not r.get('review_due',False) for r in rows),
+        rows = [r for r in eligible if r['side']==side] if side=='media' else []
+        counts[side] = dict(inventory=getattr(args,'labeling_inventory',{}).get(side),labeling_scope='eligible' if side=='media' else 'historical_only',eligible=len(rows) if side=='media' else 0,already_labeled=sum(r['completed'] and not r.get('review_due',False) for r in rows),
             review_due=sum(bool(r.get('review_due')) for r in rows),
             completed_abstentions=sum(r['abstained'] and not r['completed'] for r in rows),
             remaining=sum(bool(unfinished(r)) for r in rows))
@@ -173,6 +179,8 @@ def workload_forecast(eligible, selected, pricing, args, observations):
 def persist_result(conn, context, row, result, model, *, regenerate=False, source='manual-batch'):
     import batch_label_embeddings as original
     dimension = row['dimension']
+    require_semantic_media(context, dimension)
+    if row['side'] != 'media': raise ValueError('Only media labeling can be saved')
     with conn.cursor() as cur:
         if current_context(conn)!=context:
             raise ValueError('Production provenance changed during labeling; candidate not saved')
@@ -201,6 +209,9 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, ou
     import gpt_utils as gpt
     notify=output or emit
     ctx = evidence.context
+    for row in selected:
+        require_semantic_media(ctx, row['dimension'])
+        if row['side'] != 'media': raise ValueError('Only media labeling can be executed')
     manual=not bool(getattr(args,'automation',None))
     if manual:
         from api.services.pipeline_labeling import limits,SCOPE,check_allowance
@@ -250,6 +261,8 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, ou
                     notify(dict(forecast_refined_after_measurements=workload_forecast(eligible,selected[position-1:],pricing,args,observations)))
                     refined = True
                 def before(attempt):
+                    require_semantic_media(ctx, dimension)
+                    if row['side'] != 'media': raise ValueError('Only media labeling can be submitted')
                     if current_context(conn)!=ctx:
                         raise ValueError('Production identity changed; no further cloud requests')
                     started.append(ledger.start(dimension,row['side'],attempt,row['prompt']['prompt_text'],gpt.SYSTEM_PROMPT,
@@ -440,6 +453,14 @@ def main(argv=None):
                 attempts=_attempt_counts(conn,current_context(conn))
                 conn.rollback()
             conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
+            with conn.cursor() as cur:
+                config = get_active_config(cur)
+            if args.dim_type == 'user': p.error('User/watch dimensions are historical only; new semantic evaluation is media-only')
+            for dimension in args.dimensions or ([args.dimension] if args.dimension is not None else []):
+                try: require_semantic_media(config, dimension)
+                except ValueError as exc: p.error(str(exc))
+            args.labeling_inventory = dict(media=semantic_media_range(config)[1]-semantic_media_range(config)[0],
+                                           user=sum(g['width'] for g in feature_groups(config) if g['name']=='user'))
             evidence = Evidence(conn,args.top_n)
             eligible,ineligible = candidates(conn,evidence,
                 args=args if args.label and not args.dry_run else None,attempt_counts=attempts)

@@ -8,6 +8,7 @@ from api.services.pipeline_service import (
     REPO_ROOT, _python_executable, build_pipeline_environment, try_acquire_pipeline_lock, _append_pipeline_log,
 )
 from api.services.dimension_governance import LOCK_NAMESPACE
+from api.services.dimension_config import get_active_config, semantic_media_range
 
 _task = None
 
@@ -16,11 +17,13 @@ def dispatch_review():
     # Do not contend for (or log acquisition of) the pipeline lock when there is no work.
     with contextlib.closing(connect_db()) as conn, conn:
         with conn.cursor() as cur:
+            config = get_active_config(cur)
+            start, end = semantic_media_range(config)
             cur.execute("""SELECT 1 FROM embedding_dimension_reviews q
                 JOIN embedding_feature_config c USING(config_id)
                 LEFT JOIN embedding_dimension_admin a USING(config_id,dimension)
-                WHERE c.active AND (q.status='running' OR
-                    (q.status='queued' AND NOT COALESCE(a.paused,false))) LIMIT 1""")
+                WHERE c.active AND q.dimension >= %s AND q.dimension < %s AND (q.status='running' OR
+                    (q.status='queued' AND NOT COALESCE(a.paused,false))) LIMIT 1""", (start,end))
             if not cur.fetchone():
                 return
     lock = try_acquire_pipeline_lock(source='dimension-review')
@@ -29,8 +32,10 @@ def dispatch_review():
     try:
         with contextlib.closing(connect_db(cursor_factory=RealDictCursor)) as conn, conn:
             with conn.cursor() as cur:
+                config = get_active_config(cur)
+                start, end = semantic_media_range(config)
                 # A worker restart is not proof that a label assessment failed.
-                cur.execute("SELECT * FROM embedding_dimension_reviews WHERE status='running' ORDER BY review_id")
+                cur.execute("SELECT * FROM embedding_dimension_reviews WHERE status='running' AND config_id=%s AND dimension >= %s AND dimension < %s ORDER BY review_id", (config['config_id'],start,end))
                 for stale in cur.fetchall():
                     cur.execute('SELECT pg_try_advisory_lock(%s,%s) AS acquired', (LOCK_NAMESPACE, stale['dimension']))
                     if not cur.fetchone()['acquired']:
@@ -42,8 +47,8 @@ def dispatch_review():
                 cur.execute('''SELECT q.* FROM embedding_dimension_reviews q
                     JOIN embedding_feature_config c USING(config_id)
                     LEFT JOIN embedding_dimension_admin a USING(config_id,dimension)
-                    WHERE q.status='queued' AND c.active AND NOT COALESCE(a.paused,false)
-                    ORDER BY q.review_id LIMIT 1 FOR UPDATE OF q SKIP LOCKED''')
+                    WHERE q.status='queued' AND c.active AND q.dimension >= %s AND q.dimension < %s AND NOT COALESCE(a.paused,false)
+                    ORDER BY q.review_id LIMIT 1 FOR UPDATE OF q SKIP LOCKED''', (start,end))
                 job = cur.fetchone()
                 if not job:
                     return
@@ -56,7 +61,7 @@ def dispatch_review():
             environment['PLEXINTEL_LABELING_LOCK_FD'] = str(lock.handle.fileno())
             process = subprocess.run([
                 _python_executable(), str(REPO_ROOT / 'batch_label_embeddings.py'),
-                '--dimension', str(job['dimension']), '--dim_type', 'all',
+                '--dimension', str(job['dimension']), '--dim_type', 'media',
                 '--selection_mode', 'review', '--label', '--save_label',
             ], cwd=REPO_ROOT, env=environment, capture_output=True, text=True, pass_fds=(lock.handle.fileno(),))
             _append_pipeline_log(f"[dimension-review:{job['review_id']}]\n{getattr(process,'stdout','')}\n{getattr(process,'stderr','')}\n")
