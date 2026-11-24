@@ -59,10 +59,12 @@ export function RecommendationExplanation({ titleTraits, connection, compact = f
         compact={compact}
       />
       {tasteMatch && (
-        <section className="min-w-0">
-          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Taste Match</p>
-          <p className={`rounded-lg border border-emerald-100 bg-emerald-50/80 px-3 py-2 leading-relaxed text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200 whitespace-normal break-words ${compact ? 'text-xs' : 'text-sm'}`}>{tasteMatch}</p>
-        </section>
+        <RecommendationChipGroup
+          label="Taste Match"
+          chips={[tasteMatch]}
+          chipClassName="border-emerald-100 bg-emerald-50/80 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200"
+          compact={compact}
+        />
       )}
     </div>
   );
