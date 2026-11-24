@@ -25,15 +25,20 @@ def _observe(output,value):
     except Exception:pass
 
 
-def limits(conn=None, *, observe=None):
-    """Resolve one strict policy snapshot, locked through reservation if supplied."""
+def limits(conn=None, *, observe=None, automatic=True):
+    """Shared cloud/spending policy; only unattended work needs enablement.
+
+    Explicit CLI batches and queued administrator reviews use automatic=False
+    at preflight, execution and every durable request reservation.
+    """
+    keys=POLICY_KEYS if automatic else tuple(key for key in POLICY_KEYS if key!='pipeline.labeling_enabled')
     try:
-        resolved=resolve_settings(keys=POLICY_KEYS,require_database=True,conn=conn,lock=conn is not None)
+        resolved=resolve_settings(keys=keys,require_database=True,conn=conn,lock=conn is not None)
     except (SettingsUnavailableError,SettingsValidationError):
-        raise BudgetExceeded('Authoritative automatic labeling policy unavailable') from None
-    policy={key:resolved[key].value for key in POLICY_KEYS}
+        raise BudgetExceeded('Authoritative automatic labeling policy unavailable' if automatic else 'Authoritative labeling policy unavailable') from None
+    policy={key:resolved[key].value for key in keys}
     _observe(observe,dict(event='labeling_policy',policy=policy))
-    if policy['pipeline.labeling_enabled'] is not True:raise BudgetExceeded('Automatic labeling disabled')
+    if automatic and policy['pipeline.labeling_enabled'] is not True:raise BudgetExceeded('Automatic labeling disabled')
     if policy['pipeline.labeling_cloud_authorized'] is not True:raise BudgetExceeded('Standing cloud authorization absent')
     cost=float(policy['pipeline.labeling_budget_usd'])
     if not math.isfinite(cost) or cost<=0:raise BudgetExceeded('Positive cumulative budget required')

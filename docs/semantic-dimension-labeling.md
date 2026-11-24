@@ -64,6 +64,40 @@ Automatic labeling remains disabled. Configured provider/model, financial policy
 predictive behavior, all historical records and existing operational settings are
 preserved. This release contains no schema migration.
 
+## Manual execution and automatic enablement (November 24, 2026)
+
+`pipeline.labeling_enabled` controls only the automatic post-publication stage.
+An explicit CLI batch, single-dimension CLI operation or authorized Dimension
+Explorer media review does not require this switch. Manual preflight, batch
+execution and every request reservation instead resolve the same standing cloud
+authorization and cumulative financial ceiling without reading the automatic
+switch. Automatic preflight and each automatic request continue to require it.
+
+All paths retain the same accounting scope/ledger, pending-cost reservations,
+optional batch budget, per-prompt attempt limits, provider retry handling and
+shared pipeline/dimension locks. Cloud authorization and financial reductions
+are reread under the existing settings lock before each provider attempt. No
+cloud consent, settings values, historical accounting or label records are reset.
+Media-only eligibility, paused dimensions and compatibility checks still apply.
+The administrative worker keeps its existing review authorization, queue, command
+and inherited-lock handling; it reaches this same corrected CLI path. Dry-run
+forecasts, CSV exports and usage reads do not gain execution-policy requirements.
+
+From the project directory, the reported command can now run while automatic
+labeling is disabled, subject to the shared authorization/financial/retry checks:
+
+```bash
+plexenv/bin/python batch_label_embeddings.py \
+  --label --dim-type media --regenerate \
+  --dimensions 136 219 239 375 555 678
+```
+
+As before, `--regenerate` selects existing labels for reassessment; add
+`--save-label` to persist replacement labels. Without it, candidates and
+assessments are recorded without replacing saved label wording. This correction
+was validated using synthetic/mocked requests and private temporary-table SQL
+fixtures, not a real cloud-labeling batch. Automatic labeling remains disabled.
+
 ## Optional automatic daily stage
 
 The daily CLI calls `pipeline_labeling.run_after_publication()` only after the
@@ -98,7 +132,7 @@ run's labeling record. Core and complete worker durations are reported separatel
 
 These settings appear through the existing generic Pipeline settings UI. Standing
 authorization and the financial ceiling use `PIPELINE_LABELING_CLOUD_AUTHORIZED`
-and `PIPELINE_LABELING_BUDGET_USD`. Enablement, authorization and a positive finite
+and `PIPELINE_LABELING_BUDGET_USD`. For automatic work, enablement, authorization and a positive finite
 financial allowance must all hold before requests. The three controls resolve in one strict database
 read; environment defaults apply only after a successful read establishes that
 no stored override exists. An unavailable database or malformed policy blocks

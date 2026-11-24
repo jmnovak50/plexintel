@@ -2,6 +2,7 @@
 import argparse
 from contextlib import closing, contextmanager
 from dataclasses import asdict
+from functools import partial
 import hashlib
 import json
 import math
@@ -216,12 +217,12 @@ def execute(conn, evidence, eligible, selected, pricing, args, prediction, *, ou
     if manual:
         from api.services.pipeline_labeling import limits,SCOPE,check_allowance
         from api.services.labeling_costs import cumulative_usage
-        caps=limits(conn)
+        caps=limits(conn,automatic=False)
         check_allowance(conn,caps)
         args.budget_usd=min(args.budget_usd,caps['budget_usd']) if args.budget_usd is not None else caps['budget_usd']
         prompts={str(r['dimension']):prompt_hash(r['prompt']) for r in selected}
         args.automation=dict(scope=SCOPE,feature_space_id=ctx['feature_space_id'],
-            prompts=prompts,max_attempts=args.max_attempts,limits=limits)
+            prompts=prompts,max_attempts=args.max_attempts,limits=partial(limits,automatic=False))
         prediction=dict(prediction,automation_scope=SCOPE,automation_prompts=prompts)
         sink=notify
         def notify(value):
@@ -446,7 +447,7 @@ def main(argv=None):
             attempts=None
             if args.label and not args.dry_run:
                 from api.services.pipeline_labeling import limits,check_allowance,_attempt_counts
-                caps=limits()
+                caps=limits(automatic=False)
                 check_allowance(conn,caps)
                 if args.budget_usd is not None and args.budget_usd<=0:
                     raise BudgetExceeded('Positive batch financial allowance required')
