@@ -1,5 +1,7 @@
 📺 PlexIntel Recommendation System
 
+Contributor and agent working conventions are documented in [AGENTS.md](AGENTS.md).
+
 PlexIntel is a personalized media recommendation system built for Plex users. It uses watch history, content metadata, and vector embeddings to generate personalized recommendations powered by machine learning.
 
 🔧 Tech Stack
