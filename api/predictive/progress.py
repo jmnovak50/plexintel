@@ -134,6 +134,9 @@ class Reporter:
             self.elapsed[key] = self.elapsed.get(key, 0.) + self.clock() - start
             self.running.pop(key, None)
             message = type(exc).__name__ + (': '+str(exc)[:200] if isinstance(exc, ContractError) else '')
+            if getattr(exc,'pgcode',None)=='53200':
+                from .failures import failure_message
+                message=type(exc).__name__+': '+failure_message(exc)
             self.emit(key, 'failed', message=message)
             raise
         finally:

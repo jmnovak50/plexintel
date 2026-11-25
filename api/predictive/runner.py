@@ -94,7 +94,8 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         with reporter.span('train_model'):
             bundle,vocabulary,evaluation=train(inputs,media,watches,rows,summary,incumbent_ap=incumbent_ap,
                 progress=lambda **metrics:reporter.progress('train_model',**metrics),
-                warning=lambda value:reporter.log('train_model','quality_warning',**value))
+                warning=lambda value:reporter.log('train_model','quality_warning',**value),
+                evaluated=lambda value:reporter.log('train_model','evaluation',evaluation=value))
         reporter.done('train_model',chronological_balanced_accuracy=evaluation['chronological']['balanced_accuracy'],
             chronological_average_precision=evaluation['chronological']['average_precision'],
             show_balanced_accuracy=evaluation['show_heldout']['balanced_accuracy'],quality_passed=all(evaluation['gates'].values()),
@@ -107,14 +108,14 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                       workload_id=fingerprint([model_hash,source_hash]),source_hash=source_hash,
                       completed_at=snapshot['as_of'],dataset_summary=summary)
         reporter.bind(config['workload_id'])
-        install_staging(conn);stage_vectors(conn,media,watches,users);stage_training(conn,rows)
         with reporter.span('score_model'):
+            install_staging(conn);stage_vectors(conn,media,watches,users);stage_training(conn,rows)
             count=stage_predictions(conn,score(inputs,media,watches,users,bundle,vocabulary,policy=policy,
                 progress=lambda **metrics:reporter.progress('score_model',**metrics),
                 log=lambda operation,**fields:reporter.log('score_model',operation,**fields)),config,snapshot['as_of'])
         from .diagnostics import ranking_comparison
         ranking=ranking_comparison(conn);conn.commit()
-        reporter.done('score_model',predictions=count,message='Duration includes SHAP generation and staged prediction persistence.')
+        reporter.done('score_model',predictions=count,message='Duration includes temporary materialization, SHAP generation and staged prediction persistence.')
         reporter.done('shap',timing_known=False,message='Measured within scoring; raw-margin embedding contributions retained')
         if source_sha256()!=code_sha:raise ContractError('Predictor source changed during execution; no publication')
         with reporter.span('publication'):

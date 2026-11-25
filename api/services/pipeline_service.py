@@ -1234,8 +1234,11 @@ def run_pipeline(
 
             if proc_result.returncode != 0:
                 note = f"Stage {stage_key} exited with code {proc_result.returncode}"
-                note += ('; transient failure, automatic retry subject to limits/backoff'
-                         if proc_result.returncode==75 else '; automatic retry blocked: operator review required')
+                if proc_result.returncode==75:
+                    note += ('; retryable worker failure; scheduled retry subject to existing limits/backoff'
+                             if delivery_type=='scheduled' and schedule_key is not None
+                             else '; retryable worker failure; manual execution has no automatic retry queued')
+                else:note += '; automatic retry blocked: operator review required'
                 with _pipeline_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(

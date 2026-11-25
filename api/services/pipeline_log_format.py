@@ -35,6 +35,7 @@ def item_line(value):
     op=value.get('operation');user=value.get('user','Unknown user')
     if op=='labeling':return labeling_line(value.get('data') or {})
     if op=='quality_warning':return '⚠️ '+str(value['message'])
+    if op=='evaluation':return completion_summary('train_model',dict(evaluation=value['evaluation']))
     if op=='embedding':return '   🎬 Embedding '+title(value)
     if op=='embedded':return '✅ Embedded '+title(value)
     if op=='reused':return '   🎬 '+title(value)+' — cached embedding reused'

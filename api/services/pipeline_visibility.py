@@ -57,7 +57,9 @@ def supplement(details, report):
     for row in details:
         row['metrics'] = dict(clean_metrics(metrics.get(row['stage_key'], {})), **row.get('metrics', {}))
         if row['stage_key'] == 'score_model' and report.get('verified'):
-            row['message'] = 'Duration includes SHAP generation and staged prediction persistence.'
+            row['message'] = ('Duration includes temporary materialization, SHAP generation and staged prediction persistence.'
+                if evaluation.get('statistical_checks_blocking') is False
+                else 'Duration includes SHAP generation and staged prediction persistence.')
         if row['stage_key'] == 'semantic_labels' and row['status'] in ('not_recorded','pending'):
             labeling = report.get('semantic_labeling') or {}
             if not isinstance(labeling,dict):

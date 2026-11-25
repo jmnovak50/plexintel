@@ -147,6 +147,7 @@ def _completion_diagnostics(value, keys):
 
 def _parse_stream(text, owner, stream, keys, emit, item_stages=None, view="operator"):
     active = None
+    evaluation_logged = False
     scrub = _redactor()
     for raw in text.splitlines(keepends=True):
         line = scrub(raw.rstrip('\r\n'))
@@ -161,7 +162,7 @@ def _parse_stream(text, owner, stream, keys, emit, item_stages=None, view="opera
                 and all(isinstance(value.get(field), dict) for field in ('counts', 'evaluation', 'summary'))):
             sections, remainder = _completion_diagnostics(value, keys)
             for stage, fields in sections.items():
-                summary=completion_summary(stage,fields) if view=='operator' else ''
+                summary=completion_summary(stage,fields) if view=='operator' and not (stage=='train_model' and evaluation_logged) else ''
                 if summary:emit(stage,stream,scrub(summary))
                 emit(stage, stream, scrub('\n'.join([
                     '\nRecorded completion diagnostics (from this execution’s retained stdout receipt):',
@@ -169,6 +170,9 @@ def _parse_stream(text, owner, stream, keys, emit, item_stages=None, view="opera
             if remainder:emit(owner, stream, scrub(readable_line('', remainder)))
             continue
         key = owner
+        if (isinstance(value,dict) and value.get('event')==ITEM_EVENT
+                and value.get('stage_key')=='train_model' and value.get('operation')=='evaluation'):
+            evaluation_logged=True
         if owner in WORKERS:
             original_key = (value.get('stage_key') or value.get('stage')) if isinstance(value, dict) else None
             if original_key is None and labeling_record(value):original_key='semantic_labels'

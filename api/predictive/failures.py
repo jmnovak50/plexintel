@@ -35,4 +35,9 @@ def classify_failure(exc):
 
 def failure_message(exc):
     if isinstance(exc,ContractError):return str(exc).splitlines()[0][:240]
+    diagnostic=getattr(exc,'diag',None)
+    if (getattr(exc,'pgcode',None)=='53200' and diagnostic is not None
+            and (getattr(diagnostic,'message_primary','') or '').lower()=='out of shared memory'
+            and 'max_locks_per_transaction' in (getattr(diagnostic,'message_hint','') or '')):
+        return 'PostgreSQL shared lock-table capacity exhausted (53200; max_locks_per_transaction).'
     return 'Pipeline stopped ('+type(exc).__name__+'); inspect private diagnostics'

@@ -16,6 +16,11 @@ training stage before the final all-data fit. They do not prevent the final fit,
 scoring or atomic publication. Training still performs only the two existing
 validation fits and one final all-data fit.
 
+The full evaluation is recorded in its training-stage stdout event immediately
+after validation, so final-fit or staging errors cannot discard the measurements.
+The completion receipt retains the same data without repeating the operator
+classification summary.
+
 For compatibility, `evaluation.gates` retains the original comparison booleans.
 New evaluations explicitly record `statistical_checks_blocking: false` and a
 `statistical_warnings` list. These are recorded outcomes, not configuration
@@ -37,3 +42,16 @@ change feedback weights, training eligibility, engagement thresholds, embeddings
 XGBoost features or hyperparameters, SHAP, semantic labeling, database schemas or
 scheduling. Automatic semantic labeling remains disabled for the authorized
 production validation run.
+
+Temporary vector/training materialization is part of the scoring span, so a
+staging error is visible as an execution failure before any scoring/publication
+claim. PostgreSQL shared lock-table exhaustion is reported explicitly without
+exposing SQL or source payloads. Exit 75 is a retryable classification, not proof
+that a capacity problem will clear by itself. Manual executions have no automatic
+retry queued; scheduled executions retain their existing limits and backoff.
+No retry rules or database limits are changed by this reporting correction.
+
+New embeddings remain in memory and temporary tables until atomic publication.
+After a pre-publication failure, a normal execution can reuse compatible published
+vectors, but it must request unpublished vectors again. This does not imply
+checkpoint recovery or a separate persistent embedding cache.

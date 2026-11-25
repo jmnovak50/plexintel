@@ -6,7 +6,7 @@ from .recovery import CanonicalTitles,IDENTITY_POLICY
 from .model import fit,fit_compare
 
 
-def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda **metrics:None,warning=lambda value:None):
+def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda **metrics:None,warning=lambda value:None,evaluated=lambda value:None):
     thresholds=engagement_thresholds(**inputs.get('label_thresholds',{}))
     if any(engagement_thresholds(**r.get('label_thresholds',{}))!=thresholds for r in rows):
         raise ContractError('Training rows and configured engagement thresholds differ')
@@ -49,6 +49,7 @@ def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda 
         threshold=.5,final_model_evaluation='No independent held-out score: final classifier is fitted on all eligible rows.',
         limitation='Repeated release validation, selected labeled candidates, current descriptive metadata; not an untouched prospective test.')
     for value in warnings:warning(value)
+    evaluated(evaluation)  # Retain measurements even if final fit/staging fails.
     vocabulary=Vocabulary.fit(rows,include_poster=False)
     classifier=fit(rows,vocabulary,progress=lambda metrics:progress(**metrics))
     bundle=dict(label_thresholds=thresholds,feature_space_id=inputs['feature_space_id'],contract_hash=inputs['contract_hash'],

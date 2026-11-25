@@ -44,7 +44,8 @@ def test_thresholds_are_retained_as_warnings_and_final_fit_always_proceeds(train
     with reporter.span('train_model'):
         bundle,_,evaluation=module.train(dict(feature_space_id='same-space',contract_hash='same-contract',snapshot={'events':[]}),
             {},{},rows,dict(dataset_hash='same-data'),incumbent_ap=.9,
-            warning=lambda value:reporter.log('train_model','quality_warning',**value))
+            warning=lambda value:reporter.log('train_model','quality_warning',**value),
+            evaluated=lambda value:reporter.log('train_model','evaluation',evaluation=value))
     reporter.done('train_model',quality_passed=all(evaluation['gates'].values()),quality_warning_count=len(evaluation['statistical_warnings']))
     final.assert_called_once();assert final.call_args.args[0] is rows
     assert bundle['model'] is final.return_value and bundle['feature_space_id']=='same-space'
@@ -70,11 +71,12 @@ def test_true_training_failure_is_still_a_failure_after_statistical_warnings(tra
     module,rows,final=trainer
     monkeypatch.setattr(module,'fit_compare',Mock(side_effect=[dict(balanced_accuracy=.4,average_precision=.1),dict(balanced_accuracy=.3)]))
     final.side_effect=RuntimeError('genuine final classifier fit failure')
-    output=[];reporter=Reporter(output.append)
+    output=[];reporter=Reporter(output.append);recorded=[]
     with pytest.raises(RuntimeError,match='genuine final classifier'):
         with reporter.span('train_model'):
             module.train(dict(snapshot={'events':[]}),{},{},rows,{},incumbent_ap=.9,
-                warning=lambda value:reporter.log('train_model','quality_warning',**value))
+                warning=lambda value:reporter.log('train_model','quality_warning',**value),evaluated=recorded.append)
+    assert len(recorded)==1 and len(recorded[0]['statistical_warnings'])==3
     assert len([e for e in output if e.get('operation')=='quality_warning'])==3
     assert output[-1]['status']=='failed'
 
@@ -104,7 +106,7 @@ def test_historical_evaluations_keep_their_original_gate_meaning_and_warning_ava
 from tests.test_predictive_publication import db
 
 
-@pytest.mark.parametrize('technical_failure',[False,True])
+@pytest.mark.parametrize('technical_failure',[False,'fit','staging'])
 def test_real_publication_allows_statistical_warnings_but_not_fit_failures(db,tmp_path,monkeypatch,technical_failure):
     import json
     from tests.test_predictive_publication import populate,digest
@@ -123,16 +125,22 @@ def test_real_publication_allows_statistical_warnings_but_not_fit_failures(db,tm
         result=real_compare(*args,**kwargs)
         return dict(result,balanced_accuracy=.4,average_precision=.01)
     monkeypatch.setattr(module,'fit_compare',unfavorable)
-    if technical_failure:
-        monkeypatch.setattr(module,'fit',Mock(side_effect=RuntimeError('genuine final fit failure')))
+    if technical_failure=='fit':
+        monkeypatch.setattr(module,'fit',Mock(side_effect=RuntimeError('genuine technical failure')))
+    elif technical_failure=='staging':
+        import api.predictive.runner as runner
+        monkeypatch.setattr(runner,'stage_vectors',Mock(side_effect=RuntimeError('genuine technical failure')))
     events=[]
     kwargs=dict(frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,
         collect=False,label=False,output=events.append)
     if technical_failure:
-        with pytest.raises(RuntimeError,match='genuine final fit failure'):run(db,tmp_path,**kwargs)
+        with pytest.raises(RuntimeError,match='genuine technical failure'):run(db,tmp_path,**kwargs)
         assert current_config(db)==incumbent and digest(db)==before
         db.commit()
-        assert any(e.get('stage_key')=='train_model' and e.get('status')=='failed' for e in events)
+        expected='failed' if technical_failure=='fit' else 'success'
+        assert any(e.get('stage_key')=='train_model' and e.get('status')==expected for e in events)
+        if technical_failure=='staging':
+            assert any(e.get('stage_key')=='score_model' and e.get('status')=='failed' for e in events)
         assert not any(e.get('stage_key')=='publication' for e in events)
     else:
         result=run(db,tmp_path,**kwargs)
@@ -153,5 +161,48 @@ def test_real_publication_allows_statistical_warnings_but_not_fit_failures(db,tm
         assert '⚠️ Non-blocking statistical warning:' in text
         assert 'Diagnostic statistical checks (non-blocking)' in text
         assert '0.010000' in text and 'minimum=0.500000' in text
+        assert text.count('Chronological validation classification report')==1
+    preserved=[e['evaluation'] for e in events if e.get('operation')=='evaluation']
+    assert len(preserved)==1 and preserved[0]['chronological']['average_precision']==.01
+    assert preserved[0]['chronological']['training_seconds']>0
     assert len([e for e in events if e.get('operation')=='quality_warning'])==3
     assert all(first['evaluation']['gates'].values())  # Original result was not rewritten.
+
+
+@pytest.mark.parametrize('scheduled',[False,True])
+def test_retryable_exit_does_not_promise_a_retry_for_manual_runs(monkeypatch,tmp_path,scheduled):
+    from api.services import pipeline_service as service
+    from tests.test_pipeline_service import FakeConnection,FakePipelineLock
+    conn=FakeConnection([{'run_id':123},{'cancel_requested':False},{'stage_id':456},{'status':'failed'}])
+    monkeypatch.setattr(service,'connect_db',lambda **kw:conn)
+    monkeypatch.setattr(service,'build_pipeline_stages',lambda:[('predictive_daily',['fixture'])])
+    monkeypatch.setattr(service,'_run_stage_process',lambda **kw:service.StageProcessResult(returncode=75,stdout='',stderr='fixture capacity failure'))
+    monkeypatch.setattr(service,'_reconcile_cancel_requested_runs',lambda *a,**kw:None)
+    monkeypatch.setattr(service,'_has_terminal_scheduled_run_for_schedule_key',lambda *a:False)
+    monkeypatch.setattr(service,'_has_active_run_for_schedule_key',lambda *a:False)
+    monkeypatch.setattr(service,'_scheduled_retry_state',lambda *a:None)
+    monkeypatch.setenv('PIPELINE_LOG_PATH',str(tmp_path/'pipeline.log'))
+    result=service.run_pipeline(delivery_type='scheduled' if scheduled else 'manual',triggered_by='fixture',
+        schedule_key='fixture-slot' if scheduled else None,acquired_lock=FakePipelineLock())
+    assert result=={'status':'failed','run_id':123}
+    notes=[args[0] for query,args in conn.executed if args and isinstance(args[0],str) and 'exited with code 75' in args[0]]
+    assert notes
+    expected='scheduled retry subject to existing limits/backoff' if scheduled else 'manual execution has no automatic retry queued'
+    assert all(expected in value for value in notes)
+    assert all('transient failure' not in value for value in notes)
+
+
+def test_shared_lock_capacity_error_is_specific_and_does_not_leak_sql():
+    from types import SimpleNamespace
+    from api.predictive.failures import failure_message,classify_failure
+    error=type('CapacityError',(Exception,),dict(pgcode='53200',diag=SimpleNamespace(
+        message_primary='out of shared memory',message_hint='You might need to increase "max_locks_per_transaction".')))
+    exc=error('private SQL with vector payload and credentials')
+    text=failure_message(exc)
+    assert 'shared lock-table capacity exhausted' in text and 'max_locks_per_transaction' in text
+    assert 'private' not in text and 'credentials' not in text
+    assert classify_failure(exc)==dict(code='DATABASE_53200',retryable=True)  # Existing policy is unchanged.
+    events=[];reporter=Reporter(events.append)
+    with pytest.raises(error):
+        with reporter.span('score_model'):raise exc
+    assert events[-1]['status']=='failed' and 'shared lock-table capacity' in events[-1]['message']
