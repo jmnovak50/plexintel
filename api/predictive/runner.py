@@ -47,6 +47,8 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                 incumbent_ap=incumbent_evaluation.get('average_precision')
             if not isinstance(incumbent_ap,(float,int)) or not math.isfinite(incumbent_ap) or not 0<=incumbent_ap<=1:
                 raise ContractError('Invalid incumbent AP baseline')
+        from .reference import published_reference
+        reference=published_reference(conn,incumbent);conn.commit()
         # Check the prepared schema before ingestion; the job never applies migrations.
         with conn.cursor() as cur:
             for table in ('media_embeddings','watch_embeddings','user_embeddings'):
@@ -92,7 +94,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             label_policy_skips=summary['skips'].get('label_policy',0),
             limited_history_skips=summary['skips'].get('limited_history',0))
         with reporter.span('train_model'):
-            bundle,vocabulary,evaluation=train(inputs,media,watches,rows,summary,incumbent_ap=incumbent_ap,
+            bundle,vocabulary,evaluation=train(inputs,media,watches,rows,summary,incumbent_ap=incumbent_ap,reference=reference,
                 progress=lambda **metrics:reporter.progress('train_model',**metrics))
         reporter.done('train_model',chronological_balanced_accuracy=evaluation['chronological']['balanced_accuracy'],
             chronological_average_precision=evaluation['chronological']['average_precision'],

@@ -4,31 +4,38 @@ import time
 import numpy as np
 
 
-def probability_metrics(rows,probability):
+def probability_metrics(rows,probability,*,raw=False):
     from sklearn.metrics import (average_precision_score,balanced_accuracy_score,brier_score_loss,
         precision_score,recall_score,roc_auc_score,f1_score,precision_recall_curve,auc,confusion_matrix)
     y=np.asarray([r['label'] for r in rows],dtype=int);p=np.asarray(probability,dtype=float)
     result=dict(rows=len(rows),positive=int(y.sum()),negative=int(len(y)-y.sum()))
     if not len(rows):return dict(**result,status='no_examples')
+    from .supervision import POLICY, allocate
+    corrected=not raw and any(r.get('supervision_weighting')==POLICY for r in rows)
+    weights=np.asarray([r['decision_support'] for r in allocate(rows)]) if corrected else np.ones(len(rows))
+    kw=dict(sample_weight=weights)
+    result.update(metric_unit='decision_equivalent' if corrected else 'physical_observation',
+        decision_equivalent_support=float(weights.sum()),positive_support=float(weights[y==1].sum()),negative_support=float(weights[y==0].sum()))
     both=len(set(y))==2;pred=p>=.5
-    curve_p,curve_r,_=precision_recall_curve(y,p) if y.sum() else (None,None,None)
-    result.update(balanced_accuracy=float(balanced_accuracy_score(y,pred)) if both else None,
-        precision=float(precision_score(y,pred,zero_division=0)),recall=float(recall_score(y,pred,zero_division=0)),
-        average_precision=float(average_precision_score(y,p)) if y.sum() else None,
+    curve_p,curve_r,_=precision_recall_curve(y,p,**kw) if y.sum() else (None,None,None)
+    result.update(balanced_accuracy=float(balanced_accuracy_score(y,pred,**kw)) if both else None,
+        precision=float(precision_score(y,pred,zero_division=0,**kw)),recall=float(recall_score(y,pred,zero_division=0,**kw)),
+        average_precision=float(average_precision_score(y,p,**kw)) if y.sum() else None,
         pr_auc=float(auc(curve_r,curve_p)) if y.sum() else None,
-        roc_auc=float(roc_auc_score(y,p)) if both else None,
-        macro_f1=float(f1_score(y,pred,average='macro',zero_division=0)),brier_score=float(brier_score_loss(y,p)))
-    result.update(negative_precision=float(precision_score(y,pred,pos_label=0,zero_division=0)),
-        negative_recall=float(recall_score(y,pred,pos_label=0,zero_division=0)),
-        confusion_matrix=confusion_matrix(y,pred,labels=[0,1]).tolist(),
-        negative_sample_warning='Fewer than 20 negatives; estimates are unstable' if result['negative']<20 else None)
+        roc_auc=float(roc_auc_score(y,p,**kw)) if both else None,
+        macro_f1=float(f1_score(y,pred,average='macro',zero_division=0,**kw)),brier_score=float(brier_score_loss(y,p,**kw)))
+    result.update(negative_precision=float(precision_score(y,pred,pos_label=0,zero_division=0,**kw)),
+        negative_recall=float(recall_score(y,pred,pos_label=0,zero_division=0,**kw)),
+        confusion_matrix=confusion_matrix(y,pred,labels=[0,1],**kw).tolist(),
+        negative_sample_warning='Fewer than 20 negatives; estimates are unstable' if result['negative_support']<20 else None)
     bins=[];ece=0.
     for index in range(10):
         selected=(p>=index/10)&((p<(index+1)/10) if index<9 else (p<=1))
-        count=int(selected.sum());confidence=float(p[selected].mean()) if count else None
-        frequency=float(y[selected].mean()) if count else None
-        if count:ece+=count/len(y)*abs(confidence-frequency)
-        bins.append(dict(lower=index/10,upper=(index+1)/10,count=count,confidence=confidence,positive_rate=frequency))
+        count=int(selected.sum());mass=float(weights[selected].sum())
+        confidence=float(np.average(p[selected],weights=weights[selected])) if count else None
+        frequency=float(np.average(y[selected],weights=weights[selected])) if count else None
+        if count:ece+=mass/weights.sum()*abs(confidence-frequency)
+        bins.append(dict(lower=index/10,upper=(index+1)/10,count=count,support=mass,confidence=confidence,positive_rate=frequency))
     result['calibration']=dict(ece_10_bins=ece,bins=bins,status='uncalibrated_classifier_diagnostics')
     by_owner=defaultdict(list)
     for row,score in zip(rows,p):by_owner[row['owner']].append((float(score),row['media_key'],row['label']))
@@ -44,6 +51,9 @@ def probability_metrics(rows,probability):
         min_candidates=min(sizes) if sizes else 0,max_candidates=max(sizes) if sizes else 0,
         users_with_at_most_25_candidates=sum(size<=25 for size in sizes),
         limitation='Ranks labeled heldout candidates per user, not the full catalog. Recall@25 saturates for small cohorts.')
+    if corrected:
+        result['raw_episode_metrics']=probability_metrics(rows,p,raw=True)
+        result['ranking']['metric_unit']='raw_episode_diagnostic'
     return result
 
 

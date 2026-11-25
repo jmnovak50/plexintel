@@ -1,15 +1,17 @@
-"""Unchanged XGBoost fitting and fold-only feature vocabularies."""
+"""Existing XGBoost recipe with decision-aware weights and fold-only vocabularies."""
 import time
 import numpy as np
 from .contracts import ContractError,fingerprint
 from .features import Vocabulary
 from .evaluation import evaluate
-def fit(rows, vocabulary, *, progress=lambda value: None):
+def fit(rows, vocabulary, *, progress=lambda value: None, legacy_weights=False):
     import xgboost as xgb
     y = np.array([r['label'] for r in rows], dtype=np.int32)
     if set(y) != {0, 1}:
         raise ContractError('Training requires both classes')
-    weights = np.array([r['sample_weight'] for r in rows], dtype=np.float32) * np.where(y == 0, (y == 1).sum() / (y == 0).sum(), 1.0)
+    from .supervision import fit_weights, POLICY
+    corrected=any(r.get('supervision_weighting')==POLICY for r in rows)
+    weights=fit_weights(rows,legacy=legacy_weights or not corrected)
 
     class Observer(xgb.callback.TrainingCallback):
 
@@ -27,12 +29,12 @@ def fit(rows, vocabulary, *, progress=lambda value: None):
 def metrics(classifier, vocabulary, rows):
     return evaluate(classifier, vocabulary, rows, training_keys=getattr(classifier, '_plexintel_training_keys', ()))
 
-def fit_compare(train_rows, test_rows, *, include_poster, progress=lambda value: None):
+def fit_compare(train_rows, test_rows, *, include_poster, progress=lambda value: None, legacy_weights=False):
     if not test_rows:
         raise ContractError('Evaluation cohort lacks heldout examples')
     vocabulary = Vocabulary.fit(train_rows, include_poster=include_poster)
     started = time.perf_counter()
-    classifier = fit(train_rows, vocabulary, progress=progress)
+    classifier = fit(train_rows, vocabulary, progress=progress, legacy_weights=legacy_weights)
     elapsed = time.perf_counter() - started
     result = evaluate(classifier, vocabulary, test_rows, training_keys={r['media_key'] for r in train_rows})
     result.update(training_seconds=elapsed, train_rows=len(train_rows), feature_count=len(vocabulary.names), cohort_hash=fingerprint([(r['owner'], r['media_key'], r['prediction_at'], r['label']) for r in test_rows]), train_only_vocabulary=vocabulary.specification())

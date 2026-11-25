@@ -94,6 +94,8 @@ def stage_training(conn,rows):
             diagnostics={key:r[key] for key in ('canonical_identity','identity_policy','supervision_policy','prediction_at',
                 'label_available_at','observation_kind','feedback_provenance','auxiliary_feedback_count','auxiliary_feedback_conflicts')}
             if 'label_thresholds' in r:diagnostics['label_thresholds']=r['label_thresholds']
+            for key in ('supervision_weighting','feedback_decision','feedback_base_weight','decision_support'):
+                if key in r:diagnostics[key]=r[key]
             diagnostics['dependency_hash']=r['dependency_hash'] if 'dependency_hash' in r else fingerprint(r['dependencies'])
             diagnostics['feature_sha256']=hashlib.sha256(np.asarray(r['embedding'],dtype='<f4').tobytes()).hexdigest()
             values.append((index,r['owner'],int(r['media_key']),r['label'],Vector(r['embedding']),','.join(r['genres']),

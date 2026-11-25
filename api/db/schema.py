@@ -56,7 +56,8 @@ def apply_schema_updates(conn) -> None:
                 reason_code text REFERENCES public.feedback_reason(code),
                 suppress boolean DEFAULT false,
                 created_at timestamp without time zone DEFAULT now(),
-                source text DEFAULT 'ui'
+                source text DEFAULT 'ui',
+                decision_provenance jsonb
             )
             """
         )

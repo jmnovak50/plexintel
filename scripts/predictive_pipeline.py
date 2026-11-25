@@ -52,6 +52,7 @@ def main(argv=None):
     except Exception as exc:
         diagnostic=dict(error=failure_message(exc),classification=classify_failure(exc))
         if hasattr(exc,'evaluation'):diagnostic['evaluation']=exc.evaluation
+        if hasattr(exc,'supervision_audit'):diagnostic['supervision_audit']=exc.supervision_audit
         print(json.dumps(diagnostic),file=sys.stderr)
         return 75 if classify_failure(exc)['retryable'] else 78
     finally:

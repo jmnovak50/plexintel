@@ -45,6 +45,9 @@ def load_model(config):
             engagement_thresholds(**values)
         if bundle['label_thresholds']!=config['label_thresholds']:
             raise ContractError('Model/configuration engagement threshold metadata mismatch')
+    from .supervision import POLICY
+    if bundle.get('supervision_weighting')!=config.get('supervision_weighting') or bundle.get('supervision_weighting') not in (None,POLICY):
+        raise ContractError('Model/configuration decision weighting mismatch')
     vocabulary=Vocabulary(**bundle['vocabulary'])
     if vocabulary.names!=bundle['feature_names']:raise ContractError('Feature map mismatch')
     return bundle,vocabulary
@@ -69,4 +72,5 @@ def model_config(inputs,bundle,path,digest,evaluation):
         model_path=path,model_sha256=digest,dataset_hash=bundle['dataset_hash'],evaluation=evaluation,
         identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY,
         shap_output='raw margin (log-odds)',poster_inference='disabled/1.0',
-        **({'label_thresholds':bundle['label_thresholds']} if 'label_thresholds' in bundle else {}))
+        **({'label_thresholds':bundle['label_thresholds']} if 'label_thresholds' in bundle else {}),
+        **({'supervision_weighting':bundle['supervision_weighting']} if 'supervision_weighting' in bundle else {}))

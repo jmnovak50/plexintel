@@ -6,6 +6,7 @@ import numpy as np
 from .profiles import qualifying_profiles, runtime_seconds
 from .contracts import ContractError, FEATURE_VERSION, LABEL_VERSION, cosine, fingerprint, utc, vector, modality_contract, engagement_thresholds
 from .recovery import CanonicalTitles, IdentityError, IDENTITY_POLICY
+from .supervision import POLICY as WEIGHTING_POLICY, EXPLICIT, AttributionRequired, decision_for, allocate, atomic_split
 SUPERVISION_POLICY = 'canonical-retrospective-feedback/1.0'
 FOUR_STATE_SOURCE_AT = '2026-03-07T18:13:11+00:00'
 
@@ -257,6 +258,7 @@ def training_plan(inputs, media, identity=None, *, progress=lambda value: None):
     identity = identity or CanonicalTitles(media)
     snapshot = inputs['snapshot']
     thresholds=engagement_thresholds(**inputs.get('label_thresholds',{}))
+    issues=[]
     candidates, initial = unseen_training_candidates(snapshot, media, identity)
     skips = defaultdict(int, initial)
     by_owner, feedback = (defaultdict(list), defaultdict(list))
@@ -306,6 +308,20 @@ def training_plan(inputs, media, identity=None, *, progress=lambda value: None):
         conflicts = sum((row['feedback'] in ('watched_like', 'watched_dislike') and watch_label is not None and (watch_label[0] != int(row['feedback'] == 'watched_like')) for row in auxiliary))
         observation = 'retrospective_explicit_feedback' if f and f['feedback'] in ('watched_like', 'watched_dislike') else 'pre_viewing_intent' if f else 'first_recorded_watch'
         rows.append(dict(owner=owner, media_key=key, canonical_identity=identity.identity(key), identity_policy=IDENTITY_POLICY, supervision_policy=SUPERVISION_POLICY, show_key=identity.group(key), label=label[0], sample_weight=label[1], label_source=label[2], prediction_at=cutoff.isoformat(), label_available_at=label_available.isoformat(), label_version=LABEL_VERSION, label_thresholds=dict(thresholds), feedback_value=f['feedback'] if f else None, observation_kind=observation, feedback_provenance=feedback_provenance(f), auxiliary_feedback_count=len(auxiliary), auxiliary_feedback_conflicts=conflicts, played_duration=int(sum((e['played_seconds'] or 0 for e in events))), media_duration=int(runtime_seconds(parent) or 0), engagement_ratio=sum((e['played_seconds'] or 0 for e in events)) / (runtime_seconds(parent) or 1) if events else 0.1 if label[0] else 0.0, season_number=parent['source']['metadata']['season_number'], episode_number=parent['source']['metadata']['episode_number']))
+    if inputs.get('supervision_weighting')==WEIGHTING_POLICY:
+        reliable=[]
+        # Derive provenance only after the existing eligibility/precedence rules.
+        selected={(owner,identity.identity(key)):f for owner,key,events,f,cutoff in candidates}
+        for row in rows:
+            if row['label_source'] in EXPLICIT:
+                f=selected[row['owner'],row['canonical_identity']]
+                try:row['feedback_decision']=decision_for(f,row['owner'],row['media_key'],media,identity)
+                except (ContractError,KeyError,ValueError,TypeError) as exc:
+                    issues.append(dict(owner=row['owner'],canonical_identity=row['canonical_identity'],reason=str(exc)));continue
+                row['feedback_base_weight']=row['sample_weight']
+            reliable.append(row)
+        if issues:raise AttributionRequired(issues,reliable)
+        rows=allocate(reliable)
     return (rows, dict(skips))
 
 def planned_text_rows(inputs, media, watches, plan, identity, *, progress=lambda value: None):
@@ -322,6 +338,9 @@ def planned_text_rows(inputs, media, watches, plan, identity, *, progress=lambda
         row.update(fields)
         row['dependencies']['supervision_policy'] = SUPERVISION_POLICY
         row['dependencies']['label_thresholds'] = row['label_thresholds']
+        if row.get('supervision_weighting'):
+            row['dependencies']['supervision_weighting']=row['supervision_weighting']
+            row['dependencies']['feedback_decision']=row.get('feedback_decision')
         yield row
     progress(dict(stage='historical-features', expected=len(plan), completed=len(plan), failed=0))
 
@@ -391,6 +410,11 @@ def chronological_split(rows):
         raise ContractError('Duplicate canonical user/title outcomes cannot cross evaluation folds')
     if len(rows) < 10:
         raise ContractError('At least 10 historical examples required for evaluation')
+    if any(r.get('supervision_weighting')==WEIGHTING_POLICY for r in rows):
+        train,test,boundary=atomic_split(rows)
+        if not train or not test or {r['label'] for r in train}!={0,1} or {r['label'] for r in test}!={0,1}:
+            raise ContractError('Decision-aware chronological split lacks class/history support')
+        return train,test,boundary
     times = sorted((utc(r['prediction_at']) for r in rows))
     boundary = times[min(len(times) - 1, int(len(times) * 0.8))]
     train = [r for r in rows if utc(r['prediction_at']) < boundary and utc(r['label_available_at']) < boundary]

@@ -160,6 +160,10 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
     after_generation=datetime.now(timezone.utc)
     config=current_config(db);db.commit()
     assert result['verified'] and result['counts']['training_data']>128
+    from api.predictive.supervision import POLICY
+    assert config['supervision_weighting']==POLICY
+    assert result['evaluation']['chronological']['metric_unit']=='decision_equivalent'
+    assert 'raw_episode_metrics' in result['evaluation']['chronological']
     assert result['summary']['observations']['retrospective_explicit_feedback']>0
     assert result['evaluation']['chronological']['negative_recall'] is not None
     assert result['evaluation']['show_heldout']['negative']>0
@@ -189,6 +193,12 @@ def test_public_only_complete_repeat_partial_failure_and_last_good(db,tmp_path,m
     # Repeat reads exactly the same saved vector/provenance inputs; no inference.
     result2=run(db,tmp_path,frozen_source=snapshot,policy=snapshot['_fixture_policy'],plex=plex,encoder=encoder,collect=False,label=False,output=lambda _:None)
     assert encoder.calls==calls
+    for fold in ('chronological','show_heldout'):
+        reference=result2['evaluation']['comparable_reference'][fold]
+        assert reference['manifest']['decision_overlap']==0
+        assert reference['manifest']['model_sha256']==config['model_sha256']
+        assert reference['metrics']['metric_unit']=='decision_equivalent'
+    assert result2['evaluation']['incumbent_average_precision']==result2['evaluation']['comparable_reference']['chronological']['metrics']['average_precision']
     with db.cursor() as cur:
         cur.execute('SELECT ctid::text FROM media_embeddings WHERE rating_key=4');assert cur.fetchone()[0]==physical
     assert digest(db)==before;db.commit()

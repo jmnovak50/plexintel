@@ -99,7 +99,8 @@ def read_snapshot(conn, *, media_keys=None, max_events=None):
             raise ContractError('Orphan legacy watch vectors require explicit reconciliation')
         if max_events is not None:events=events[:max_events]
         legacy_watch_ids=[r['watch_id'] for r in events if r.pop('legacy_watch_id') is not None]
-        cur.execute('''SELECT DISTINCT ON(username,rating_key) username,rating_key,feedback,suppress,
+        cur.execute('''SELECT DISTINCT ON(username,rating_key) id,username,rating_key,feedback,suppress,
+            to_jsonb(user_feedback)->'decision_provenance' AS decision_provenance,
             created_at,COALESCE(modified_at,created_at) AS modified_at
             FROM public.user_feedback WHERE (%s::integer[] IS NULL OR rating_key=ANY(%s))
             ORDER BY username,rating_key,COALESCE(modified_at,created_at) DESC,id DESC''',(media_keys,media_keys))

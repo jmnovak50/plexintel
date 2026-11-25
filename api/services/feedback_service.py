@@ -1,5 +1,9 @@
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
+from uuid import uuid4
+from psycopg2.extras import Json
+from api.predictive.recovery import stable_identity, IdentityError
+from api.predictive.supervision import PROVENANCE
 from typing import Optional
 
 from fastapi import HTTPException
@@ -154,6 +158,16 @@ def _build_feedback_response(
     }
 
 
+def _decision(username, item, action):
+    kind=(item.get('media_type') or '').lower()
+    if kind in SHOW_MEDIA_TYPES:kind='show'
+    try: canonical=stable_identity(kind,item.get('plex_guid'))
+    except IdentityError:canonical=None  # Suppression remains available for unresolved targets.
+    return dict(version=PROVENANCE,id=str(uuid4()),kind='captured',username=username,
+        target_rating_key=item['rating_key'],target_scope=kind,target_identity=canonical,
+        action=action,occurred_at=datetime.now(timezone.utc).isoformat())
+
+
 def _upsert_feedback_row(
     cur,
     username: str,
@@ -163,10 +177,11 @@ def _upsert_feedback_row(
     source: str,
     plex_watchlist_status: str,
     plex_watchlist_synced_at,
+    decision_provenance,
 ):
     normalized_action = normalize_feedback_action(action)
     defaults = action_defaults(normalized_action)
-    timestamp = datetime.utcnow()
+    timestamp = datetime.fromisoformat(decision_provenance['occurred_at']).astimezone(timezone.utc).replace(tzinfo=None)
 
     cur.execute(
         """
@@ -180,9 +195,10 @@ def _upsert_feedback_row(
             source,
             plex_watchlist_status,
             plex_watchlist_synced_at,
-            modified_at
+            modified_at,
+            decision_provenance
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (username, rating_key)
         DO UPDATE SET
             feedback = EXCLUDED.feedback,
@@ -192,7 +208,8 @@ def _upsert_feedback_row(
             source = EXCLUDED.source,
             plex_watchlist_status = EXCLUDED.plex_watchlist_status,
             plex_watchlist_synced_at = EXCLUDED.plex_watchlist_synced_at,
-            modified_at = EXCLUDED.modified_at
+            modified_at = EXCLUDED.modified_at,
+            decision_provenance = EXCLUDED.decision_provenance
         RETURNING
             username,
             rating_key,
@@ -216,6 +233,7 @@ def _upsert_feedback_row(
             plex_watchlist_status,
             plex_watchlist_synced_at,
             timestamp,
+            Json(decision_provenance),
         ),
     )
     return cur.fetchone()
@@ -235,6 +253,7 @@ def record_feedback(
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
 
+    decision = _decision(username, item, normalized_action)
     seed_feedback_reasons(cur)
 
     defaults = action_defaults(normalized_action)
@@ -258,6 +277,7 @@ def record_feedback(
         source=source,
         plex_watchlist_status=watchlist_status,
         plex_watchlist_synced_at=watchlist_synced_at,
+        decision_provenance=decision,
     )
     return _build_feedback_response(
         row["username"],
@@ -285,6 +305,7 @@ def record_bulk_feedback(
     normalized_action = normalize_bulk_feedback_action(action)
     seed_feedback_reasons(cur)
     target = resolve_bulk_target(cur, rating_key)
+    decision=_decision(username,target,normalized_action)
 
     cur.execute(
         """
@@ -321,6 +342,7 @@ def record_bulk_feedback(
             source=source,
             plex_watchlist_status="not_applicable",
             plex_watchlist_synced_at=None,
+            decision_provenance=decision,
         )
         updated_count += 1
 
@@ -401,7 +423,7 @@ def delete_feedback_row(
 def resolve_bulk_target(cur, rating_key: int) -> dict:
     cur.execute(
         """
-        SELECT rating_key, title, media_type
+        SELECT rating_key, title, media_type, plex_guid
         FROM public.library
         WHERE rating_key = %s
         """,
@@ -442,5 +464,6 @@ def resolve_bulk_target(cur, rating_key: int) -> dict:
         "target_rating_key": target["rating_key"],
         "target_media_type": target_media_type,
         "target_title": target.get("title") or "Untitled",
+        "rating_key": target['rating_key'], "media_type":target_media_type,"plex_guid":target.get('plex_guid'),
         "descendant_rating_keys": descendant_rating_keys,
     }
