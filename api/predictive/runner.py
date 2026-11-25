@@ -93,10 +93,12 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             limited_history_skips=summary['skips'].get('limited_history',0))
         with reporter.span('train_model'):
             bundle,vocabulary,evaluation=train(inputs,media,watches,rows,summary,incumbent_ap=incumbent_ap,
-                progress=lambda **metrics:reporter.progress('train_model',**metrics))
+                progress=lambda **metrics:reporter.progress('train_model',**metrics),
+                warning=lambda value:reporter.log('train_model','quality_warning',**value))
         reporter.done('train_model',chronological_balanced_accuracy=evaluation['chronological']['balanced_accuracy'],
             chronological_average_precision=evaluation['chronological']['average_precision'],
-            show_balanced_accuracy=evaluation['show_heldout']['balanced_accuracy'],quality_passed=all(evaluation['gates'].values()))
+            show_balanced_accuracy=evaluation['show_heldout']['balanced_accuracy'],quality_passed=all(evaluation['gates'].values()),
+            quality_warning_count=len(evaluation['statistical_warnings']))
         bundle.update(source_sha256=code_sha,software_versions=software)
         model_path,model_hash=save_model(directory,bundle)
         config=model_config(inputs,bundle,model_path,model_hash,evaluation)

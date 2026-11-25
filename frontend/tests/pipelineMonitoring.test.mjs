@@ -88,3 +88,14 @@ test('cache-hit and progress detail never replace the classic main stdout', () =
   assert.match(html,/Cached film title/);
   assert.equal((html.match(/Cached film title/g)||[]).length,1);
 });
+
+test('a successful training stage can retain unfavorable statistical diagnostics', () => {
+  const html=card({stage_id:20,stage_key:'train_model',status:'success',duration_seconds:45,
+    metrics:{quality_passed:false,quality_warning_count:1},
+    stdout_tail:'⚠️ Non-blocking statistical warning: chronological.average_precision=0.840000; diagnostic minimum=0.850000.'});
+  assert.match(html,/success/);
+  assert.match(html,/Non-blocking statistical warning/);
+  assert.match(html,/0\.840000/);
+  assert.match(html,/0\.850000/);
+  assert.doesNotMatch(html,/Quality gates passed/);
+});

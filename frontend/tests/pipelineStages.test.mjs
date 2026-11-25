@@ -118,3 +118,9 @@ test('stage records remain untouched while full output is loaded separately', ()
   assert.equal(stages[0].stdout_tail,JSON.stringify({event:'plexintel.pipeline-stage/1',metrics:{}}));
   assert.equal(stages[1].stdout_tail,undefined);
 });
+
+test('statistical diagnostics are labeled as non-blocking warnings', () => {
+  const metrics=stageMetrics({quality_passed:false,quality_warning_count:3});
+  assert.equal(metrics.find(v=>v.key==='quality_passed').label,'Statistical checks satisfied');
+  assert.equal(metrics.find(v=>v.key==='quality_warning_count').label,'Statistical warnings (non-blocking)');
+});

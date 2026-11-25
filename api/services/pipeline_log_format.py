@@ -34,6 +34,7 @@ def title(value):
 def item_line(value):
     op=value.get('operation');user=value.get('user','Unknown user')
     if op=='labeling':return labeling_line(value.get('data') or {})
+    if op=='quality_warning':return '⚠️ '+str(value['message'])
     if op=='embedding':return '   🎬 Embedding '+title(value)
     if op=='embedded':return '✅ Embedded '+title(value)
     if op=='reused':return '   🎬 '+title(value)+' — cached embedding reused'
@@ -123,7 +124,8 @@ def stage_line(value):
                 'verification':'🔍 Verifying publication...'}.get(key,'🔄 '+name+'...')
     labels={'completed':'Processed','expected':'Total','reused':'Reused','inferred':'Embedded','users':'Users',
             'predictions':'Predictions','rows':'Training rows','contexts':'SHAP contexts','contributions':'SHAP contributions',
-            'quality_passed':'Quality gates passed','chronological_balanced_accuracy':'Chronological balanced accuracy',
+            'quality_passed':'Statistical checks satisfied','quality_warning_count':'Statistical warnings (non-blocking)',
+            'chronological_balanced_accuracy':'Chronological balanced accuracy',
             'chronological_average_precision':'Chronological average precision','show_balanced_accuracy':'Show-heldout balanced accuracy'}
     details=' · '.join(labels.get(k,k.replace('_',' ').capitalize())+': '+scalar(v) for k,v in metrics.items() if k!='seconds')
     return ('✅ ' if status=='success' else '📊 ')+name+(' complete' if status=='success' else '')+(' — '+details if details else '.')
@@ -175,7 +177,10 @@ def completion_summary(stage,fields):
             for key,label in [('chronological','Chronological validation'),('show_heldout','Show-heldout validation')]:
                 if isinstance(evaluation.get(key),dict):lines.extend(classification_report(label,evaluation[key],threshold))
         if isinstance(evaluation.get('gates'),dict):
-            lines.append('\n🛡️ Recorded quality gates: '+', '.join(k.replace('_',' ')+': '+('passed' if v else 'failed') for k,v in evaluation['gates'].items()))
+            diagnostic=evaluation.get('statistical_checks_blocking') is False
+            heading='Diagnostic statistical checks (non-blocking)' if diagnostic else 'Recorded quality gates'
+            lines.append('\n🛡️ '+heading+': '+', '.join(k.replace('_',' ')+': '+('passed' if v else 'not satisfied' if diagnostic else 'failed') for k,v in evaluation['gates'].items()))
+            if diagnostic:lines.append('Statistical warnings (non-blocking): '+str(len(evaluation.get('statistical_warnings',[]))))
         if evaluation.get('final_model_evaluation'):lines.append('📝 '+evaluation['final_model_evaluation'])
     counts=fields.get('published counts') or {}
     if counts:lines.append('📊 Published totals: '+', '.join(k.replace('_',' ')+': '+scalar(v) for k,v in counts.items()))

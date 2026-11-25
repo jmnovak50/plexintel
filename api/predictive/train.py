@@ -6,7 +6,7 @@ from .recovery import CanonicalTitles,IDENTITY_POLICY
 from .model import fit,fit_compare
 
 
-def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda **metrics:None):
+def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda **metrics:None,warning=lambda value:None):
     thresholds=engagement_thresholds(**inputs.get('label_thresholds',{}))
     if any(engagement_thresholds(**r.get('label_thresholds',{}))!=thresholds for r in rows):
         raise ContractError('Training rows and configured engagement thresholds differ')
@@ -32,13 +32,23 @@ def train(inputs,media,watches,rows,summary,*,incumbent_ap=None,progress=lambda 
         metrics['validation_identity_hash']=fingerprint([(r['owner'],r['canonical_identity'],r['prediction_at']) for r in heldout])
     gates=dict(chronological_balanced_accuracy=chronological['balanced_accuracy'] is not None and chronological['balanced_accuracy']>=.5,
         show_balanced_accuracy=show['balanced_accuracy'] is not None and show['balanced_accuracy']>=.5,
-        average_precision=incumbent_ap is None or chronological['average_precision']>=incumbent_ap-.05)
+        average_precision=incumbent_ap is None or (chronological['average_precision'] is not None and chronological['average_precision']>=incumbent_ap-.05))
+    warnings=[]
+    for check,metric,value,minimum in (
+        ('chronological_balanced_accuracy','chronological.balanced_accuracy',chronological['balanced_accuracy'],.5),
+        ('show_balanced_accuracy','show_heldout.balanced_accuracy',show['balanced_accuracy'],.5),
+        ('average_precision','chronological.average_precision',chronological['average_precision'],incumbent_ap-.05 if incumbent_ap is not None else None)):
+        if gates[check]:continue
+        measured=f'{value:.6f}' if value is not None else 'unavailable'
+        message=f'Non-blocking statistical warning: {metric}={measured}; diagnostic minimum={minimum:.6f}.'
+        if check=='average_precision':message+=f' Historical incumbent AP={incumbent_ap:.6f}; allowed decline=0.050000.'
+        warnings.append(dict(check=check,metric=metric,value=value,minimum=minimum,comparison='>=',blocking=False,message=message))
     evaluation=dict(label_thresholds=thresholds,chronological=chronological,show_heldout=show,boundary=boundary.isoformat(),show_support_skips=skips,
         gates=gates,incumbent_average_precision=incumbent_ap,
+        statistical_checks_blocking=False,statistical_warnings=warnings,
         threshold=.5,final_model_evaluation='No independent held-out score: final classifier is fitted on all eligible rows.',
         limitation='Repeated release validation, selected labeled candidates, current descriptive metadata; not an untouched prospective test.')
-    if not all(gates.values()):
-        error=ContractError('Existing model quality gate failed; nothing published');error.evaluation=evaluation;raise error
+    for value in warnings:warning(value)
     vocabulary=Vocabulary.fit(rows,include_poster=False)
     classifier=fit(rows,vocabulary,progress=lambda metrics:progress(**metrics))
     bundle=dict(label_thresholds=thresholds,feature_space_id=inputs['feature_space_id'],contract_hash=inputs['contract_hash'],

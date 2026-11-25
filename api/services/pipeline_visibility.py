@@ -52,6 +52,8 @@ def supplement(details, report):
             show_balanced_accuracy=(evaluation.get('show_heldout') or {}).get('balanced_accuracy')),
         shap=dict(contexts=counts.get('shap_prediction_context'),contributions=counts.get('shap_impact')))
     if evaluation.get('gates'):metrics['train_model']['quality_passed'] = all(evaluation['gates'].values())
+    if evaluation.get('statistical_checks_blocking') is False:
+        metrics['train_model']['quality_warning_count']=len(evaluation.get('statistical_warnings',[]))
     for row in details:
         row['metrics'] = dict(clean_metrics(metrics.get(row['stage_key'], {})), **row.get('metrics', {}))
         if row['stage_key'] == 'score_model' and report.get('verified'):

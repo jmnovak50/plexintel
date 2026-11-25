@@ -39,7 +39,7 @@ METRICS = {'expected', 'completed', 'failed', 'pending', 'succeeded', 'reused', 
            'contributions', 'limited_history_skips', 'label_policy_skips', 'metadata_seconds',
            'context_seconds', 'inference_seconds', 'checkpoint_reused', 'previous_seconds',
            'chronological_balanced_accuracy', 'chronological_average_precision',
-           'show_balanced_accuracy', 'quality_passed', 'new_media', 'new_watch_events',
+           'show_balanced_accuracy', 'quality_passed', 'quality_warning_count', 'new_media', 'new_watch_events',
            'quarantined', 'verified_vectors', 'poster_requests', 'seconds', 'requests'}
 METRICS.update({'successes','abstentions','input_tokens','output_tokens','total_tokens','estimated_cost_usd'})
 METRICS.update({'selected','assessed','reviews','failures','skipped','unprocessed',
