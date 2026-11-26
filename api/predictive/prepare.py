@@ -10,6 +10,7 @@ from .recovery import CanonicalTitles,IdentityError,Resolver,POLICY
 from .features import ProfileContext,training_rows,SUPERVISION_POLICY,unseen_candidate_keys
 from .eligibility_quarantine import profile_exclusions
 from .progress import media_log_fields
+from .pending import PendingVectors,checked
 
 TABLES={'media_text':('media_embeddings','rating_key'),'watch':('watch_embeddings','watch_id'),
         'user':('user_embeddings','username')}
@@ -36,28 +37,54 @@ def record(spec,kind,key,source,values,input_hash):
         encoder_digest=spec['encoder']['digest'],vector_sha256=hashlib.sha256(np.asarray(values,dtype='<f4').tobytes()).hexdigest())
 
 
-def refresh_vector(spec,kind,key,source,text,old,encoder,stats,*,log=None):
+def refresh_vector(spec,kind,key,source,text,old,encoder,stats,*,log=None,pending=None,observe=lambda:None):
     digest=fingerprint(dict(contract=modality_contract(spec,kind),text=text))
-    saved=old.pop(str(key),None);provenance=saved['provenance'] if saved else {}
-    if (provenance.get('input_hash')==digest and provenance.get('modality_contract_hash')==fingerprint(modality_contract(spec,kind))
-        and saved['embedding'] is not None and provenance.get('vector_sha256')==hashlib.sha256(
-            np.asarray(saved['embedding'],dtype='<f4').tobytes()).hexdigest()):
-        values=vector(saved['embedding'],unit=True);stats['reused']+=1
-        action='reused'
-    else:
-        if log:log('embedding',reason='No cached vector' if not saved else 'Input, contract or cached vector changed')
-        try:
-            values=encoder.embed(text);stats['inferred']+=1
-        except Exception as exc:
-            if log:log('embedding_failed',error_type=type(exc).__name__)
-            raise
-        action='embedded'
+    contract_hash=fingerprint(modality_contract(spec,kind));encoder_digest=spec['encoder']['digest']
+    saved=old.pop(str(key),None)
+    values,reason=checked(saved['embedding'] if saved else None,saved['provenance'] if saved else None,
+                          digest,contract_hash,encoder_digest)
+    if reason is None:
+        stats['reused']+=1;stats['published_reused']+=1
+        if log:log('reused',cache_source='published')
+        return record(spec,kind,key,source,values,digest)
+    if reason!='missing':
+        stats['published_'+reason]+=1
+        if log:log('reuse_rejected',cache_source='published',reason=reason)
+    if pending is None:raise ContractError('Durable pending store required before encoder inference')
+    started=time.perf_counter()
+    values,reason=pending.get(kind,key,digest,contract_hash,encoder_digest)
+    stats['pending_lookup_seconds']+=time.perf_counter()-started
+    if reason is None:
+        stats['reused']+=1;stats['pending_reused']+=1
+        if log:log('pending_reused')
+        return record(spec,kind,key,source,values,digest)
+    if reason!='missing':
+        stats['pending_'+reason]+=1
+        if log:log('reuse_rejected',cache_source='pending',reason=reason)
+    if log:log('embedding',reason='No compatible valid published or pending vector')
+    try:
+        values=vector(encoder.embed(text),unit=True);stats['inferred']+=1
+    except Exception as exc:
+        if log:log('embedding_failed',error_type=type(exc).__name__)
+        raise
+    if log:log('inference_completed',inferred=stats['inferred'],durably_persisted=stats['durably_persisted'])
+    observe()
     result=record(spec,kind,key,source,values,digest)
-    if log:log(action)
+    started=time.perf_counter()
+    try:
+        pending.save(kind,key,result)
+    except Exception as exc:
+        if log:log('persistence_failed',error_type=type(exc).__name__)
+        raise
+    finally:stats['persistence_seconds']+=time.perf_counter()-started
+    stats['durably_persisted']+=1
+    if log:log('embedded',durably_persisted=True)
     return result
 
 
-def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False,policy=None,progress=lambda stage,**metrics:None,log=None):
+def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False,policy=None,progress=lambda stage,**metrics:None,log=None,pending=None):
+    if pending is None:
+        pending=PendingVectors(conn);pending.require_schema()
     spec=specification(encoder.identity,policy=policy)
     spec.update(identity_policy='verified-canonical-unseen-title/1.0',supervision_policy=SUPERVISION_POLICY)
     inputs=dict(contract=spec,contract_hash=fingerprint(spec),feature_space_id=fingerprint(spec),snapshot=snapshot,
@@ -72,7 +99,7 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
                 ('updatedAt','guid','type','parentRatingKey','grandparentRatingKey')})
     started=time.monotonic()
     progress('media_text',completed=0,expected=len(sources))
-    old=cache(conn,'media_text');media={};stats=Counter()
+    old=cache(conn,'media_text');media={};stats=Counter(published_reused=0,pending_reused=0,inferred=0,durably_persisted=0)
     for key,source in sources.items():
         previous=(old.get(key) or {}).get('provenance',{}).get('source',{})
         revision_keys=previous.get('_revision_keys',[])
@@ -93,19 +120,24 @@ def prepare(conn,snapshot,plex,encoder,associations,*,allow_stored_history=False
             source['_revision']=(fingerprint(dict(source=base_source,revisions=[(k,revisions[k]) for k in revision_keys]))
                                  if revision_keys and all(k in revisions for k in revision_keys) else None)
         item_log=(lambda operation,**fields:log('media_text',operation,**media_log_fields(key,source),**fields)) if log else None
-        media[key]=refresh_vector(spec,'media_text',key,source,media_text(source['metadata']),old,encoder,stats,log=item_log)
+        media[key]=refresh_vector(spec,'media_text',key,source,media_text(source['metadata']),old,encoder,stats,log=item_log,pending=pending,
+            observe=lambda:progress('media_text',completed=len(media),expected=len(sources),**stats))
         progress('media_text',completed=len(media),expected=len(sources),**stats)
-    progress('media_text',seconds=time.monotonic()-started)
+    progress('media_text',seconds=time.monotonic()-started,pending_retained=pending.population('media_text'))
     identity=CanonicalTitles(media)
     started=time.monotonic()
     progress('watch',completed=0,expected=len(snapshot['events']))
-    old=cache(conn,'watch');watches={};stats=Counter()
+    old=cache(conn,'watch');watches={};stats=Counter(published_reused=0,pending_reused=0,inferred=0,durably_persisted=0)
     for event in snapshot['events']:
         key=str(event['rating_key']);watch=str(event['watch_id'])
         if key not in media:raise ContractError('Unscoped watch event: quarantine before preparation')
-        watches[watch]=refresh_vector(spec,'watch',watch,event,watch_text(event,media[key]['source']['metadata']),old,encoder,stats)
+        # Existing watch reuse stays aggregate; report new/pending/rejected work with its actual title.
+        item_log=(lambda operation,**fields:log('watch',operation,**media_log_fields(key,media[key]['source']),**fields)
+                  if operation!='reused' else None) if log else None
+        watches[watch]=refresh_vector(spec,'watch',watch,event,watch_text(event,media[key]['source']['metadata']),old,encoder,stats,
+            log=item_log,pending=pending,observe=lambda:progress('watch',completed=len(watches),expected=len(snapshot['events']),**stats))
         progress('watch',completed=len(watches),expected=len(snapshot['events']),**stats)
-    progress('watch',seconds=time.monotonic()-started)
+    progress('watch',seconds=time.monotonic()-started,pending_retained=pending.population('watch'))
     started=time.monotonic()
     progress('users',users=0)
     users={};blocked=0

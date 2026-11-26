@@ -11,6 +11,30 @@ def event(key,status='started',**extra):
                            metrics={},**extra))+'\n'
 
 
+def test_durable_embedding_events_remain_stage_owned_and_distinguish_completion(monkeypatch,tmp_path):
+    from api.predictive.progress import ITEM_EVENT
+    def item(key,operation,**fields):
+        return json.dumps(dict(event=ITEM_EVENT,stage_key=key,operation=operation,title='Synthetic title',rating_key='1',**fields))+'\n'
+    raw=(event('media_text')+item('media_text','pending_reused')+
+         item('media_text','inference_completed',inferred=1,durably_persisted=0)+
+         item('media_text','embedded',durably_persisted=True)+event('media_text','success')+
+         event('watch')+item('watch','reuse_rejected',cache_source='pending',reason='invalid')+
+         item('watch','persistence_failed',error_type='OperationalError')+event('watch','failed')+
+         event('publication')+item('publication','pending_reconciled',pending_backup_covered=2,pending_obsolete=1,
+                                  pending_invalid_removed=1,pending_retained=3,pending_cleanup_seconds=.1)+event('publication','success'))
+    run=fixture(tmp_path,monkeypatch,raw,keys=('source_sync','media_text','watch','publication'))
+    media=logs.get_stage_logs(run,'source_sync')['stdout']['text']
+    watch=logs.get_stage_logs(run,'watch')['stdout']['text']
+    publication=logs.get_stage_logs(run,'publication')['stdout']['text']
+    assert 'durable pending embedding reused' in media
+    assert media.index('awaiting durable persistence')<media.index('— durably persisted')
+    assert 'pending reuse candidate invalid' in watch and 'durable persistence failed' in watch
+    assert 'verified last-good backup' in publication and '3 retained' in publication
+    assert 'persistence failed' not in media and 'Pending inference reconciled' not in media
+    worker=logs.get_stage_logs(run,'predictive_daily')['stdout']['text']
+    assert 'durable pending embedding' not in worker and 'Pending inference reconciled' not in worker
+
+
 def fixture(tmp_path,monkeypatch,stdout='',stderr='',keys=('source_sync','media_text','train_model','score_model','shap','publication','verification','semantic_labels')):
     monkeypatch.setenv('PIPELINE_LOG_PATH',str(tmp_path/'pipeline.log'))
     for stream,text in [('stdout',stdout),('stderr',stderr)]:

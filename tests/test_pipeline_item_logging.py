@@ -24,30 +24,38 @@ def test_embedding_logs_start_before_actual_request_and_distinguish_cache_reuse(
         return unit()
     encoder.embed.side_effect=embed
     callback=lambda operation,**fields:events.append((operation,fields))
-    stats=Counter();result=refresh_vector(spec,'media_text','7',{},'exact serialized input',{},encoder,stats,log=callback)
-    assert [op for op,_ in events]==['embedding','embedded']
+    pending=Mock();pending.get.return_value=(None,'missing')
+    def persisted(*args):assert events[-1][0]=='inference_completed'
+    pending.save.side_effect=persisted
+    stats=Counter();result=refresh_vector(spec,'media_text','7',{},'exact serialized input',{},encoder,stats,log=callback,pending=pending)
+    assert [op for op,_ in events]==['embedding','inference_completed','embedded']
+    assert events[-1][1]['durably_persisted'] is True
     encoder.embed.assert_called_once_with('exact serialized input')
     plain_encoder=Mock();plain_encoder.embed.return_value=unit()
-    assert refresh_vector(spec,'media_text','7',{},'exact serialized input',{},plain_encoder,Counter())==result
+    silent_pending=Mock();silent_pending.get.return_value=(None,'missing')
+    assert refresh_vector(spec,'media_text','7',{},'exact serialized input',{},plain_encoder,Counter(),pending=silent_pending)==result
     old={'7':dict(embedding=result['embedding'],provenance={k:v for k,v in result.items() if k!='embedding'})}
     events.clear();encoder.reset_mock()
     cached=refresh_vector(spec,'media_text','7',{},'exact serialized input',deepcopy(old),encoder,stats,log=callback)
-    assert cached==result and events==[('reused',{})]
+    assert cached==result and events==[('reused',{'cache_source':'published'})]
     encoder.embed.assert_not_called()
     events.clear();encoder.embed.side_effect=embed
     # A cached input mismatch still follows the original one-request path.
     old['7']['provenance']['input_hash']='changed'
-    refresh_vector(spec,'media_text','7',{},'exact serialized input',old,encoder,stats,log=callback)
-    assert [op for op,_ in events]==['embedding','embedded']
-    assert stats==dict(inferred=2,reused=1)
+    refresh_vector(spec,'media_text','7',{},'exact serialized input',old,encoder,stats,log=callback,pending=pending)
+    assert [op for op,_ in events]==['reuse_rejected','embedding','inference_completed','embedded']
+    assert {k:stats[k] for k in ('inferred','reused','published_reused','durably_persisted','published_incompatible')}==dict(
+        inferred=2,reused=1,published_reused=1,durably_persisted=2,published_incompatible=1)
 
 
 def test_embedding_failure_identifies_operation_without_logging_request_or_secret():
     spec=specification(dict(name='fake',digest='x',dimensions=768))
     encoder=Mock();encoder.embed.side_effect=RuntimeError('private request URL token=must-not-log')
     messages=[];callback=lambda operation,**fields:messages.append(dict(operation=operation,**fields))
+    pending=Mock();pending.get.return_value=(None,'missing')
     with pytest.raises(RuntimeError,match='private request'):
-        refresh_vector(spec,'media_text','7',{},'private synopsis',{},encoder,Counter(),log=callback)
+        refresh_vector(spec,'media_text','7',{},'private synopsis',{},encoder,Counter(),log=callback,pending=pending)
+    pending.save.assert_not_called()
     assert messages[-1]==dict(operation='embedding_failed',error_type='RuntimeError')
     assert not any(v['operation']=='embedded' for v in messages)
     assert 'must-not-log' not in json.dumps(messages) and 'private synopsis' not in json.dumps(messages)

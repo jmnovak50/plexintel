@@ -18,6 +18,7 @@ from .publication import writer_lock,source_signature,install_staging,stage_vect
 from .recovery import load_associations
 from .progress import Reporter,clean_metrics
 from .provenance import source_sha256,versions
+from .pending import PendingVectors
 
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -53,6 +54,7 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
                 cur.execute('SELECT provenance FROM public.'+table+' LIMIT 0')
             cur.execute('SELECT diagnostics,sample_weight FROM public.training_data LIMIT 0')
         conn.commit()
+        pending=PendingVectors(conn);pending.require_schema()
         with reporter.span('source_sync'):
             if frozen_source:
                 if collect:raise ContractError('Frozen replay cannot collect live inputs')
@@ -84,9 +86,9 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
             from .history_scope import partition_history
             snapshot=partition_history(snapshot)
         reporter.done('source_sync',quarantined=snapshot['watch_coverage']['quarantined_watch_events'])
-        # Preparation is in memory and temporary tables; live vectors stay unchanged.
+        # New inference commits independently; the prepared public bundle stays private.
         inputs,media,watches,users,rows,summary=prepare(conn,snapshot,plex,encoder,associations,
-            allow_stored_history=allow_stored_history,policy=policy,progress=reporter.progress,log=reporter.log)
+            allow_stored_history=allow_stored_history,policy=policy,progress=reporter.progress,log=reporter.log,pending=pending)
         conn.commit()
         reporter.done('training_data',rows=summary['rows'],
             label_policy_skips=summary['skips'].get('label_policy',0),
@@ -118,9 +120,11 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         reporter.done('score_model',predictions=count,message='Duration includes temporary materialization, SHAP generation and staged prediction persistence.')
         reporter.done('shap',timing_known=False,message='Measured within scoring; raw-margin embedding contributions retained')
         if source_sha256()!=code_sha:raise ContractError('Predictor source changed during execution; no publication')
+        pending_cleanup={}
         with reporter.span('publication'):
-            counts=publish(conn,config,incumbent,source_hash,backup_directory=directory)
-        reporter.done('publication')
+            counts=publish(conn,config,incumbent,source_hash,backup_directory=directory,pending_metrics=pending_cleanup)
+        reporter.log('publication','pending_reconciled',**pending_cleanup)
+        reporter.done('publication',**pending_cleanup)
         try:
             with reporter.span('verification'):
                 if verify(conn,config)!=counts:raise ContractError('Post-commit population mismatch')
@@ -133,6 +137,8 @@ def run(conn,directory,*,frozen_source=None,plex=None,encoder=None,allow_stored_
         result=dict(verified=True,run_id=config['workload_id'],promotion_id=config['workload_id'],
             feature_space_id=config['feature_space_id'],model_sha256=model_hash,source_sha256=code_sha,software_versions=config['software_versions'],counts=counts,summary=summary,
             evaluation=evaluation,ranking_comparison=ranking,predictive_seconds=time.monotonic()-started)
+        result['pending_inference']=dict(durably_persisted=pending.persisted,persistence_seconds=pending.persistence_seconds,
+            pending_lookup_seconds=pending.lookup_seconds,**pending_cleanup)
         # Normal outputs are aggregate-only. Owner/title training manifests remain in DB.
         from .progress import labeling_status,labeling_metrics
         def labeling_output(value):

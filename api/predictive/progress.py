@@ -45,6 +45,9 @@ METRICS.update({'successes','abstentions','input_tokens','output_tokens','total_
 METRICS.update({'selected','assessed','reviews','failures','skipped','unprocessed',
                 'cumulative_requests','cumulative_cost_usd','budget_usd','request_limit'})
 METRICS.update({'cached_input_tokens','cumulative_input_tokens','cumulative_output_tokens','cumulative_total_tokens'})
+METRICS.update({'published_reused','pending_reused','durably_persisted','published_invalid','published_incompatible',
+                'pending_invalid','pending_incompatible','pending_lookup_seconds','persistence_seconds',
+                'pending_retained','pending_backup_covered','pending_obsolete','pending_invalid_removed','pending_cleanup_seconds'})
 
 
 def labeling_status(value):

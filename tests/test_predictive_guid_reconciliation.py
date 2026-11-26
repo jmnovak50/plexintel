@@ -91,7 +91,7 @@ def test_guid_only_source_repair_reuses_verified_vector_without_encoder_call(rem
     current = refresh_vector(spec, 'media_text', '6344', corrected,
                              media_text(corrected['metadata']), old, encoder, stats)
     encoder.embed.assert_not_called()
-    assert stats == {'reused': 1}
+    assert stats == {'reused': 1, 'published_reused': 1}
     np.testing.assert_array_equal(current['embedding'], previous['embedding'])
     assert current['input_hash'] == previous['input_hash']
     assert current['vector_sha256'] == previous['vector_sha256']

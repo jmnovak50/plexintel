@@ -173,7 +173,8 @@ def test_preparation_propagates_policy_without_changing_feature_contract(monkeyp
     monkeypatch.setattr(prepare,'training_rows',training)
     encoder=Mock(identity=inputs['contract']['encoder']);plex=Mock();plex.catalog.return_value=[]
     policy={'training.engagement_threshold':.7,'training.negative_engagement_threshold':.4}
-    result=prepare.prepare(Mock(),dict(media=[],events=[],feedback=[],as_of=NOW.isoformat()),plex,encoder,{},policy=policy)
+    pending=Mock();pending.population.return_value=0
+    result=prepare.prepare(Mock(),dict(media=[],events=[],feedback=[],as_of=NOW.isoformat()),plex,encoder,{},policy=policy,pending=pending)
     assert received[0]['label_thresholds']==result[-1]['label_thresholds']==engagement_thresholds(.7,.4)
     baseline=specification(encoder.identity)
     baseline.update(identity_policy=IDENTITY_POLICY,supervision_policy=SUPERVISION_POLICY)

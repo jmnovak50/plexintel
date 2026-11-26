@@ -37,8 +37,18 @@ def item_line(value):
     if op=='quality_warning':return '⚠️ '+str(value['message'])
     if op=='evaluation':return completion_summary('train_model',dict(evaluation=value['evaluation']))
     if op=='embedding':return '   🎬 Embedding '+title(value)
-    if op=='embedded':return '✅ Embedded '+title(value)
-    if op=='reused':return '   🎬 '+title(value)+' — cached embedding reused'
+    if op=='inference_completed':return '   🎬 Encoder completed '+title(value)+' — awaiting durable persistence'
+    if op=='embedded':return '✅ Embedded '+title(value)+(' — durably persisted' if value.get('durably_persisted') else '')
+    if op=='reused':return '   🎬 '+title(value)+(' — published embedding reused' if value.get('cache_source')=='published' else ' — cached embedding reused')
+    if op=='pending_reused':return '   🎬 '+title(value)+' — durable pending embedding reused'
+    if op=='reuse_rejected':return '   ⚠️ '+title(value)+' — '+str(value.get('cache_source','Recorded'))+' reuse candidate '+str(value.get('reason','rejected'))
+    if op=='persistence_failed':return '❌ Encoder completed but durable persistence failed: '+title(value)+' — '+str(value.get('error_type','Error'))
+    if op=='pending_reconciled':
+        return ('📦 Pending inference reconciled after publication: '
+            f'{scalar(value["pending_backup_covered"])} covered by verified last-good backup; '
+            f'{scalar(value["pending_obsolete"])} obsolete inputs and {scalar(value.get("pending_invalid_removed",0))} invalid records removed; '
+            f'{scalar(value["pending_retained"])} retained '
+            f'({value["pending_cleanup_seconds"]:.3f}s).')
     if op=='embedding_failed':return '❌ Embedding failed: '+title(value)+' — '+str(value.get('error_type','Error'))
     if op=='scoring_user':
         return f'\n📊 Fetching unwatched media for {user}...\n🔍 {scalar(value.get("candidates","Unknown"))} eligible media items after filtering.\n🔮 Scoring predictions...'
@@ -116,6 +126,9 @@ def stage_line(value):
     if status=='failed':return '❌ '+name+' failed.'
     if status in ('skipped','not_recorded','cancelled'):return '⏩ '+name+': '+status.replace('_',' ')+'.'
     if key=='media_text' and status=='success' and 'reused' in metrics and metrics.get('inferred',0)==0 and metrics.get('completed')==metrics['reused']:
+        if metrics.get('pending_reused'):
+            return (f'✅ Media embeddings ready: {scalar(metrics.get("published_reused",0))} published vectors and '
+                f'{scalar(metrics["pending_reused"])} durable pending vectors reused. No new embedding requests were needed.')
         return f'✅ Media embeddings unchanged: {scalar(metrics["reused"])} cached vectors reused. No new embedding requests were needed.'
     if status=='started' and not any(metrics.get(k) for k in ('completed','users','predictions')):
         return {'source_sync':'🔄 Synchronizing the library...', 'media_text':'🧠 Checking media embeddings...',
@@ -123,7 +136,10 @@ def stage_line(value):
                 'training_data':'📦 Preparing training data...', 'train_model':'📥 Training and validating the model...',
                 'score_model':'🔮 Scoring recommendations...', 'publication':'📦 Publishing completed output...',
                 'verification':'🔍 Verifying publication...'}.get(key,'🔄 '+name+'...')
-    labels={'completed':'Processed','expected':'Total','reused':'Reused','inferred':'Embedded','users':'Users',
+    labels={'completed':'Processed','expected':'Total','reused':'Reused','inferred':'Encoder completed','users':'Users',
+            'published_reused':'Published reuse','pending_reused':'Durable pending reuse','durably_persisted':'Durably persisted',
+            'pending_retained':'Pending vectors retained','persistence_seconds':'Persistence seconds',
+            'pending_lookup_seconds':'Pending lookup seconds',
             'predictions':'Predictions','rows':'Training rows','contexts':'SHAP contexts','contributions':'SHAP contributions',
             'quality_passed':'Statistical checks satisfied','quality_warning_count':'Statistical warnings (non-blocking)',
             'chronological_balanced_accuracy':'Chronological balanced accuracy',

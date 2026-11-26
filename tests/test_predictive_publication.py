@@ -51,6 +51,7 @@ def db():
             assert context_ddl
             cur.execute(context_ddl.group())
             cur.execute(Path('api/db/migrations/optional/simple_predictor/001_public_provenance.sql').read_text())
+            cur.execute(Path('api/db/migrations/optional/simple_predictor/002_pending_inference.sql').read_text())
             cur.execute('SELECT to_regnamespace(%s)',('embedding_v2',));assert cur.fetchone()[0] is None
         conn.commit();yield conn
     finally:

@@ -1,6 +1,6 @@
 """Connection-private preparation followed by one public-table transaction.
 
-No permanent staging populations or activation records. Readers keep seeing the
+No permanent run snapshots or activation records. Readers keep seeing the
 last committed recommendations throughout fitting and staging.
 """
 from contextlib import contextmanager
@@ -19,6 +19,7 @@ from .contracts import ContractError,fingerprint
 from .prepare import TABLES
 from .source import read_snapshot
 from .recovery import iter_associations
+from .pending import reconcile
 
 PUBLISHED=('media_embeddings','watch_embeddings','user_embeddings','training_data','recommendations',
            'shap_impact','shap_dimension_stats_current','shap_prediction_context','embedding_feature_config')
@@ -265,7 +266,7 @@ def restore_last_good(conn,directory):
         return dict(verified=True,verification_only=True,counts=counts,model_sha256=config['model_sha256'])
 
 
-def publish(conn,config,expected_config,expected_source,*,backup_directory,failpoint=lambda stage:None):
+def publish(conn,config,expected_config,expected_source,*,backup_directory,failpoint=lambda stage:None,pending_metrics=None):
     expected=verify(conn,config,prepared=True)
     conn.commit()
     try:
@@ -279,6 +280,7 @@ def publish(conn,config,expected_config,expected_source,*,backup_directory,failp
             if source_signature(conn)!=expected_source:raise ContractError('Source data changed during preparation')
             if expected_config:backup(conn,backup_directory)
             failpoint('backed_up')
+            cleanup=reconcile(conn,backup_verified=bool(expected_config and expected_config.get('architecture')=='public-text-predictor/1.0'))
             for table in PUBLISHED:
                 if table=='embedding_feature_config':continue
                 if table in {value[0] for value in TABLES.values()}:
@@ -299,6 +301,7 @@ def publish(conn,config,expected_config,expected_source,*,backup_directory,failp
         try:conn.commit()
         except (OperationalError,InterfaceError):
             raise ContractError('Publication commit outcome is uncertain; run read-only verify before retrying') from None
+        if pending_metrics is not None:pending_metrics.update(cleanup)
     except BaseException:
         try:conn.rollback()
         except (OperationalError,InterfaceError):pass

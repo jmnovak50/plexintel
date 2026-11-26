@@ -51,7 +51,8 @@ that a capacity problem will clear by itself. Manual executions have no automati
 retry queued; scheduled executions retain their existing limits and backoff.
 No retry rules or database limits are changed by this reporting correction.
 
-New embeddings remain in memory and temporary tables until atomic publication.
-After a pre-publication failure, a normal execution can reuse compatible published
-vectors, but it must request unpublished vectors again. This does not imply
-checkpoint recovery or a separate persistent embedding cache.
+Public embeddings remain unchanged until atomic publication. Newly inferred
+media/watch vectors are committed to the compact pending inference store, so a
+later execution can reuse them after a pre-publication failure. See
+`durable-embedding-inference.md` for compatibility, retention and backup coverage.
+This is vector reuse, not stage checkpoint recovery.
